@@ -661,6 +661,97 @@ async fn proppatch_favorite_is_readable_from_propfind() {
 }
 
 #[tokio::test]
+async fn report_filter_files_lists_favorites_in_scope_recursively() {
+    let (app, _temp, password) = app_with_temp_root().await;
+
+    for uri in [
+        "/remote.php/dav/projects",
+        "/remote.php/dav/projects/nested",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::from_bytes(b"MKCOL").unwrap())
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    for (uri, body) in [
+        ("/remote.php/dav/root-favorite.txt", "root favorite"),
+        ("/remote.php/dav/projects/plain.txt", "plain"),
+        ("/remote.php/dav/projects/favorite.txt", "favorite"),
+        (
+            "/remote.php/dav/projects/nested/starred.md",
+            "nested favorite",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    for uri in [
+        "/remote.php/dav/root-favorite.txt",
+        "/remote.php/dav/projects/favorite.txt",
+        "/remote.php/dav/projects/nested/starred.md",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body(Body::from(proppatch_favorite_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/projects")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(filter_files_favorites_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/projects/favorite.txt"));
+    assert!(body.contains("/remote.php/dav/projects/nested/starred.md"));
+    assert!(!body.contains("/remote.php/dav/projects/plain.txt"));
+    assert!(!body.contains("/remote.php/dav/root-favorite.txt"));
+    assert!(body.contains("<oc:favorite>1</oc:favorite>"));
+}
+
+#[tokio::test]
 async fn chunking_v2_mkcol_put_move_merges_chunks() {
     let (app, _temp, password, state) = app_with_state().await;
     let upload_base = "/remote.php/dav/uploads/gono/upload-session-1";
@@ -877,4 +968,19 @@ fn sync_collection_body(sync_token: &str) -> String {
   </d:prop>
 </d:sync-collection>"#
     )
+}
+
+fn filter_files_favorites_body() -> &'static str {
+    r#"<?xml version="1.0"?>
+<oc:filter-files xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+  <oc:filter-rules>
+    <oc:favorite>1</oc:favorite>
+  </oc:filter-rules>
+  <d:prop>
+    <d:getetag />
+    <oc:fileid />
+    <oc:favorite />
+    <nc:has-preview />
+  </d:prop>
+</oc:filter-files>"#
 }
