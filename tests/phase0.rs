@@ -91,6 +91,66 @@ async fn capabilities_are_public() {
 }
 
 #[tokio::test]
+async fn metrics_require_basic_auth_and_are_prometheus_shaped() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/metrics.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_response.status(), StatusCode::CREATED);
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/metrics")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/plain"));
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("# TYPE gono_one_sync_token gauge"));
+    assert!(body.contains("gono_one_file_records_total 1\n"));
+    assert!(body.contains("gono_one_change_log_entries_total 1\n"));
+    assert!(body.contains("gono_one_upload_sessions_total 0\n"));
+    assert!(body.contains("gono_one_sync_token 1\n"));
+    assert!(body.contains("gono_one_storage_files_available_bytes "));
+}
+
+#[tokio::test]
 async fn webdav_requires_basic_auth() {
     let (app, _temp, _password) = app_with_temp_root().await;
     let response = app

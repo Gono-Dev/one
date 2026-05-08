@@ -49,6 +49,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(nc_proto::capabilities::handler),
         )
         .route(
+            "/metrics",
+            get(nc_proto::metrics::handler).route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_basic_auth,
+            )),
+        )
+        .route(
             "/.well-known/caldav",
             get(|| async { Redirect::permanent("/remote.php/dav") }),
         )
@@ -58,6 +65,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .nest_service("/remote.php/dav", dav_service.clone())
         .nest_service("/remote.php/webdav", dav_service)
+        .with_state(state)
 }
 
 async fn depth_guard(request: Request<Body>, next: Next) -> Response {
