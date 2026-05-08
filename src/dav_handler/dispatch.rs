@@ -51,6 +51,11 @@ impl NcDavService {
             .get("destination")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let source_record = if matches!(method.as_str(), "DELETE" | "MOVE") {
+            self.record_for_request_path(&request_path).await.ok()
+        } else {
+            None
+        };
         if matches!(method.as_str(), "COPY" | "MOVE") {
             if let Some(destination) = destination.as_deref() {
                 match normalize_destination_header(destination) {
@@ -77,24 +82,52 @@ impl NcDavService {
             .await
             .map(Body::new);
 
-        self.add_nextcloud_write_headers(response, &method, &request_path, destination)
+        self.finalize_webdav_response(response, &method, &request_path, destination, source_record)
             .await
     }
 
-    async fn add_nextcloud_write_headers(
+    async fn finalize_webdav_response(
         &self,
         mut response: Response<Body>,
         method: &Method,
         request_path: &str,
         destination: Option<String>,
+        source_record: Option<db::FileRecord>,
     ) -> Response<Body> {
         if !response.status().is_success() {
             return response;
         }
+        let status = response.status();
+
+        if method == Method::DELETE {
+            let source_rel = match parse_rel_path(request_path) {
+                Ok(path) => path,
+                Err(err) => {
+                    error!(?err, "failed to resolve DELETE source path");
+                    return metadata_error_response();
+                }
+            };
+            let Some(source_record) = source_record else {
+                error!("missing DELETE source metadata after successful delete");
+                return metadata_error_response();
+            };
+            return match self
+                .record_change(source_record.id, &source_rel, "delete")
+                .await
+            {
+                Ok(_) => response,
+                Err(response) => response,
+            };
+        }
 
         let target_rel = match write_target_rel_path(method, request_path, destination.as_deref()) {
             Ok(Some(path)) => path,
-            Ok(None) => return response,
+            Ok(None) => {
+                if method.as_str() == "PROPPATCH" {
+                    return self.record_proppatch(response, request_path).await;
+                }
+                return response;
+            }
             Err(err) => {
                 error!(?err, "failed to resolve WebDAV write target");
                 return metadata_error_response();
@@ -128,12 +161,103 @@ impl NcDavService {
             }
         };
 
+        if method.as_str() == "MOVE" {
+            let source_rel = match parse_rel_path(request_path) {
+                Ok(path) => path,
+                Err(err) => {
+                    error!(?err, "failed to resolve MOVE source path");
+                    return metadata_error_response();
+                }
+            };
+            let Some(source_record) = source_record else {
+                error!("missing MOVE source metadata after successful move");
+                return metadata_error_response();
+            };
+            if let Err(response) = self
+                .record_change(source_record.id, &source_rel, "delete")
+                .await
+            {
+                return response;
+            }
+        }
+
+        let operation = match method.as_str() {
+            "PUT" if status == StatusCode::CREATED => "create",
+            "PUT" => "modify",
+            "MKCOL" | "COPY" | "MOVE" => "create",
+            _ => "modify",
+        };
+        if let Err(response) = self.record_change(record.id, &target_rel, operation).await {
+            return response;
+        }
+
         let headers = response.headers_mut();
         insert_header(headers, OC_ETAG, &record.etag);
         insert_header(headers, OC_FILEID, &record.oc_file_id);
         insert_header(headers, X_NC_OWNER_ID, &self.state.owner);
         insert_header(headers, X_NC_PERMISSIONS, "RGDNVW");
         response
+    }
+
+    async fn record_proppatch(
+        &self,
+        response: Response<Body>,
+        request_path: &str,
+    ) -> Response<Body> {
+        let record = match self.record_for_request_path(request_path).await {
+            Ok(record) => record,
+            Err(err) => {
+                error!(?err, "failed to resolve PROPPATCH target metadata");
+                return metadata_error_response();
+            }
+        };
+        let rel_path = match parse_rel_path(request_path) {
+            Ok(path) => path,
+            Err(err) => {
+                error!(?err, "failed to resolve PROPPATCH target path");
+                return metadata_error_response();
+            }
+        };
+        match self.record_change(record.id, &rel_path, "modify").await {
+            Ok(_) => response,
+            Err(response) => response,
+        }
+    }
+
+    async fn record_for_request_path(&self, request_path: &str) -> anyhow::Result<db::FileRecord> {
+        let rel_path = parse_rel_path(request_path)?;
+        let abs_path = storage::safe_existing_path(&self.state.files_root, &rel_path)?;
+        db::ensure_file_record(
+            &self.state.db,
+            db::FileRecordInput {
+                owner: &self.state.owner,
+                rel_path: &rel_path,
+                abs_path: &abs_path,
+                instance_id: &self.state.instance_id,
+                xattr_ns: &self.state.xattr_ns,
+            },
+        )
+        .await
+    }
+
+    async fn record_change(
+        &self,
+        file_id: i64,
+        rel_path: &Path,
+        operation: &str,
+    ) -> Result<i64, Response<Body>> {
+        db::record_change(
+            &self.state.db,
+            &self.state.owner,
+            file_id,
+            rel_path,
+            operation,
+        )
+        .await
+        .map_err(|err| {
+            error!(?err, "failed to record WebDAV change");
+            metadata_error_response()
+        })
     }
 }
 
@@ -174,6 +298,7 @@ fn write_target_rel_path(
     let path = match method.as_str() {
         "PUT" | "MKCOL" => Some(request_path),
         "COPY" | "MOVE" => destination,
+        "PROPPATCH" => Some(request_path),
         _ => None,
     };
 

@@ -232,6 +232,103 @@ pub async fn delete_file_records(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeLogEntry {
+    pub file_id: i64,
+    pub rel_path: String,
+    pub operation: String,
+    pub sync_token: i64,
+}
+
+pub async fn record_change(
+    pool: &SqlitePool,
+    owner: &str,
+    file_id: i64,
+    rel_path: &Path,
+    operation: &str,
+) -> anyhow::Result<i64> {
+    let rel_path = storage::rel_path_string(rel_path)?;
+    let now = unix_timestamp();
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin record_change transaction")?;
+
+    let (token,): (i64,) = sqlx::query_as(
+        r#"
+        INSERT INTO sync_tokens(owner, token) VALUES(?1, 1)
+        ON CONFLICT(owner) DO UPDATE SET token = token + 1
+        RETURNING token
+        "#,
+    )
+    .bind(owner)
+    .fetch_one(&mut *tx)
+    .await
+    .context("allocate sync token")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO change_log(owner, file_id, rel_path, operation, sync_token, changed_at)
+        VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+        "#,
+    )
+    .bind(owner)
+    .bind(file_id)
+    .bind(rel_path)
+    .bind(operation)
+    .bind(token)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .context("insert change_log row")?;
+
+    tx.commit()
+        .await
+        .context("commit record_change transaction")?;
+    Ok(token)
+}
+
+pub async fn current_sync_token(pool: &SqlitePool, owner: &str) -> anyhow::Result<i64> {
+    let token = sqlx::query("SELECT token FROM sync_tokens WHERE owner = ?1")
+        .bind(owner)
+        .fetch_optional(pool)
+        .await
+        .context("load current sync token")?
+        .map(|row| row.try_get::<i64, _>("token"))
+        .transpose()?
+        .unwrap_or(0);
+    Ok(token)
+}
+
+pub async fn list_change_log(
+    pool: &SqlitePool,
+    owner: &str,
+) -> anyhow::Result<Vec<ChangeLogEntry>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT file_id, rel_path, operation, sync_token
+        FROM change_log
+        WHERE owner = ?1
+        ORDER BY sync_token ASC
+        "#,
+    )
+    .bind(owner)
+    .fetch_all(pool)
+    .await
+    .context("list change_log rows")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ChangeLogEntry {
+                file_id: row.try_get("file_id")?,
+                rel_path: row.try_get("rel_path")?,
+                operation: row.try_get("operation")?,
+                sync_token: row.try_get("sync_token")?,
+            })
+        })
+        .collect()
+}
+
 async fn upsert_file_record(
     pool: &SqlitePool,
     input: FileRecordInput<'_>,

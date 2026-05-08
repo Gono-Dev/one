@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::Path};
 
 use anyhow::{bail, Context};
 use axum_server::tls_rustls::RustlsConfig;
-use nc_dav::{build_router, AppState, Config};
+use gono_one::{build_router, AppState, Config};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -48,13 +48,13 @@ async fn main() -> anyhow::Result<()> {
     let app = build_router(initialized.state);
 
     if let Some(tls) = tls {
-        tracing::info!("nc-dav listening on https://{addr}");
+        tracing::info!("gono-one listening on https://{addr}");
         axum_server::bind_rustls(addr, tls)
             .serve(app.into_make_service())
             .await
             .context("serve HTTPS")?;
     } else {
-        tracing::info!("nc-dav listening on http://{addr}");
+        tracing::info!("gono-one listening on http://{addr}");
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await.context("serve HTTP")?;
     }

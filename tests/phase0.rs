@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use axum::{
     body::{to_bytes, Body},
     http::{header, Method, Request, StatusCode},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use nc_dav::{build_router, db::BOOTSTRAP_USER, AppState, Config};
+use gono_one::{build_router, db, db::BOOTSTRAP_USER, AppState, Config};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -12,6 +14,11 @@ fn auth_header(password: &str) -> String {
 }
 
 async fn app_with_temp_root() -> (axum::Router, TempDir, String) {
+    let (app, temp, password, _state) = app_with_state().await;
+    (app, temp, password)
+}
+
+async fn app_with_state() -> (axum::Router, TempDir, String, Arc<AppState>) {
     let temp = TempDir::new().expect("tempdir");
     let config = test_config(&temp);
     let initialized = AppState::initialize(config)
@@ -22,13 +29,18 @@ async fn app_with_temp_root() -> (axum::Router, TempDir, String) {
         .bootstrap
         .generated_password
         .expect("first bootstrap generates password");
-    (build_router(initialized.state), temp, password)
+    let state = initialized.state;
+    (build_router(state.clone()), temp, password, state)
 }
 
 fn test_config(temp: &TempDir) -> Config {
     let mut config = Config::dev_default();
     config.storage.data_dir = temp.path().join("data").to_string_lossy().into_owned();
-    config.db.path = temp.path().join("nc-dav.db").to_string_lossy().into_owned();
+    config.db.path = temp
+        .path()
+        .join("gono-one.db")
+        .to_string_lossy()
+        .into_owned();
     config.server.cert_file = temp.path().join("cert.pem").to_string_lossy().into_owned();
     config.server.key_file = temp.path().join("key.pem").to_string_lossy().into_owned();
     config
@@ -367,6 +379,136 @@ async fn symlink_parent_escape_is_rejected_for_put() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(!outside.join("escape.txt").exists());
+}
+
+#[tokio::test]
+async fn put_writes_monotonic_sync_tokens() {
+    let (app, _temp, password, state) = app_with_state().await;
+
+    for body in ["first", "second"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/remote.php/dav/tokened.txt")
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    let token = db::current_sync_token(&state.db, BOOTSTRAP_USER)
+        .await
+        .expect("sync token");
+    assert_eq!(token, 2);
+
+    let changes = db::list_change_log(&state.db, BOOTSTRAP_USER)
+        .await
+        .expect("change log");
+    let operations: Vec<_> = changes
+        .iter()
+        .map(|entry| {
+            (
+                entry.rel_path.as_str(),
+                entry.operation.as_str(),
+                entry.sync_token,
+            )
+        })
+        .collect();
+    assert_eq!(
+        operations,
+        vec![("tokened.txt", "create", 1), ("tokened.txt", "modify", 2)]
+    );
+}
+
+#[tokio::test]
+async fn copy_move_delete_write_expected_change_log_rows() {
+    let (app, _temp, password, state) = app_with_state().await;
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/journal-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let copy = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/journal-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/journal-copy.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(copy.status().is_success());
+
+    let moved = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MOVE").unwrap())
+                .uri("/remote.php/dav/journal-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/journal-moved.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(moved.status().is_success());
+
+    let delete = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/remote.php/dav/journal-copy.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete.status().is_success());
+
+    let changes = db::list_change_log(&state.db, BOOTSTRAP_USER)
+        .await
+        .expect("change log");
+    let operations: Vec<_> = changes
+        .iter()
+        .map(|entry| {
+            (
+                entry.rel_path.as_str(),
+                entry.operation.as_str(),
+                entry.sync_token,
+            )
+        })
+        .collect();
+    assert_eq!(
+        operations,
+        vec![
+            ("journal-source.txt", "create", 1),
+            ("journal-copy.txt", "create", 2),
+            ("journal-source.txt", "delete", 3),
+            ("journal-moved.txt", "create", 4),
+            ("journal-copy.txt", "delete", 5),
+        ]
+    );
 }
 
 fn propfind_body() -> &'static str {

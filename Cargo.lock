@@ -699,6 +699,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "gono-one"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "axum",
+ "axum-server",
+ "base64",
+ "bytes",
+ "chrono",
+ "dav-server",
+ "futures-util",
+ "hex",
+ "http",
+ "path-clean",
+ "quick-xml",
+ "rand",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "xattr",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1229,44 +1267,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nc-dav"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "axum",
- "axum-server",
- "base64",
- "bytes",
- "chrono",
- "dav-server",
- "futures-util",
- "hex",
- "http",
- "path-clean",
- "quick-xml",
- "rand",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-stream",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "xattr",
 ]
 
 [[package]]
