@@ -348,6 +348,154 @@ pub async fn list_change_log_range(
         .collect()
 }
 
+const UPLOAD_SESSION_TTL_SECS: i64 = 24 * 60 * 60;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadSession {
+    pub upload_id: String,
+    pub owner: String,
+    pub target_path: String,
+    pub total_size: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub expires_at: i64,
+}
+
+pub async fn upsert_upload_session(
+    pool: &SqlitePool,
+    upload_id: &str,
+    owner: &str,
+    target_path: &Path,
+    total_size: i64,
+) -> anyhow::Result<UploadSession> {
+    let target_path = storage::rel_path_string(target_path)?;
+    let now = unix_timestamp();
+    let expires_at = now + UPLOAD_SESSION_TTL_SECS;
+
+    sqlx::query(
+        r#"
+        INSERT INTO upload_sessions(upload_id, owner, target_path, total_size, created_at, updated_at, expires_at)
+        VALUES(?1, ?2, ?3, ?4, ?5, ?5, ?6)
+        ON CONFLICT(upload_id) DO UPDATE SET
+            owner = excluded.owner,
+            target_path = excluded.target_path,
+            total_size = excluded.total_size,
+            updated_at = excluded.updated_at,
+            expires_at = excluded.expires_at
+        "#,
+    )
+    .bind(upload_id)
+    .bind(owner)
+    .bind(&target_path)
+    .bind(total_size)
+    .bind(now)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .context("upsert upload session")?;
+
+    load_upload_session(pool, owner, upload_id)
+        .await?
+        .context("upload session missing after upsert")
+}
+
+pub async fn load_upload_session(
+    pool: &SqlitePool,
+    owner: &str,
+    upload_id: &str,
+) -> anyhow::Result<Option<UploadSession>> {
+    let row = sqlx::query(
+        r#"
+        SELECT upload_id, owner, target_path, total_size, created_at, updated_at, expires_at
+        FROM upload_sessions
+        WHERE owner = ?1 AND upload_id = ?2
+        "#,
+    )
+    .bind(owner)
+    .bind(upload_id)
+    .fetch_optional(pool)
+    .await
+    .context("load upload session")?;
+
+    row.map(upload_session_from_row).transpose()
+}
+
+pub async fn touch_upload_session(
+    pool: &SqlitePool,
+    owner: &str,
+    upload_id: &str,
+    total_size: Option<i64>,
+) -> anyhow::Result<()> {
+    let now = unix_timestamp();
+    let expires_at = now + UPLOAD_SESSION_TTL_SECS;
+
+    sqlx::query(
+        r#"
+        UPDATE upload_sessions
+        SET total_size = COALESCE(?1, total_size),
+            updated_at = ?2,
+            expires_at = ?3
+        WHERE owner = ?4 AND upload_id = ?5
+        "#,
+    )
+    .bind(total_size)
+    .bind(now)
+    .bind(expires_at)
+    .bind(owner)
+    .bind(upload_id)
+    .execute(pool)
+    .await
+    .context("touch upload session")?;
+
+    Ok(())
+}
+
+pub async fn delete_upload_session(
+    pool: &SqlitePool,
+    owner: &str,
+    upload_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM upload_sessions WHERE owner = ?1 AND upload_id = ?2")
+        .bind(owner)
+        .bind(upload_id)
+        .execute(pool)
+        .await
+        .context("delete upload session")?;
+    Ok(())
+}
+
+pub async fn list_expired_upload_sessions(
+    pool: &SqlitePool,
+    cutoff: i64,
+) -> anyhow::Result<Vec<UploadSession>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT upload_id, owner, target_path, total_size, created_at, updated_at, expires_at
+        FROM upload_sessions
+        WHERE expires_at < ?1
+        ORDER BY expires_at ASC
+        "#,
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await
+    .context("list expired upload sessions")?;
+
+    rows.into_iter().map(upload_session_from_row).collect()
+}
+
+fn upload_session_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<UploadSession> {
+    Ok(UploadSession {
+        upload_id: row.try_get("upload_id")?,
+        owner: row.try_get("owner")?,
+        target_path: row.try_get("target_path")?,
+        total_size: row.try_get("total_size")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        expires_at: row.try_get("expires_at")?,
+    })
+}
+
 async fn upsert_file_record(
     pool: &SqlitePool,
     input: FileRecordInput<'_>,

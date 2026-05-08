@@ -36,6 +36,8 @@ rand = "0.8"
 base64 = "0.22"
 futures-util = "0.3"
 http = "1"
+filetime = "0.2"
+fs2 = "0.4"
 
 path-clean = "1.0"
 argon2 = "0.5"

@@ -15,7 +15,13 @@ use futures_util::future::BoxFuture;
 use tower::Service;
 use tracing::error;
 
-use crate::{auth::Principal, dav_handler::report, db, state::AppState, storage};
+use crate::{
+    auth::Principal,
+    dav_handler::{chunked_upload, report},
+    db,
+    state::AppState,
+    storage,
+};
 
 const OC_ETAG: HeaderName = HeaderName::from_static("oc-etag");
 const OC_FILEID: HeaderName = HeaderName::from_static("oc-fileid");
@@ -37,8 +43,8 @@ impl NcDavService {
         match request.method().as_str() {
             "REPORT" => report::handle(self.state.clone(), request).await,
             "SEARCH" => extension_placeholder(request.method().as_str()),
-            "MKCOL" | "PUT" | "MOVE" if is_chunking_path(request.uri().path()) => {
-                extension_placeholder("chunking-v2")
+            "MKCOL" | "PUT" | "MOVE" | "DELETE" if is_chunking_path(request.uri().path()) => {
+                chunked_upload::handle(self.state.clone(), request).await
             }
             _ => self.forward_to_dav_server(request).await,
         }
@@ -306,7 +312,7 @@ fn write_target_rel_path(
     path.map(parse_rel_path).transpose()
 }
 
-fn parse_rel_path(path_or_uri: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn parse_rel_path(path_or_uri: &str) -> anyhow::Result<PathBuf> {
     let path = if path_or_uri.starts_with("http://") || path_or_uri.starts_with("https://") {
         path_or_uri.parse::<Uri>()?.path().to_owned()
     } else {

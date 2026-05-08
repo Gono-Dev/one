@@ -660,6 +660,185 @@ async fn proppatch_favorite_is_readable_from_propfind() {
     assert!(body.contains("<oc:favorite>1</oc:favorite>"));
 }
 
+#[tokio::test]
+async fn chunking_v2_mkcol_put_move_merges_chunks() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let upload_base = "/remote.php/dav/uploads/gono/upload-session-1";
+    let destination = "/remote.php/dav/chunked.txt";
+
+    let mkcol = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri(upload_base)
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", destination)
+                .header("OC-Total-Length", "11")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mkcol.status(), StatusCode::CREATED);
+
+    for (chunk, body) in [("2", "world"), ("1", "hello ")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("{upload_base}/{chunk}"))
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .header("Destination", destination)
+                    .header("OC-Total-Length", "11")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let moved = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MOVE").unwrap())
+                .uri(format!("{upload_base}/.file"))
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", destination)
+                .header("X-OC-MTime", "1700000000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved.status(), StatusCode::CREATED);
+    assert!(moved.headers().contains_key("oc-fileid"));
+    assert_eq!(moved.headers().get("x-oc-mtime").unwrap(), "accepted");
+    assert!(!state
+        .uploads_root
+        .join("gono")
+        .join("upload-session-1")
+        .exists());
+
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(destination)
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"hello world");
+
+    let changes = db::list_change_log(&state.db, BOOTSTRAP_USER)
+        .await
+        .expect("change log");
+    assert!(changes
+        .iter()
+        .any(|entry| entry.rel_path == "chunked.txt" && entry.operation == "create"));
+}
+
+#[tokio::test]
+async fn chunking_v2_rejects_invalid_chunk_names() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let upload_base = "/remote.php/dav/uploads/gono/upload-session-2";
+    let destination = "/remote.php/dav/chunked-invalid.txt";
+
+    let mkcol = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri(upload_base)
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", destination)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mkcol.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("{upload_base}/not-a-number"))
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", destination)
+                .body(Body::from("bad"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn chunking_v2_rejects_destination_mismatch() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let upload_base = "/remote.php/dav/uploads/gono/upload-session-3";
+
+    let mkcol = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri(upload_base)
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/original.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mkcol.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("{upload_base}/1"))
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/other.txt")
+                .body(Body::from("bad"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn chunking_v2_rejects_impossible_total_length() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri("/remote.php/dav/uploads/gono/upload-too-large")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/huge.bin")
+                .header("OC-Total-Length", i64::MAX.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+}
+
 fn propfind_body() -> &'static str {
     r#"<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
