@@ -1,6 +1,8 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::Path};
 
-use nc_dav::{build_router, AppState};
+use anyhow::{bail, Context};
+use axum_server::tls_rustls::RustlsConfig;
+use nc_dav::{build_router, AppState, Config};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -10,16 +12,52 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let data_dir = std::env::var("NC_DAV_DATA_DIR").unwrap_or_else(|_| "data/files".to_owned());
-    let bind = std::env::var("NC_DAV_BIND").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
-    let addr: SocketAddr = bind.parse()?;
-    let state = Arc::new(AppState::phase0(data_dir)?);
-    let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let config_path = std::env::var("NC_DAV_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
+    let config = Config::load_or_dev_default(&config_path)?;
+    let addr: SocketAddr = config.server.bind.parse().context("parse server.bind")?;
+    let cert_file = config.server.cert_file.clone();
+    let key_file = config.server.key_file.clone();
 
-    tracing::info!("nc-dav phase0 listening on http://{addr}");
-    tracing::info!("phase0 Basic Auth user=gono password=app-password");
+    if !Path::new(&config_path).exists() {
+        tracing::warn!(
+            "config file {config_path} not found; using development defaults, see config.example.toml"
+        );
+    }
 
-    axum::serve(listener, app).await?;
+    let tls = if Path::new(&cert_file).exists() && Path::new(&key_file).exists() {
+        Some(
+            RustlsConfig::from_pem_file(&cert_file, &key_file)
+                .await
+                .with_context(|| format!("load TLS certificate {cert_file} and key {key_file}"))?,
+        )
+    } else if std::env::var("NC_DAV_INSECURE_HTTP").as_deref() == Ok("1") {
+        tracing::warn!("NC_DAV_INSECURE_HTTP=1 set; serving Basic Auth over plain HTTP");
+        None
+    } else {
+        bail!(
+            "TLS certificate or key missing: cert_file={cert_file}, key_file={key_file}. \
+             Create them or set NC_DAV_INSECURE_HTTP=1 for local-only smoke testing."
+        );
+    };
+
+    let initialized = AppState::initialize(config).await?;
+    if let Some(password) = &initialized.bootstrap.generated_password {
+        tracing::warn!("Generated app password for gono: {password}");
+    }
+
+    let app = build_router(initialized.state);
+
+    if let Some(tls) = tls {
+        tracing::info!("nc-dav listening on https://{addr}");
+        axum_server::bind_rustls(addr, tls)
+            .serve(app.into_make_service())
+            .await
+            .context("serve HTTPS")?;
+    } else {
+        tracing::info!("nc-dav listening on http://{addr}");
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await.context("serve HTTP")?;
+    }
+
     Ok(())
 }

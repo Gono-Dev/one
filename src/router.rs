@@ -25,7 +25,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let dav_handler = DavHandler::builder()
         .filesystem(Box::new(NcLocalFs::new(
             &state.files_root,
-            state.auth.username.clone(),
+            state.owner.clone(),
             state.instance_id.clone(),
         )))
         .locksystem(FakeLs::new())

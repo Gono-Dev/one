@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+use anyhow::{anyhow, Context};
+use argon2::{
+    password_hash::{PasswordHash, PasswordVerifier},
+    Argon2,
+};
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -11,12 +16,68 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use sqlx::{Row, SqlitePool};
+use tracing::error;
 
-use crate::state::AppState;
+use crate::{db::unix_timestamp, state::AppState};
 
 #[derive(Debug, Clone)]
 pub struct Principal {
     pub username: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteUserStore {
+    pool: SqlitePool,
+}
+
+impl SqliteUserStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn verify(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> anyhow::Result<Option<Principal>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT app_passwords.id, app_passwords.password_hash
+            FROM app_passwords
+            JOIN users ON users.username = app_passwords.username
+            WHERE users.username = ?1 AND users.enabled = 1
+            "#,
+        )
+        .bind(username)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("load app passwords for {username}"))?;
+
+        for row in rows {
+            let password_hash: String = row.try_get("password_hash")?;
+            let parsed_hash = PasswordHash::new(&password_hash)
+                .map_err(|err| anyhow!("parse password hash: {err}"))?;
+            if Argon2::default()
+                .verify_password(password.as_bytes(), &parsed_hash)
+                .is_ok()
+            {
+                let id: i64 = row.try_get("id")?;
+                sqlx::query("UPDATE app_passwords SET last_used_at = ?1 WHERE id = ?2")
+                    .bind(unix_timestamp())
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await
+                    .context("update app password last_used_at")?;
+
+                return Ok(Some(Principal {
+                    username: username.to_owned(),
+                }));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 pub async fn require_basic_auth(
@@ -24,14 +85,24 @@ pub async fn require_basic_auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    match parse_basic_auth(request.headers().get(AUTHORIZATION)) {
-        Some((username, password))
-            if username == state.auth.username && password == state.auth.password =>
-        {
-            request.extensions_mut().insert(Principal { username });
+    let Some((username, password)) = parse_basic_auth(request.headers().get(AUTHORIZATION)) else {
+        return unauthorized(&state.auth_realm);
+    };
+
+    match state.user_store.verify(&username, &password).await {
+        Ok(Some(principal)) => {
+            request.extensions_mut().insert(principal);
             next.run(request).await
         }
-        _ => unauthorized(&state.auth.realm),
+        Ok(None) => unauthorized(&state.auth_realm),
+        Err(err) => {
+            error!(?err, "Basic Auth verification failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Authentication backend error",
+            )
+                .into_response()
+        }
     }
 }
 
