@@ -511,6 +511,155 @@ async fn copy_move_delete_write_expected_change_log_rows() {
     );
 }
 
+#[tokio::test]
+async fn report_sync_collection_returns_changes_since_old_token() {
+    let (app, _temp, password, _state) = app_with_state().await;
+
+    for (name, body) in [("sync-a.txt", "a"), ("sync-b.txt", "b")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/remote.php/dav/{name}"))
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(sync_collection_body("1")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("<d:sync-token>2</d:sync-token>"));
+    assert!(body.contains("/remote.php/dav/sync-b.txt"));
+    assert!(!body.contains("/remote.php/dav/sync-a.txt"));
+    assert!(body.contains("<oc:fileid>"));
+    assert!(body.contains("HTTP/1.1 200 OK"));
+}
+
+#[tokio::test]
+async fn report_sync_collection_marks_deleted_paths_not_found() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/sync-delete.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("delete me"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+    let after_put = db::current_sync_token(&state.db, BOOTSTRAP_USER)
+        .await
+        .expect("token after put");
+
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/remote.php/dav/sync-delete.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(sync_collection_body(&after_put.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/sync-delete.txt"));
+    assert!(body.contains("HTTP/1.1 404 Not Found"));
+}
+
+#[tokio::test]
+async fn proppatch_favorite_is_readable_from_propfind() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/favorite.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("favorite"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                .uri("/remote.php/dav/favorite.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(proppatch_favorite_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(patch.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/favorite.txt")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("<oc:favorite>1</oc:favorite>"));
+}
+
 fn propfind_body() -> &'static str {
     r#"<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
@@ -523,4 +672,30 @@ fn propfind_body() -> &'static str {
     <nc:has-preview />
   </d:prop>
 </d:propfind>"#
+}
+
+fn proppatch_favorite_body() -> &'static str {
+    r#"<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:set>
+    <d:prop>
+      <oc:favorite>1</oc:favorite>
+    </d:prop>
+  </d:set>
+</d:propertyupdate>"#
+}
+
+fn sync_collection_body(sync_token: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
+<d:sync-collection xmlns:d="DAV:">
+  <d:sync-token>{sync_token}</d:sync-token>
+  <d:sync-level>1</d:sync-level>
+  <d:prop>
+    <d:getetag />
+    <oc:fileid xmlns:oc="http://owncloud.org/ns" />
+    <oc:favorite xmlns:oc="http://owncloud.org/ns" />
+  </d:prop>
+</d:sync-collection>"#
+    )
 }

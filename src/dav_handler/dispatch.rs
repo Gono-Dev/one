@@ -15,7 +15,7 @@ use futures_util::future::BoxFuture;
 use tower::Service;
 use tracing::error;
 
-use crate::{auth::Principal, db, state::AppState, storage};
+use crate::{auth::Principal, dav_handler::report, db, state::AppState, storage};
 
 const OC_ETAG: HeaderName = HeaderName::from_static("oc-etag");
 const OC_FILEID: HeaderName = HeaderName::from_static("oc-fileid");
@@ -35,7 +35,8 @@ impl NcDavService {
 
     async fn dispatch(self, request: Request<Body>) -> Response<Body> {
         match request.method().as_str() {
-            "REPORT" | "SEARCH" => extension_placeholder(request.method().as_str()),
+            "REPORT" => report::handle(self.state.clone(), request).await,
+            "SEARCH" => extension_placeholder(request.method().as_str()),
             "MKCOL" | "PUT" | "MOVE" if is_chunking_path(request.uri().path()) => {
                 extension_placeholder("chunking-v2")
             }

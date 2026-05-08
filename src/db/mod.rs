@@ -304,15 +304,34 @@ pub async fn list_change_log(
     pool: &SqlitePool,
     owner: &str,
 ) -> anyhow::Result<Vec<ChangeLogEntry>> {
+    list_change_log_since(pool, owner, 0).await
+}
+
+pub async fn list_change_log_since(
+    pool: &SqlitePool,
+    owner: &str,
+    since_token: i64,
+) -> anyhow::Result<Vec<ChangeLogEntry>> {
+    list_change_log_range(pool, owner, since_token, i64::MAX).await
+}
+
+pub async fn list_change_log_range(
+    pool: &SqlitePool,
+    owner: &str,
+    since_token: i64,
+    until_token: i64,
+) -> anyhow::Result<Vec<ChangeLogEntry>> {
     let rows = sqlx::query(
         r#"
         SELECT file_id, rel_path, operation, sync_token
         FROM change_log
-        WHERE owner = ?1
+        WHERE owner = ?1 AND sync_token > ?2 AND sync_token <= ?3
         ORDER BY sync_token ASC
         "#,
     )
     .bind(owner)
+    .bind(since_token)
+    .bind(until_token)
     .fetch_all(pool)
     .await
     .context("list change_log rows")?;
