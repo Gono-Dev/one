@@ -192,15 +192,30 @@ require_platform_commands() {
 }
 
 target_arch() {
-  case "$(uname -m)" in
+  local machine
+  machine="${GONO_ONE_ARCH:-$(uname -m)}"
+
+  case "${machine}" in
     x86_64|amd64)
       echo "x86_64"
       ;;
     aarch64|arm64)
       echo "aarch64"
       ;;
+    armv8l|armv7l|armv7|armv7hf|armhf)
+      if [[ "${PLATFORM}" == "macos" ]]; then
+        die "unsupported macOS ARM architecture: ${machine}. macOS ARM builds must be aarch64/arm64."
+      fi
+      echo "armv7"
+      ;;
+    armv6l|armv6)
+      if [[ "${PLATFORM}" == "macos" ]]; then
+        die "unsupported macOS ARM architecture: ${machine}. macOS ARM builds must be aarch64/arm64."
+      fi
+      echo "armv6"
+      ;;
     *)
-      die "unsupported architecture: $(uname -m)"
+      die "unsupported architecture: ${machine}. Supported: x86_64/amd64, aarch64/arm64, Linux armv7, Linux armv6"
       ;;
   esac
 }

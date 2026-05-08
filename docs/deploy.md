@@ -14,8 +14,8 @@ bash <(curl -sL https://run.gono.one)
 
 The installer:
 
-- detects macOS or Linux and downloads the matching `x86_64` or `aarch64` release artifact from
-  `https://run.gono.one/releases`;
+- detects macOS or Linux and downloads the matching `x86_64`, `aarch64`, or Linux 32-bit ARM
+  release artifact from `https://run.gono.one/releases`;
 - installs the binary at `/opt/gono-one/bin/gono-one`;
 - on Linux, creates the `gono-one` system user and installs `gono-one.service` through systemd;
 - on macOS, installs a LaunchDaemon named `one.gono.gono-one`;
@@ -50,8 +50,26 @@ For the default installer path, publish these files:
 ```text
 https://run.gono.one/releases/latest/gono-one-linux-x86_64.tar.gz
 https://run.gono.one/releases/latest/gono-one-linux-aarch64.tar.gz
+https://run.gono.one/releases/latest/gono-one-linux-armv7.tar.gz
+https://run.gono.one/releases/latest/gono-one-linux-armv6.tar.gz
 https://run.gono.one/releases/latest/gono-one-macos-x86_64.tar.gz
 https://run.gono.one/releases/latest/gono-one-macos-aarch64.tar.gz
+```
+
+ARM mapping:
+
+| Platform | `uname -m` examples | Artifact arch |
+|----------|---------------------|---------------|
+| macOS Apple Silicon | `arm64` | `macos-aarch64` |
+| Debian/Ubuntu/CentOS/RHEL ARM64 | `aarch64`, `arm64` | `linux-aarch64` |
+| Debian/Ubuntu 32-bit ARMv7 | `armv8l`, `armv7l`, `armhf` | `linux-armv7` |
+| Debian/Ubuntu 32-bit ARMv6 | `armv6l` | `linux-armv6` |
+
+Set `GONO_ONE_ARCH` to override architecture detection on unusual systems:
+
+```sh
+GONO_ONE_ARCH=aarch64 bash <(curl -sL https://run.gono.one)
+GONO_ONE_ARCH=armv7 bash <(curl -sL https://run.gono.one)
 ```
 
 Each archive must contain an executable named `gono-one`. You can also override the artifact URL:
