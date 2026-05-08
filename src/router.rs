@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use crate::{
     auth::require_basic_auth,
     dav_handler::{NcDavService, NcLocalFs},
-    nc_proto,
+    nextcloud_proto,
     state::AppState,
 };
 
@@ -43,14 +43,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .service(NcDavService::new(dav_handler, state.clone()));
 
     Router::new()
-        .route("/status.php", get(nc_proto::status::handler))
+        .route("/status.php", get(nextcloud_proto::status::handler))
         .route(
             "/ocs/v2.php/cloud/capabilities",
-            get(nc_proto::capabilities::handler),
+            get(nextcloud_proto::capabilities::handler),
         )
         .route(
             "/metrics",
-            get(nc_proto::metrics::handler).route_layer(middleware::from_fn_with_state(
+            get(nextcloud_proto::metrics::handler).route_layer(middleware::from_fn_with_state(
                 state.clone(),
                 require_basic_auth,
             )),

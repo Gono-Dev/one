@@ -2,7 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod dav_handler;
 pub mod db;
-pub mod nc_proto;
+pub mod nextcloud_proto;
 pub mod router;
 pub mod state;
 pub mod storage;
