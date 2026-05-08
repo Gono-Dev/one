@@ -506,10 +506,18 @@ async fn upsert_file_record(
     let etag = derive_etag(mtime_ns, file_size);
     let existing = load_by_rel_path(pool, input.owner, &rel_path).await?;
 
+    if !force_new_id {
+        if let Some(existing) = existing.as_ref() {
+            if existing.is_fresh(mtime_ns, file_size) {
+                return Ok(existing.to_file_record(input.instance_id));
+            }
+        }
+    }
+
     let id = if force_new_id {
         delete_by_rel_path(pool, input.owner, &rel_path).await?;
         insert_file_record(pool, input.owner, &rel_path).await?
-    } else if let Some(existing) = existing {
+    } else if let Some(existing) = existing.as_ref() {
         existing.id
     } else if let Some(xattr_id) = read_i64_xattr(input.abs_path, input.xattr_ns, "fileid")? {
         attach_xattr_file_id(pool, input.owner, &rel_path, xattr_id).await?
@@ -517,8 +525,20 @@ async fn upsert_file_record(
         insert_file_record(pool, input.owner, &rel_path).await?
     };
 
-    let favorite = read_bool_xattr(input.abs_path, input.xattr_ns, "favorite")?.unwrap_or(false);
-    let permissions = read_i64_xattr(input.abs_path, input.xattr_ns, "perms")?.unwrap_or(0x3f);
+    let favorite = if force_new_id {
+        false
+    } else {
+        read_bool_xattr(input.abs_path, input.xattr_ns, "favorite")?
+            .or_else(|| existing.as_ref().map(|row| row.favorite))
+            .unwrap_or(false)
+    };
+    let permissions = if force_new_id {
+        0x3f
+    } else {
+        read_i64_xattr(input.abs_path, input.xattr_ns, "perms")?
+            .or_else(|| existing.as_ref().and_then(|row| row.permissions))
+            .unwrap_or(0x3f)
+    };
 
     write_xattr(input.abs_path, input.xattr_ns, "fileid", &id.to_string())?;
     write_xattr(input.abs_path, input.xattr_ns, "etag", &etag)?;
@@ -621,7 +641,7 @@ async fn load_by_rel_path(
 ) -> anyhow::Result<Option<FileRecordRow>> {
     let row = sqlx::query(
         r#"
-        SELECT id, permissions, favorite
+        SELECT id, etag, permissions, favorite, mtime_ns, file_size
         FROM file_ids
         WHERE owner = ?1 AND rel_path = ?2
         "#,
@@ -709,13 +729,44 @@ async fn attach_xattr_file_id(
 #[derive(Debug, Clone)]
 struct FileRecordRow {
     id: i64,
+    etag: Option<String>,
+    permissions: Option<i64>,
+    favorite: bool,
+    mtime_ns: Option<i64>,
+    file_size: Option<i64>,
 }
 
 impl FileRecordRow {
     fn try_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Self> {
         Ok(Self {
             id: row.try_get("id")?,
+            etag: row.try_get("etag")?,
+            permissions: row.try_get("permissions")?,
+            favorite: row.try_get::<i64, _>("favorite")? != 0,
+            mtime_ns: row.try_get("mtime_ns")?,
+            file_size: row.try_get("file_size")?,
         })
+    }
+
+    fn is_fresh(&self, mtime_ns: i64, file_size: i64) -> bool {
+        self.etag.is_some() && self.mtime_ns == Some(mtime_ns) && self.file_size == Some(file_size)
+    }
+
+    fn to_file_record(&self, instance_id: &str) -> FileRecord {
+        let mtime_ns = self.mtime_ns.unwrap_or_default();
+        let file_size = self.file_size.unwrap_or_default();
+        FileRecord {
+            id: self.id,
+            oc_file_id: format!("{}{}", self.id, instance_id),
+            etag: self
+                .etag
+                .clone()
+                .unwrap_or_else(|| derive_etag(mtime_ns, file_size)),
+            permissions: self.permissions.unwrap_or(0x3f),
+            favorite: self.favorite,
+            mtime_ns,
+            file_size,
+        }
     }
 }
 

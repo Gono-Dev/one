@@ -5,21 +5,24 @@ use std::{
 };
 
 use dav_server::{
+    davpath::DavPath,
     fs::{
         DavDirEntry, DavFile, DavFileSystem, DavMetaData, DavProp, FsError, FsFuture, FsStream,
         OpenOptions, ReadDirMeta,
     },
     localfs::LocalFs,
 };
-use futures_util::FutureExt;
+use futures_util::{stream, FutureExt, StreamExt};
 use http::StatusCode;
 use sqlx::SqlitePool;
 use std::time::SystemTime;
+use tracing::debug;
 
 use crate::{db, storage};
 
 const OC_NS: &str = "http://owncloud.org/ns";
 const NC_NS: &str = "http://nextcloud.org/ns";
+const PROPFIND_PREFETCH_CONCURRENCY: usize = 64;
 
 #[derive(Clone)]
 pub struct NcLocalFs {
@@ -53,7 +56,7 @@ impl NcLocalFs {
 
     async fn props_for_path(
         &self,
-        path: &dav_server::davpath::DavPath,
+        path: &DavPath,
         do_content: bool,
     ) -> anyhow::Result<Vec<DavProp>> {
         let record = self.ensure_record(path).await?;
@@ -88,11 +91,11 @@ impl NcLocalFs {
         Ok(props)
     }
 
-    async fn ensure_record(
-        &self,
-        path: &dav_server::davpath::DavPath,
-    ) -> anyhow::Result<db::FileRecord> {
-        let rel_path = path.as_rel_ospath();
+    async fn ensure_record(&self, path: &DavPath) -> anyhow::Result<db::FileRecord> {
+        self.ensure_record_for_rel_path(path.as_rel_ospath()).await
+    }
+
+    async fn ensure_record_for_rel_path(&self, rel_path: &Path) -> anyhow::Result<db::FileRecord> {
         let abs_path = storage::safe_existing_path(&self.root, rel_path)?;
         db::ensure_file_record(
             &self.db,
@@ -107,10 +110,7 @@ impl NcLocalFs {
         .await
     }
 
-    async fn assign_new_record(
-        &self,
-        path: &dav_server::davpath::DavPath,
-    ) -> anyhow::Result<db::FileRecord> {
+    async fn assign_new_record(&self, path: &DavPath) -> anyhow::Result<db::FileRecord> {
         let rel_path = path.as_rel_ospath();
         let abs_path = storage::safe_existing_path(&self.root, rel_path)?;
         db::assign_new_file_record(
@@ -126,11 +126,7 @@ impl NcLocalFs {
         .await
     }
 
-    async fn set_favorite(
-        &self,
-        path: &dav_server::davpath::DavPath,
-        favorite: bool,
-    ) -> anyhow::Result<db::FileRecord> {
+    async fn set_favorite(&self, path: &DavPath, favorite: bool) -> anyhow::Result<db::FileRecord> {
         let rel_path = path.as_rel_ospath();
         let abs_path = storage::safe_existing_path(&self.root, rel_path)?;
         db::set_favorite(
@@ -145,22 +141,50 @@ impl NcLocalFs {
         .await
     }
 
-    fn validate_existing(&self, path: &dav_server::davpath::DavPath) -> Result<(), FsError> {
+    fn validate_existing(&self, path: &DavPath) -> Result<(), FsError> {
         storage::safe_existing_path(&self.root, path.as_rel_ospath())
             .map(|_| ())
             .map_err(map_fs_error)
     }
 
-    fn validate_create(&self, path: &dav_server::davpath::DavPath) -> Result<(), FsError> {
+    fn validate_create(&self, path: &DavPath) -> Result<(), FsError> {
         storage::safe_create_path(&self.root, path.as_rel_ospath())
             .map(|_| ())
             .map_err(map_fs_error)
     }
 
-    fn validate_write(&self, path: &dav_server::davpath::DavPath) -> Result<(), FsError> {
+    fn validate_write(&self, path: &DavPath) -> Result<(), FsError> {
         storage::safe_write_path(&self.root, path.as_rel_ospath())
             .map(|_| ())
             .map_err(map_fs_error)
+    }
+
+    async fn prefetch_child_records(&self, path: &DavPath) -> anyhow::Result<()> {
+        let rel_path = path.as_rel_ospath().to_path_buf();
+        let abs_path = storage::safe_existing_path(&self.root, &rel_path)?;
+        let mut entries = tokio::fs::read_dir(&abs_path).await?;
+        let mut children = Vec::new();
+
+        while let Some(entry) = entries.next_entry().await? {
+            children.push(rel_path.join(entry.file_name()));
+        }
+
+        stream::iter(children)
+            .for_each_concurrent(PROPFIND_PREFETCH_CONCURRENCY, |child_rel| {
+                let fs = self.clone();
+                async move {
+                    if let Err(err) = fs.ensure_record_for_rel_path(&child_rel).await {
+                        debug!(
+                            ?err,
+                            rel_path = %child_rel.display(),
+                            "failed to prefetch child file metadata"
+                        );
+                    }
+                }
+            })
+            .await;
+
+        Ok(())
     }
 }
 
@@ -188,6 +212,11 @@ impl DavFileSystem for NcLocalFs {
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         async move {
             self.validate_existing(path)?;
+            if meta != ReadDirMeta::None {
+                if let Err(err) = self.prefetch_child_records(path).await {
+                    debug!(?err, path = %path, "failed to prefetch directory metadata");
+                }
+            }
             DavFileSystem::read_dir(&self.inner, path, meta).await
         }
         .boxed()

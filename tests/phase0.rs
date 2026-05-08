@@ -316,6 +316,73 @@ async fn copy_allocates_a_new_file_id() {
 }
 
 #[tokio::test]
+async fn copy_does_not_inherit_favorite_metadata() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/favorite-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("favorite source"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                .uri("/remote.php/dav/favorite-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(proppatch_favorite_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(patch.status().is_success());
+
+    let copy = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/favorite-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/favorite-copy.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(copy.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/favorite-copy.txt")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("<oc:favorite>0</oc:favorite>"));
+}
+
+#[tokio::test]
 async fn move_preserves_file_id() {
     let (app, _temp, password) = app_with_temp_root().await;
     let put_response = app
@@ -905,6 +972,61 @@ async fn search_rejects_unsupported_where_operator() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn fresh_metadata_cache_is_used_for_search_results() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/cache-hit.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("cache me"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+    let oc_file_id = put.headers().get("oc-fileid").unwrap().to_str().unwrap();
+    let numeric_file_id: String = oc_file_id
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+
+    sqlx::query(
+        r#"
+        UPDATE file_ids
+        SET etag = 'cached-etag'
+        WHERE owner = ?1 AND rel_path = ?2
+        "#,
+    )
+    .bind(BOOTSTRAP_USER)
+    .bind("cache-hit.txt")
+    .execute(&state.db)
+    .await
+    .expect("patch cached etag");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"SEARCH").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(search_file_id_body(&numeric_file_id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/cache-hit.txt"));
+    assert!(body.contains("<d:getetag>cached-etag</d:getetag>"));
 }
 
 #[tokio::test]
