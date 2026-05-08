@@ -3,16 +3,13 @@ use std::{net::SocketAddr, path::Path, time::Duration};
 use anyhow::{bail, Context};
 use axum_server::{tls_rustls::RustlsConfig, Handle};
 use gono_one::{build_router, dav_handler::chunked_upload, AppState, Config};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    init_tracing();
 
     let config_path = std::env::var("NC_DAV_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
     let config = Config::load_or_dev_default(&config_path)?;
@@ -78,6 +75,50 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn init_tracing() {
+    let env_filter = EnvFilter::from_default_env();
+
+    match log_format_from_env() {
+        LogFormat::Text => tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init(),
+        LogFormat::Compact => tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().compact())
+            .init(),
+        LogFormat::Json => tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init(),
+    }
+}
+
+fn log_format_from_env() -> LogFormat {
+    std::env::var("NC_DAV_LOG_FORMAT")
+        .ok()
+        .as_deref()
+        .map(LogFormat::parse)
+        .unwrap_or(LogFormat::Text)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Text,
+    Compact,
+    Json,
+}
+
+impl LogFormat {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "json" => Self::Json,
+            "compact" => Self::Compact,
+            _ => Self::Text,
+        }
+    }
+}
+
 fn spawn_axum_server_shutdown(handle: Handle<SocketAddr>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -124,5 +165,19 @@ async fn stop_upload_cleanup(upload_cleanup: tokio::task::JoinHandle<()>) {
         Ok(()) => tracing::info!("upload cleanup task stopped"),
         Err(err) if err.is_cancelled() => tracing::debug!("upload cleanup task cancelled"),
         Err(err) => tracing::warn!(?err, "upload cleanup task ended unexpectedly"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogFormat;
+
+    #[test]
+    fn log_format_parser_accepts_supported_formats() {
+        assert_eq!(LogFormat::parse("json"), LogFormat::Json);
+        assert_eq!(LogFormat::parse(" JSON "), LogFormat::Json);
+        assert_eq!(LogFormat::parse("compact"), LogFormat::Compact);
+        assert_eq!(LogFormat::parse("text"), LogFormat::Text);
+        assert_eq!(LogFormat::parse("unknown"), LogFormat::Text);
     }
 }
