@@ -1,0 +1,10 @@
+target/
+data/
+uploads/
+*.db
+*.db-*
+config.toml
+
+AGENTS.md
+plan.md
+plan/
