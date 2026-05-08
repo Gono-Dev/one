@@ -13,7 +13,7 @@ use axum::{
 use dav_server::{davpath::DavPath, DavConfig, DavHandler};
 use futures_util::future::BoxFuture;
 use tower::Service;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::{
     auth::Principal,
@@ -40,6 +40,15 @@ impl NcDavService {
     }
 
     async fn dispatch(self, request: Request<Body>) -> Response<Body> {
+        if let Err(err) = reject_parent_segments(request.uri().path()) {
+            warn!(
+                ?err,
+                path = request.uri().path(),
+                "invalid WebDAV request path"
+            );
+            return (StatusCode::FORBIDDEN, "Invalid WebDAV path").into_response();
+        }
+
         match request.method().as_str() {
             "REPORT" => report::handle(self.state.clone(), request).await,
             "SEARCH" => search::handle(self.state.clone(), request).await,
@@ -310,6 +319,7 @@ pub(crate) fn parse_rel_path(path_or_uri: &str) -> anyhow::Result<PathBuf> {
     } else {
         path_or_uri.to_owned()
     };
+    reject_parent_segments(&path)?;
     let path = path
         .strip_prefix("/remote.php/dav")
         .or_else(|| path.strip_prefix("/remote.php/webdav"))
@@ -321,6 +331,56 @@ pub(crate) fn parse_rel_path(path_or_uri: &str) -> anyhow::Result<PathBuf> {
     };
     let dav_path = DavPath::new(&path)?;
     Ok(Path::new(dav_path.as_rel_ospath()).to_path_buf())
+}
+
+fn reject_parent_segments(path: &str) -> anyhow::Result<()> {
+    for segment in path.split('/') {
+        let decoded = percent_decode_segment(segment)?;
+        if decoded == b".." {
+            anyhow::bail!("path contains parent segment");
+        }
+        if decoded.iter().any(|byte| *byte == 0 || *byte == b'/') {
+            anyhow::bail!("path contains forbidden decoded byte");
+        }
+    }
+    Ok(())
+}
+
+fn percent_decode_segment(segment: &str) -> anyhow::Result<Vec<u8>> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    anyhow::bail!("invalid percent escape");
+                }
+                let high = hex_value(bytes[index + 1])
+                    .ok_or_else(|| anyhow::anyhow!("invalid percent escape"))?;
+                let low = hex_value(bytes[index + 2])
+                    .ok_or_else(|| anyhow::anyhow!("invalid percent escape"))?;
+                decoded.push((high << 4) | low);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    Ok(decoded)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn normalize_destination_header(destination: &str) -> anyhow::Result<HeaderValue> {

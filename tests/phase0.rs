@@ -510,6 +510,115 @@ async fn symlink_parent_escape_is_rejected_for_put() {
     assert!(!outside.join("escape.txt").exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_existing_target_escape_is_rejected_for_get() {
+    use std::os::unix::fs::symlink;
+
+    let (app, temp, password) = app_with_temp_root().await;
+    let outside = temp.path().join("outside-secret.txt");
+    std::fs::write(&outside, "secret").expect("outside secret");
+    symlink(&outside, temp.path().join("data/files/secret-link.txt")).expect("create symlink");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/remote.php/dav/secret-link.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn encoded_parent_segments_are_rejected_for_put() {
+    let (app, temp, password) = app_with_temp_root().await;
+    std::fs::create_dir_all(temp.path().join("data/files/nested")).expect("nested dir");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/nested/%2e%2e/escape.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("escape"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!temp.path().join("data/files/escape.txt").exists());
+}
+
+#[tokio::test]
+async fn destination_encoded_parent_and_nul_are_rejected_for_copy() {
+    let (app, temp, password) = app_with_temp_root().await;
+    std::fs::create_dir_all(temp.path().join("data/files/nested")).expect("nested dir");
+
+    let encoded_parent = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/hello.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/nested/%2e%2e/copied.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(encoded_parent.status(), StatusCode::BAD_REQUEST);
+    assert!(!temp.path().join("data/files/copied.txt").exists());
+
+    let nul = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/hello.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/bad%00name.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(nul.status(), StatusCode::BAD_REQUEST);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn chunking_destination_under_symlink_parent_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let (app, temp, password) = app_with_temp_root().await;
+    let outside = temp.path().join("outside-chunks");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    symlink(&outside, temp.path().join("data/files/chunk-link")).expect("create symlink");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri("/remote.php/dav/uploads/gono/symlink-destination")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/chunk-link/escape.bin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(!outside.join("escape.bin").exists());
+}
+
 #[tokio::test]
 async fn put_writes_monotonic_sync_tokens() {
     let (app, _temp, password, state) = app_with_state().await;

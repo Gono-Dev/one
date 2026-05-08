@@ -3,10 +3,8 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use anyhow::{bail, Context};
-use path_clean::PathClean;
-
 use crate::config::StorageConfig;
+use anyhow::{bail, Context};
 
 #[derive(Debug, Clone)]
 pub struct StorageLayout {
@@ -109,10 +107,9 @@ fn ensure_same_partition(_files_root: &Path, _uploads_root: &Path) -> anyhow::Re
 }
 
 pub fn normalize_rel_path(rel_path: &Path) -> anyhow::Result<PathBuf> {
-    let cleaned = rel_path.clean();
     let mut rel = PathBuf::new();
 
-    for component in cleaned.components() {
+    for component in rel_path.components() {
         match component {
             Component::Normal(name) => {
                 if name.to_string_lossy().as_bytes().contains(&0) {
