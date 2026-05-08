@@ -231,6 +231,144 @@ async fn initial_migration_does_not_install_sync_token_triggers() {
     assert_eq!(trigger_count.0, 0);
 }
 
+#[tokio::test]
+async fn put_returns_nextcloud_metadata_headers() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/upload.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(response.headers().contains_key("oc-etag"));
+    assert!(response.headers().contains_key("oc-fileid"));
+    assert_eq!(
+        response.headers().get("x-nc-ownerid").unwrap(),
+        BOOTSTRAP_USER
+    );
+    assert_eq!(
+        response.headers().get("x-nc-permissions").unwrap(),
+        "RGDNVW"
+    );
+}
+
+#[tokio::test]
+async fn copy_allocates_a_new_file_id() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let source_file_id = put_response
+        .headers()
+        .get("oc-fileid")
+        .expect("source file id")
+        .clone();
+
+    let copy_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/copied.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(copy_response.status().is_success());
+    let copied_file_id = copy_response
+        .headers()
+        .get("oc-fileid")
+        .expect("copied file id");
+    assert_ne!(&source_file_id, copied_file_id);
+}
+
+#[tokio::test]
+async fn move_preserves_file_id() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/move-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let source_file_id = put_response
+        .headers()
+        .get("oc-fileid")
+        .expect("source file id")
+        .clone();
+
+    let move_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MOVE").unwrap())
+                .uri("/remote.php/dav/move-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/moved.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(move_response.status().is_success());
+    let moved_file_id = move_response
+        .headers()
+        .get("oc-fileid")
+        .expect("moved file id");
+    assert_eq!(&source_file_id, moved_file_id);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_parent_escape_is_rejected_for_put() {
+    use std::os::unix::fs::symlink;
+
+    let (app, temp, password) = app_with_temp_root().await;
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    symlink(&outside, temp.path().join("data/files/link")).expect("create symlink");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/link/escape.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("escape"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!outside.join("escape.txt").exists());
+}
+
 fn propfind_body() -> &'static str {
     r#"<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">

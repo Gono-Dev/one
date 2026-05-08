@@ -1,6 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Component, Path, PathBuf},
+    time::UNIX_EPOCH,
+};
 
 use anyhow::{bail, Context};
+use path_clean::PathClean;
 
 use crate::config::StorageConfig;
 
@@ -102,4 +106,109 @@ fn ensure_same_partition(files_root: &Path, uploads_root: &Path) -> anyhow::Resu
 #[cfg(not(unix))]
 fn ensure_same_partition(_files_root: &Path, _uploads_root: &Path) -> anyhow::Result<()> {
     Ok(())
+}
+
+pub fn normalize_rel_path(rel_path: &Path) -> anyhow::Result<PathBuf> {
+    let cleaned = rel_path.clean();
+    let mut rel = PathBuf::new();
+
+    for component in cleaned.components() {
+        match component {
+            Component::Normal(name) => {
+                if name.to_string_lossy().as_bytes().contains(&0) {
+                    bail!("path contains NUL byte");
+                }
+                rel.push(name);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("path escapes storage root");
+            }
+        }
+    }
+
+    Ok(rel)
+}
+
+pub fn safe_existing_path(canonical_root: &Path, rel_path: &Path) -> anyhow::Result<PathBuf> {
+    let rel = normalize_rel_path(rel_path)?;
+    if rel.as_os_str().is_empty() {
+        return Ok(canonical_root.to_path_buf());
+    }
+
+    let joined = canonical_root.join(rel);
+    let real = joined
+        .canonicalize()
+        .with_context(|| format!("canonicalize existing path {}", joined.display()))?;
+    ensure_inside(canonical_root, &real)?;
+    Ok(real)
+}
+
+pub fn safe_create_path(canonical_root: &Path, rel_path: &Path) -> anyhow::Result<PathBuf> {
+    let rel = normalize_rel_path(rel_path)?;
+    if rel.as_os_str().is_empty() {
+        bail!("cannot create storage root");
+    }
+
+    let joined = canonical_root.join(rel);
+    if std::fs::symlink_metadata(&joined).is_ok() {
+        return safe_existing_path(canonical_root, joined.strip_prefix(canonical_root)?);
+    }
+
+    let parent = joined
+        .parent()
+        .context("new path must have a parent directory")?;
+    let real_parent = parent
+        .canonicalize()
+        .with_context(|| format!("canonicalize parent path {}", parent.display()))?;
+    ensure_inside(canonical_root, &real_parent)?;
+
+    let file_name = joined
+        .file_name()
+        .context("new path must have a final component")?;
+    Ok(real_parent.join(file_name))
+}
+
+pub fn safe_write_path(canonical_root: &Path, rel_path: &Path) -> anyhow::Result<PathBuf> {
+    let rel = normalize_rel_path(rel_path)?;
+    if rel.as_os_str().is_empty() {
+        bail!("cannot write storage root");
+    }
+
+    let joined = canonical_root.join(rel);
+    if std::fs::symlink_metadata(&joined).is_ok() {
+        safe_existing_path(canonical_root, joined.strip_prefix(canonical_root)?)
+    } else {
+        safe_create_path(canonical_root, joined.strip_prefix(canonical_root)?)
+    }
+}
+
+pub fn rel_path_string(rel_path: &Path) -> anyhow::Result<String> {
+    let rel = normalize_rel_path(rel_path)?;
+    Ok(rel.to_string_lossy().replace('\\', "/"))
+}
+
+pub fn metadata_fingerprint(path: &Path) -> anyhow::Result<(i64, i64)> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
+    let size = metadata.len() as i64;
+    let mtime_ns = metadata
+        .modified()
+        .context("read modified time")?
+        .duration_since(UNIX_EPOCH)
+        .context("modified time before UNIX epoch")?
+        .as_nanos() as i64;
+    Ok((mtime_ns, size))
+}
+
+fn ensure_inside(canonical_root: &Path, path: &Path) -> anyhow::Result<()> {
+    if path.starts_with(canonical_root) {
+        Ok(())
+    } else {
+        bail!(
+            "path escapes storage root: root={} path={}",
+            canonical_root.display(),
+            path.display()
+        )
+    }
 }

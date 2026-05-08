@@ -20,6 +20,7 @@ pub struct AppState {
     pub owner: String,
     pub base_url: String,
     pub instance_id: String,
+    pub xattr_ns: String,
 }
 
 #[derive(Debug)]
@@ -47,6 +48,7 @@ impl AppState {
                 owner: BOOTSTRAP_USER.to_owned(),
                 base_url: config.server.base_url,
                 instance_id: "phase1".to_owned(),
+                xattr_ns: config.storage.xattr_ns,
             }),
             bootstrap,
         })

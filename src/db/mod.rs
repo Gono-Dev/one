@@ -12,10 +12,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::{rngs::OsRng, RngCore};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
-    SqlitePool,
+    Row, SqlitePool,
 };
 
-use crate::config::DbConfig;
+use crate::{config::DbConfig, storage};
 
 pub const BOOTSTRAP_USER: &str = "gono";
 const BOOTSTRAP_LABEL: &str = "bootstrap";
@@ -142,4 +142,352 @@ pub fn unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_secs() as i64
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRecord {
+    pub id: i64,
+    pub oc_file_id: String,
+    pub etag: String,
+    pub permissions: i64,
+    pub favorite: bool,
+    pub mtime_ns: i64,
+    pub file_size: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileRecordInput<'a> {
+    pub owner: &'a str,
+    pub rel_path: &'a Path,
+    pub abs_path: &'a Path,
+    pub instance_id: &'a str,
+    pub xattr_ns: &'a str,
+}
+
+pub async fn ensure_file_record(
+    pool: &SqlitePool,
+    input: FileRecordInput<'_>,
+) -> anyhow::Result<FileRecord> {
+    upsert_file_record(pool, input, false).await
+}
+
+pub async fn assign_new_file_record(
+    pool: &SqlitePool,
+    input: FileRecordInput<'_>,
+) -> anyhow::Result<FileRecord> {
+    upsert_file_record(pool, input, true).await
+}
+
+pub async fn move_file_record(
+    pool: &SqlitePool,
+    owner: &str,
+    from_rel_path: &Path,
+    to_rel_path: &Path,
+) -> anyhow::Result<()> {
+    let from_rel = storage::rel_path_string(from_rel_path)?;
+    let to_rel = storage::rel_path_string(to_rel_path)?;
+
+    sqlx::query(
+        r#"
+        UPDATE file_ids
+        SET rel_path = ?1
+        WHERE owner = ?2 AND rel_path = ?3
+        "#,
+    )
+    .bind(to_rel)
+    .bind(owner)
+    .bind(from_rel)
+    .execute(pool)
+    .await
+    .context("move file_id cache row")?;
+
+    Ok(())
+}
+
+pub async fn delete_file_records(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &Path,
+) -> anyhow::Result<()> {
+    let rel_path = storage::rel_path_string(rel_path)?;
+    let prefix = if rel_path.is_empty() {
+        "%".to_owned()
+    } else {
+        format!("{rel_path}/%")
+    };
+
+    sqlx::query(
+        r#"
+        DELETE FROM file_ids
+        WHERE owner = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3)
+        "#,
+    )
+    .bind(owner)
+    .bind(rel_path)
+    .bind(prefix)
+    .execute(pool)
+    .await
+    .context("delete file_id cache rows")?;
+
+    Ok(())
+}
+
+async fn upsert_file_record(
+    pool: &SqlitePool,
+    input: FileRecordInput<'_>,
+    force_new_id: bool,
+) -> anyhow::Result<FileRecord> {
+    let rel_path = storage::rel_path_string(input.rel_path)?;
+    let (mtime_ns, file_size) = storage::metadata_fingerprint(input.abs_path)?;
+    let etag = derive_etag(mtime_ns, file_size);
+    let existing = load_by_rel_path(pool, input.owner, &rel_path).await?;
+
+    let id = if force_new_id {
+        delete_by_rel_path(pool, input.owner, &rel_path).await?;
+        insert_file_record(pool, input.owner, &rel_path).await?
+    } else if let Some(existing) = existing {
+        existing.id
+    } else if let Some(xattr_id) = read_i64_xattr(input.abs_path, input.xattr_ns, "fileid")? {
+        attach_xattr_file_id(pool, input.owner, &rel_path, xattr_id).await?
+    } else {
+        insert_file_record(pool, input.owner, &rel_path).await?
+    };
+
+    let favorite = read_bool_xattr(input.abs_path, input.xattr_ns, "favorite")?.unwrap_or(false);
+    let permissions = read_i64_xattr(input.abs_path, input.xattr_ns, "perms")?.unwrap_or(0x3f);
+
+    write_xattr(input.abs_path, input.xattr_ns, "fileid", &id.to_string())?;
+    write_xattr(input.abs_path, input.xattr_ns, "etag", &etag)?;
+    write_xattr(
+        input.abs_path,
+        input.xattr_ns,
+        "favorite",
+        if favorite { "1" } else { "0" },
+    )?;
+    write_xattr(
+        input.abs_path,
+        input.xattr_ns,
+        "perms",
+        &permissions.to_string(),
+    )?;
+
+    sqlx::query(
+        r#"
+        UPDATE file_ids
+        SET etag = ?1,
+            permissions = ?2,
+            favorite = ?3,
+            mtime_ns = ?4,
+            file_size = ?5
+        WHERE owner = ?6 AND rel_path = ?7
+        "#,
+    )
+    .bind(&etag)
+    .bind(permissions)
+    .bind(if favorite { 1 } else { 0 })
+    .bind(mtime_ns)
+    .bind(file_size)
+    .bind(input.owner)
+    .bind(&rel_path)
+    .execute(pool)
+    .await
+    .context("update file metadata cache")?;
+
+    Ok(FileRecord {
+        id,
+        oc_file_id: format!("{id}{}", input.instance_id),
+        etag,
+        permissions,
+        favorite,
+        mtime_ns,
+        file_size,
+    })
+}
+
+pub async fn set_favorite(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &Path,
+    abs_path: &Path,
+    instance_id: &str,
+    xattr_ns: &str,
+    favorite: bool,
+) -> anyhow::Result<FileRecord> {
+    let mut record = ensure_file_record(
+        pool,
+        FileRecordInput {
+            owner,
+            rel_path,
+            abs_path,
+            instance_id,
+            xattr_ns,
+        },
+    )
+    .await?;
+    let rel_path = storage::rel_path_string(rel_path)?;
+
+    write_xattr(
+        abs_path,
+        xattr_ns,
+        "favorite",
+        if favorite { "1" } else { "0" },
+    )?;
+    sqlx::query(
+        r#"
+        UPDATE file_ids
+        SET favorite = ?1
+        WHERE owner = ?2 AND rel_path = ?3
+        "#,
+    )
+    .bind(if favorite { 1 } else { 0 })
+    .bind(owner)
+    .bind(rel_path)
+    .execute(pool)
+    .await
+    .context("update favorite")?;
+
+    record.favorite = favorite;
+    Ok(record)
+}
+
+async fn load_by_rel_path(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &str,
+) -> anyhow::Result<Option<FileRecordRow>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, permissions, favorite
+        FROM file_ids
+        WHERE owner = ?1 AND rel_path = ?2
+        "#,
+    )
+    .bind(owner)
+    .bind(rel_path)
+    .fetch_optional(pool)
+    .await
+    .context("load file_id row")?;
+
+    row.map(FileRecordRow::try_from_row).transpose()
+}
+
+async fn delete_by_rel_path(pool: &SqlitePool, owner: &str, rel_path: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM file_ids WHERE owner = ?1 AND rel_path = ?2")
+        .bind(owner)
+        .bind(rel_path)
+        .execute(pool)
+        .await
+        .context("delete existing file_id row")?;
+    Ok(())
+}
+
+async fn insert_file_record(pool: &SqlitePool, owner: &str, rel_path: &str) -> anyhow::Result<i64> {
+    let now = unix_timestamp();
+    let result = sqlx::query(
+        r#"
+        INSERT INTO file_ids(owner, rel_path, permissions, favorite, created_at)
+        VALUES(?1, ?2, ?3, 0, ?4)
+        "#,
+    )
+    .bind(owner)
+    .bind(rel_path)
+    .bind(0x3f_i64)
+    .bind(now)
+    .execute(pool)
+    .await
+    .context("insert file_id row")?;
+
+    Ok(result.last_insert_rowid())
+}
+
+async fn attach_xattr_file_id(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &str,
+    id: i64,
+) -> anyhow::Result<i64> {
+    let now = unix_timestamp();
+    let updated = sqlx::query(
+        r#"
+        UPDATE file_ids
+        SET rel_path = ?1
+        WHERE owner = ?2 AND id = ?3
+        "#,
+    )
+    .bind(rel_path)
+    .bind(owner)
+    .bind(id)
+    .execute(pool)
+    .await
+    .context("reattach xattr file_id row")?
+    .rows_affected();
+
+    if updated == 0 {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO file_ids(id, owner, rel_path, permissions, favorite, created_at)
+            VALUES(?1, ?2, ?3, ?4, 0, ?5)
+            "#,
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(rel_path)
+        .bind(0x3f_i64)
+        .bind(now)
+        .execute(pool)
+        .await
+        .context("insert xattr file_id row")?;
+    }
+
+    Ok(id)
+}
+
+#[derive(Debug, Clone)]
+struct FileRecordRow {
+    id: i64,
+}
+
+impl FileRecordRow {
+    fn try_from_row(row: sqlx::sqlite::SqliteRow) -> anyhow::Result<Self> {
+        Ok(Self {
+            id: row.try_get("id")?,
+        })
+    }
+}
+
+fn derive_etag(mtime_ns: i64, file_size: i64) -> String {
+    format!("{file_size:x}-{mtime_ns:x}")
+}
+
+fn xattr_key(namespace: &str, name: &str) -> String {
+    format!("{namespace}.{name}")
+}
+
+fn read_i64_xattr(path: &Path, namespace: &str, name: &str) -> anyhow::Result<Option<i64>> {
+    let Some(raw) = read_xattr(path, namespace, name)? else {
+        return Ok(None);
+    };
+    let value = String::from_utf8(raw).context("xattr value is not UTF-8")?;
+    value
+        .parse::<i64>()
+        .map(Some)
+        .with_context(|| format!("parse xattr {name} as integer"))
+}
+
+fn read_bool_xattr(path: &Path, namespace: &str, name: &str) -> anyhow::Result<Option<bool>> {
+    let Some(raw) = read_xattr(path, namespace, name)? else {
+        return Ok(None);
+    };
+    let value = String::from_utf8(raw).context("xattr value is not UTF-8")?;
+    Ok(Some(value == "1" || value.eq_ignore_ascii_case("true")))
+}
+
+fn read_xattr(path: &Path, namespace: &str, name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    xattr::get(path, xattr_key(namespace, name))
+        .with_context(|| format!("read xattr {namespace}.{name} from {}", path.display()))
+}
+
+fn write_xattr(path: &Path, namespace: &str, name: &str, value: &str) -> anyhow::Result<()> {
+    xattr::set(path, xattr_key(namespace, name), value.as_bytes())
+        .with_context(|| format!("write xattr {namespace}.{name} to {}", path.display()))
 }

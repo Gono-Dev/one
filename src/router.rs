@@ -25,8 +25,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let dav_handler = DavHandler::builder()
         .filesystem(Box::new(NcLocalFs::new(
             &state.files_root,
+            state.db.clone(),
             state.owner.clone(),
             state.instance_id.clone(),
+            state.xattr_ns.clone(),
         )))
         .locksystem(FakeLs::new())
         .build_handler();
@@ -38,7 +40,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_basic_auth,
         ))
-        .service(NcDavService::new(dav_handler));
+        .service(NcDavService::new(dav_handler, state.clone()));
 
     Router::new()
         .route("/status.php", get(nc_proto::status::handler))
