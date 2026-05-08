@@ -7,6 +7,7 @@ use std::{
 
 use axum::{
     body::Body,
+    extract::OriginalUri,
     http::{header::HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri},
     response::IntoResponse,
 };
@@ -40,10 +41,11 @@ impl NcDavService {
     }
 
     async fn dispatch(self, request: Request<Body>) -> Response<Body> {
-        if let Err(err) = reject_parent_segments(request.uri().path()) {
+        let original_uri = original_request_uri(&request);
+        if let Err(err) = reject_parent_segments(original_uri.path()) {
             warn!(
                 ?err,
-                path = request.uri().path(),
+                path = original_uri.path(),
                 "invalid WebDAV request path"
             );
             return (StatusCode::FORBIDDEN, "Invalid WebDAV path").into_response();
@@ -61,7 +63,9 @@ impl NcDavService {
 
     async fn forward_to_dav_server(self, mut request: Request<Body>) -> Response<Body> {
         let method = request.method().clone();
-        let request_path = request.uri().path().to_owned();
+        let original_uri = original_request_uri(&request);
+        let request_path = original_uri.path().to_owned();
+        let mount_prefix = mount_prefix_for_path(&request_path);
         let destination = request
             .headers()
             .get("destination")
@@ -74,15 +78,9 @@ impl NcDavService {
         };
         if matches!(method.as_str(), "COPY" | "MOVE") {
             if let Some(destination) = destination.as_deref() {
-                match normalize_destination_header(destination) {
-                    Ok(normalized) => {
-                        request.headers_mut().insert("destination", normalized);
-                    }
-                    Err(err) => {
-                        error!(?err, "failed to normalize Destination header");
-                        return (StatusCode::BAD_REQUEST, "Invalid Destination header")
-                            .into_response();
-                    }
+                if let Err(err) = parse_rel_path(destination) {
+                    error!(?err, "failed to validate Destination header");
+                    return (StatusCode::BAD_REQUEST, "Invalid Destination header").into_response();
                 }
             }
         }
@@ -91,10 +89,16 @@ impl NcDavService {
             .get::<Principal>()
             .map(|principal| principal.username.clone())
             .unwrap_or_else(|| "gono".to_owned());
+        *request.uri_mut() = original_uri;
 
         let response = self
             .handler
-            .handle_with(DavConfig::new().principal(principal), request)
+            .handle_with(
+                DavConfig::new()
+                    .strip_prefix(mount_prefix)
+                    .principal(principal),
+                request,
+            )
             .await
             .map(Body::new);
 
@@ -313,6 +317,22 @@ fn write_target_rel_path(
     path.map(parse_rel_path).transpose()
 }
 
+fn original_request_uri(request: &Request<Body>) -> Uri {
+    request
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|uri| uri.0.clone())
+        .unwrap_or_else(|| request.uri().clone())
+}
+
+fn mount_prefix_for_path(path: &str) -> &'static str {
+    if path.starts_with("/remote.php/webdav") {
+        "/remote.php/webdav"
+    } else {
+        "/remote.php/dav"
+    }
+}
+
 pub(crate) fn parse_rel_path(path_or_uri: &str) -> anyhow::Result<PathBuf> {
     let path = if path_or_uri.starts_with("http://") || path_or_uri.starts_with("https://") {
         path_or_uri.parse::<Uri>()?.path().to_owned()
@@ -381,16 +401,6 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-fn normalize_destination_header(destination: &str) -> anyhow::Result<HeaderValue> {
-    let rel_path = parse_rel_path(destination)?;
-    let normalized = if rel_path.as_os_str().is_empty() {
-        "/".to_owned()
-    } else {
-        format!("/{}", rel_path.to_string_lossy().replace('\\', "/"))
-    };
-    HeaderValue::from_str(&normalized).map_err(Into::into)
 }
 
 fn insert_header(headers: &mut axum::http::HeaderMap, name: HeaderName, value: &str) {

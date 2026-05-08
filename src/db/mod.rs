@@ -190,17 +190,22 @@ pub async fn move_file_record(
     sqlx::query(
         r#"
         UPDATE file_ids
-        SET rel_path = ?1
-        WHERE owner = ?2 AND rel_path = ?3
+        SET rel_path = CASE
+            WHEN rel_path = ?1 THEN ?2
+            ELSE ?2 || substr(rel_path, length(?1) + 1)
+        END
+        WHERE owner = ?3 AND (rel_path = ?1 OR rel_path LIKE ?4)
         "#,
     )
-    .bind(to_rel)
+    .bind(&from_rel)
+    .bind(&to_rel)
     .bind(owner)
-    .bind(from_rel)
+    .bind(format!("{from_rel}/%"))
     .execute(pool)
     .await
     .context("move file_id cache row")?;
 
+    move_dead_props(pool, owner, from_rel_path, to_rel_path).await?;
     Ok(())
 }
 
@@ -223,12 +228,197 @@ pub async fn delete_file_records(
         "#,
     )
     .bind(owner)
-    .bind(rel_path)
-    .bind(prefix)
+    .bind(&rel_path)
+    .bind(&prefix)
     .execute(pool)
     .await
     .context("delete file_id cache rows")?;
 
+    sqlx::query(
+        r#"
+        DELETE FROM dead_props
+        WHERE owner = ?1 AND (rel_path = ?2 OR rel_path LIKE ?3)
+        "#,
+    )
+    .bind(owner)
+    .bind(rel_path)
+    .bind(prefix)
+    .execute(pool)
+    .await
+    .context("delete dead property rows")?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadProp {
+    pub namespace: String,
+    pub name: String,
+    pub xml: Vec<u8>,
+}
+
+pub async fn list_dead_props(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &Path,
+) -> anyhow::Result<Vec<DeadProp>> {
+    let rel_path = storage::rel_path_string(rel_path)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT namespace, name, xml
+        FROM dead_props
+        WHERE owner = ?1 AND rel_path = ?2
+        ORDER BY namespace, name
+        "#,
+    )
+    .bind(owner)
+    .bind(rel_path)
+    .fetch_all(pool)
+    .await
+    .context("list dead props")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(DeadProp {
+                namespace: row.try_get("namespace")?,
+                name: row.try_get("name")?,
+                xml: row.try_get("xml")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn get_dead_prop(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &Path,
+    namespace: Option<&str>,
+    name: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let rel_path = storage::rel_path_string(rel_path)?;
+    let namespace = namespace.unwrap_or("");
+    let xml = sqlx::query("SELECT xml FROM dead_props WHERE owner = ?1 AND rel_path = ?2 AND namespace = ?3 AND name = ?4")
+        .bind(owner)
+        .bind(rel_path)
+        .bind(namespace)
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .context("get dead prop")?
+        .map(|row| row.try_get::<Vec<u8>, _>("xml"))
+        .transpose()?;
+    Ok(xml)
+}
+
+pub async fn set_dead_prop(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &Path,
+    namespace: Option<&str>,
+    name: &str,
+    xml: &[u8],
+) -> anyhow::Result<()> {
+    let rel_path = storage::rel_path_string(rel_path)?;
+    let namespace = namespace.unwrap_or("");
+    let now = unix_timestamp();
+
+    sqlx::query(
+        r#"
+        INSERT INTO dead_props(owner, rel_path, namespace, name, xml, updated_at)
+        VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(owner, rel_path, namespace, name) DO UPDATE SET
+            xml = excluded.xml,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(owner)
+    .bind(rel_path)
+    .bind(namespace)
+    .bind(name)
+    .bind(xml)
+    .bind(now)
+    .execute(pool)
+    .await
+    .context("set dead prop")?;
+    Ok(())
+}
+
+pub async fn remove_dead_prop(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &Path,
+    namespace: Option<&str>,
+    name: &str,
+) -> anyhow::Result<()> {
+    let rel_path = storage::rel_path_string(rel_path)?;
+    let namespace = namespace.unwrap_or("");
+
+    sqlx::query("DELETE FROM dead_props WHERE owner = ?1 AND rel_path = ?2 AND namespace = ?3 AND name = ?4")
+        .bind(owner)
+        .bind(rel_path)
+        .bind(namespace)
+        .bind(name)
+        .execute(pool)
+        .await
+        .context("remove dead prop")?;
+    Ok(())
+}
+
+pub async fn copy_dead_props(
+    pool: &SqlitePool,
+    owner: &str,
+    from_rel_path: &Path,
+    to_rel_path: &Path,
+) -> anyhow::Result<()> {
+    let from_rel = storage::rel_path_string(from_rel_path)?;
+    let to_rel = storage::rel_path_string(to_rel_path)?;
+    let now = unix_timestamp();
+
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO dead_props(owner, rel_path, namespace, name, xml, updated_at)
+        SELECT owner, ?1, namespace, name, xml, ?2
+        FROM dead_props
+        WHERE owner = ?3 AND rel_path = ?4
+        "#,
+    )
+    .bind(to_rel)
+    .bind(now)
+    .bind(owner)
+    .bind(from_rel)
+    .execute(pool)
+    .await
+    .context("copy dead props")?;
+    Ok(())
+}
+
+async fn move_dead_props(
+    pool: &SqlitePool,
+    owner: &str,
+    from_rel_path: &Path,
+    to_rel_path: &Path,
+) -> anyhow::Result<()> {
+    let from_rel = storage::rel_path_string(from_rel_path)?;
+    let to_rel = storage::rel_path_string(to_rel_path)?;
+    let prefix = format!("{from_rel}/%");
+
+    sqlx::query(
+        r#"
+        UPDATE dead_props
+        SET rel_path = CASE
+            WHEN rel_path = ?1 THEN ?2
+            ELSE ?2 || substr(rel_path, length(?1) + 1)
+        END
+        WHERE owner = ?3 AND (rel_path = ?1 OR rel_path LIKE ?4)
+        "#,
+    )
+    .bind(from_rel)
+    .bind(to_rel)
+    .bind(owner)
+    .bind(prefix)
+    .execute(pool)
+    .await
+    .context("move dead props")?;
     Ok(())
 }
 

@@ -214,7 +214,7 @@ curl -fsS -u "${AUTH}" "${BASE_URL}/metrics" | grep -q 'gono_one_sync_token'
 if [[ "${RUN_LITMUS}" == "1" ]]; then
   require_cmd litmus
   echo "running litmus against ${DAV_URL}/"
-  litmus "${DAV_URL}/" gono "${PASSWORD}"
+  (cd "${WORK_DIR}" && litmus "${DAV_URL}/" gono "${PASSWORD}")
 fi
 
 echo "compat smoke passed"

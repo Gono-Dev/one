@@ -88,6 +88,10 @@ impl NcLocalFs {
             }
         }
 
+        for dead_prop in db::list_dead_props(&self.db, &self.owner, path.as_rel_ospath()).await? {
+            props.push(dead_prop_to_dav_prop(dead_prop, do_content));
+        }
+
         Ok(props)
     }
 
@@ -312,6 +316,14 @@ impl DavFileSystem for NcLocalFs {
             self.validate_write(to)?;
             DavFileSystem::copy(&self.inner, from, to).await?;
             self.assign_new_record(to).await.map_err(map_fs_error)?;
+            db::copy_dead_props(
+                &self.db,
+                &self.owner,
+                from.as_rel_ospath(),
+                to.as_rel_ospath(),
+            )
+            .await
+            .map_err(map_fs_error)?;
             Ok(())
         }
         .boxed()
@@ -356,8 +368,38 @@ impl DavFileSystem for NcLocalFs {
                         Ok(_) => StatusCode::OK,
                         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
                     }
-                } else {
+                } else if prop.namespace.as_deref() == Some("DAV:") {
                     StatusCode::FORBIDDEN
+                } else if set {
+                    match prop.xml.as_deref() {
+                        Some(xml) => match db::set_dead_prop(
+                            &self.db,
+                            &self.owner,
+                            path.as_rel_ospath(),
+                            prop.namespace.as_deref(),
+                            &prop.name,
+                            xml,
+                        )
+                        .await
+                        {
+                            Ok(_) => StatusCode::OK,
+                            Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                        },
+                        None => StatusCode::BAD_REQUEST,
+                    }
+                } else {
+                    match db::remove_dead_prop(
+                        &self.db,
+                        &self.owner,
+                        path.as_rel_ospath(),
+                        prop.namespace.as_deref(),
+                        &prop.name,
+                    )
+                    .await
+                    {
+                        Ok(_) => StatusCode::OK,
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                    }
                 };
 
                 results.push((status, prop_without_content(prop)));
@@ -395,6 +437,15 @@ impl DavFileSystem for NcLocalFs {
                     candidate.name == prop.name && candidate.namespace == prop.namespace
                 })
                 .and_then(|prop| prop.xml)
+                .or(db::get_dead_prop(
+                    &self.db,
+                    &self.owner,
+                    path.as_rel_ospath(),
+                    prop.namespace.as_deref(),
+                    &prop.name,
+                )
+                .await
+                .map_err(map_fs_error)?)
                 .ok_or(dav_server::fs::FsError::NotFound)
         }
         .boxed()
@@ -411,6 +462,19 @@ fn oc_prop(name: &str, value: &str, do_content: bool) -> DavProp {
 
 fn nc_prop(name: &str, value: &str, do_content: bool) -> DavProp {
     custom_prop(name, "nc", NC_NS, value, do_content)
+}
+
+fn dead_prop_to_dav_prop(prop: db::DeadProp, do_content: bool) -> DavProp {
+    DavProp {
+        name: prop.name,
+        prefix: None,
+        namespace: if prop.namespace.is_empty() {
+            None
+        } else {
+            Some(prop.namespace)
+        },
+        xml: if do_content { Some(prop.xml) } else { None },
+    }
 }
 
 fn custom_prop(

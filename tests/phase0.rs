@@ -376,6 +376,40 @@ async fn copy_allocates_a_new_file_id() {
 }
 
 #[tokio::test]
+async fn copy_with_depth_infinity_is_allowed_for_litmus_compatibility() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/depth-copy-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("copy me"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_response.status(), StatusCode::CREATED);
+
+    let copy_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/depth-copy-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Depth", "infinity")
+                .header("Destination", "/remote.php/dav/depth-copy-target.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(copy_response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn copy_does_not_inherit_favorite_metadata() {
     let (app, _temp, password) = app_with_temp_root().await;
     let put = app
@@ -896,6 +930,73 @@ async fn proppatch_favorite_is_readable_from_propfind() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
     assert!(body.contains("<oc:favorite>1</oc:favorite>"));
+}
+
+#[tokio::test]
+async fn dead_props_are_readable_and_copied() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/dead-prop-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("dead prop"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                .uri("/remote.php/dav/dead-prop-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(proppatch_dead_prop_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(patch.status().is_success());
+
+    let copy = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/dead-prop-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/dead-prop-copy.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(copy.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/dead-prop-copy.txt")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_dead_prop_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("litmus-value"));
 }
 
 #[tokio::test]
@@ -1445,6 +1546,26 @@ fn proppatch_favorite_body() -> &'static str {
     </d:prop>
   </d:set>
 </d:propertyupdate>"#
+}
+
+fn proppatch_dead_prop_body() -> &'static str {
+    r#"<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:x="http://example.com/litmus">
+  <d:set>
+    <d:prop>
+      <x:litmus-prop>litmus-value</x:litmus-prop>
+    </d:prop>
+  </d:set>
+</d:propertyupdate>"#
+}
+
+fn propfind_dead_prop_body() -> &'static str {
+    r#"<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:x="http://example.com/litmus">
+  <d:prop>
+    <x:litmus-prop />
+  </d:prop>
+</d:propfind>"#
 }
 
 fn sync_collection_body(sync_token: &str) -> String {
