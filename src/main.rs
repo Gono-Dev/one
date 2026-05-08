@@ -1,9 +1,11 @@
-use std::{net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::{bail, Context};
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::{tls_rustls::RustlsConfig, Handle};
 use gono_one::{build_router, dav_handler::chunked_upload, AppState, Config};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,20 +47,82 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Generated app password for gono: {password}");
     }
 
-    let _upload_cleanup = chunked_upload::spawn_cleanup_task(initialized.state.clone());
+    let upload_cleanup = chunked_upload::spawn_cleanup_task(initialized.state.clone());
     let app = build_router(initialized.state);
 
-    if let Some(tls) = tls {
+    let server_result = if let Some(tls) = tls {
         tracing::info!("gono-one listening on https://{addr}");
-        axum_server::bind_rustls(addr, tls)
+        let handle = Handle::<SocketAddr>::new();
+        let shutdown_task = spawn_axum_server_shutdown(handle.clone());
+        let result = axum_server::bind_rustls(addr, tls)
+            .handle(handle)
             .serve(app.into_make_service())
             .await
-            .context("serve HTTPS")?;
+            .context("serve HTTPS");
+        shutdown_task.abort();
+        result
     } else {
         tracing::info!("gono-one listening on http://{addr}");
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await.context("serve HTTP")?;
-    }
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+                .context("serve HTTP"),
+            Err(err) => Err(err).context("bind HTTP listener"),
+        }
+    };
+
+    stop_upload_cleanup(upload_cleanup).await;
+    server_result?;
 
     Ok(())
+}
+
+fn spawn_axum_server_shutdown(handle: Handle<SocketAddr>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!(
+            timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT.as_secs(),
+            "starting graceful shutdown"
+        );
+        handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_TIMEOUT));
+    })
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(?err, "failed to install Ctrl-C handler");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received Ctrl-C"),
+        _ = terminate => tracing::info!("received SIGTERM"),
+    }
+}
+
+async fn stop_upload_cleanup(upload_cleanup: tokio::task::JoinHandle<()>) {
+    upload_cleanup.abort();
+    match upload_cleanup.await {
+        Ok(()) => tracing::info!("upload cleanup task stopped"),
+        Err(err) if err.is_cancelled() => tracing::debug!("upload cleanup task cancelled"),
+        Err(err) => tracing::warn!(?err, "upload cleanup task ended unexpectedly"),
+    }
 }
