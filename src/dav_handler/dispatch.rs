@@ -17,7 +17,7 @@ use tracing::error;
 
 use crate::{
     auth::Principal,
-    dav_handler::{chunked_upload, report},
+    dav_handler::{chunked_upload, report, search},
     db,
     state::AppState,
     storage,
@@ -42,7 +42,7 @@ impl NcDavService {
     async fn dispatch(self, request: Request<Body>) -> Response<Body> {
         match request.method().as_str() {
             "REPORT" => report::handle(self.state.clone(), request).await,
-            "SEARCH" => extension_placeholder(request.method().as_str()),
+            "SEARCH" => search::handle(self.state.clone(), request).await,
             "MKCOL" | "PUT" | "MOVE" | "DELETE" if is_chunking_path(request.uri().path()) => {
                 chunked_upload::handle(self.state.clone(), request).await
             }
@@ -281,14 +281,6 @@ impl Service<Request<Body>> for NcDavService {
         let this = self.clone();
         Box::pin(async move { Ok(this.dispatch(request).await) })
     }
-}
-
-fn extension_placeholder(name: &str) -> Response<Body> {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!("{name} dispatch is reserved for a later phase"),
-    )
-        .into_response()
 }
 
 fn is_chunking_path(path: &str) -> bool {

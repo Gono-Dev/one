@@ -752,6 +752,160 @@ async fn report_filter_files_lists_favorites_in_scope_recursively() {
 }
 
 #[tokio::test]
+async fn search_by_file_id_returns_exact_match() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let target = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/search-id-target.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("target"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(target.status().is_success());
+    let oc_file_id = target.headers().get("oc-fileid").unwrap().to_str().unwrap();
+    let numeric_file_id: String = oc_file_id
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+
+    let other = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/search-id-other.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("other"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(other.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"SEARCH").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(search_file_id_body(&numeric_file_id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/search-id-target.txt"));
+    assert!(!body.contains("/remote.php/dav/search-id-other.txt"));
+    assert!(body.contains("<oc:fileid>"));
+}
+
+#[tokio::test]
+async fn search_by_favorite_respects_scope() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let mkcol = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri("/remote.php/dav/search-scope")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(mkcol.status().is_success());
+
+    for (uri, body) in [
+        ("/remote.php/dav/search-scope/starred.txt", "starred"),
+        ("/remote.php/dav/search-scope/plain.txt", "plain"),
+        ("/remote.php/dav/search-outside-starred.txt", "outside"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    for uri in [
+        "/remote.php/dav/search-scope/starred.txt",
+        "/remote.php/dav/search-outside-starred.txt",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body(Body::from(proppatch_favorite_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"SEARCH").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(search_favorite_body("/files/gono/search-scope")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/search-scope/starred.txt"));
+    assert!(!body.contains("/remote.php/dav/search-scope/plain.txt"));
+    assert!(!body.contains("/remote.php/dav/search-outside-starred.txt"));
+}
+
+#[tokio::test]
+async fn search_rejects_unsupported_where_operator() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"SEARCH").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(search_unsupported_like_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn chunking_v2_mkcol_put_move_merges_chunks() {
     let (app, _temp, password, state) = app_with_state().await;
     let upload_base = "/remote.php/dav/uploads/gono/upload-session-1";
@@ -983,4 +1137,85 @@ fn filter_files_favorites_body() -> &'static str {
     <nc:has-preview />
   </d:prop>
 </oc:filter-files>"#
+}
+
+fn search_file_id_body(file_id: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:basicsearch>
+    <d:select>
+      <d:prop>
+        <oc:fileid />
+        <d:getetag />
+        <oc:favorite />
+      </d:prop>
+    </d:select>
+    <d:from>
+      <d:scope>
+        <d:href>/files/gono</d:href>
+        <d:depth>infinity</d:depth>
+      </d:scope>
+    </d:from>
+    <d:where>
+      <d:eq>
+        <d:prop><oc:fileid /></d:prop>
+        <d:literal>{file_id}</d:literal>
+      </d:eq>
+    </d:where>
+    <d:orderby />
+  </d:basicsearch>
+</d:searchrequest>"#
+    )
+}
+
+fn search_favorite_body(scope: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:basicsearch>
+    <d:select>
+      <d:prop>
+        <oc:fileid />
+        <d:getetag />
+        <oc:favorite />
+      </d:prop>
+    </d:select>
+    <d:from>
+      <d:scope>
+        <d:href>{scope}</d:href>
+        <d:depth>infinity</d:depth>
+      </d:scope>
+    </d:from>
+    <d:where>
+      <d:eq>
+        <d:prop><oc:favorite /></d:prop>
+        <d:literal>1</d:literal>
+      </d:eq>
+    </d:where>
+    <d:orderby />
+  </d:basicsearch>
+</d:searchrequest>"#
+    )
+}
+
+fn search_unsupported_like_body() -> &'static str {
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:basicsearch>
+    <d:select><d:prop><oc:fileid /></d:prop></d:select>
+    <d:from>
+      <d:scope>
+        <d:href>/files/gono</d:href>
+        <d:depth>infinity</d:depth>
+      </d:scope>
+    </d:from>
+    <d:where>
+      <d:like>
+        <d:prop><d:displayname /></d:prop>
+        <d:literal>%.txt</d:literal>
+      </d:like>
+    </d:where>
+  </d:basicsearch>
+</d:searchrequest>"#
 }
