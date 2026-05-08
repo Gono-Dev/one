@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::Path};
 
 use anyhow::{bail, Context};
 use axum_server::tls_rustls::RustlsConfig;
-use gono_one::{build_router, AppState, Config};
+use gono_one::{build_router, dav_handler::chunked_upload, AppState, Config};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("Generated app password for gono: {password}");
     }
 
+    let _upload_cleanup = chunked_upload::spawn_cleanup_task(initialized.state.clone());
     let app = build_router(initialized.state);
 
     if let Some(tls) = tls {

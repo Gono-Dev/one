@@ -4,6 +4,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+use anyhow::Context;
 use axum::{
     body::Body,
     http::{header::HeaderName, HeaderMap, HeaderValue, Request, Response, StatusCode},
@@ -12,7 +13,7 @@ use axum::{
 use filetime::FileTime;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     dav_handler::dispatch::parse_rel_path,
@@ -28,18 +29,39 @@ const X_NC_OWNER_ID: HeaderName = HeaderName::from_static("x-nc-ownerid");
 const X_NC_PERMISSIONS: HeaderName = HeaderName::from_static("x-nc-permissions");
 const X_OC_MTIME: HeaderName = HeaderName::from_static("x-oc-mtime");
 const CLEANUP_GRACE_SECS: i64 = 60 * 60;
+const CLEANUP_INTERVAL_SECS: u64 = 60 * 60;
 
 type ChunkResult<T> = Result<T, Response<Body>>;
 
 pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Body> {
-    if let Err(response) = cleanup_expired_sessions(&state).await {
-        return response;
+    if let Err(err) = cleanup_expired_sessions(&state).await {
+        return internal_error(err, "cleanup expired upload sessions");
     }
 
     match handle_inner(state, request).await {
         Ok(response) => response,
         Err(response) => response,
     }
+}
+
+pub fn spawn_cleanup_task(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            match cleanup_expired_sessions(&state).await {
+                Ok(count) if count > 0 => {
+                    info!(count, "removed expired upload sessions");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    error!(?err, "failed to remove expired upload sessions");
+                }
+            }
+        }
+    })
 }
 
 async fn handle_inner(state: Arc<AppState>, request: Request<Body>) -> ChunkResult<Response<Body>> {
@@ -323,11 +345,12 @@ async fn merge_chunks(session_dir: &Path, target: &Path) -> ChunkResult<()> {
     Ok(())
 }
 
-async fn cleanup_expired_sessions(state: &AppState) -> ChunkResult<()> {
+pub async fn cleanup_expired_sessions(state: &AppState) -> anyhow::Result<usize> {
     let cutoff = db::unix_timestamp() - CLEANUP_GRACE_SECS;
     let sessions = db::list_expired_upload_sessions(&state.db, cutoff)
         .await
-        .map_err(|err| internal_error(err, "list expired upload sessions"))?;
+        .context("list expired upload sessions")?;
+    let count = sessions.len();
 
     for session in sessions {
         let upload_path = UploadPath {
@@ -335,30 +358,36 @@ async fn cleanup_expired_sessions(state: &AppState) -> ChunkResult<()> {
             upload_id: session.upload_id.clone(),
             chunk_name: None,
         };
-        remove_session_dir(state, &upload_path).await?;
+        remove_session_dir_inner(state, &upload_path).await?;
         db::delete_upload_session(&state.db, &session.owner, &session.upload_id)
             .await
-            .map_err(|err| internal_error(err, "delete expired upload session"))?;
+            .context("delete expired upload session")?;
     }
 
-    Ok(())
+    Ok(count)
 }
 
 async fn remove_session_dir(state: &AppState, upload_path: &UploadPath) -> ChunkResult<()> {
+    remove_session_dir_inner(state, upload_path)
+        .await
+        .map_err(|err| internal_error(err, "remove upload session directory"))
+}
+
+async fn remove_session_dir_inner(
+    state: &AppState,
+    upload_path: &UploadPath,
+) -> anyhow::Result<()> {
     let rel_path = Path::new(&upload_path.owner).join(&upload_path.upload_id);
     match safe_existing_path(&state.uploads_root, &rel_path) {
         Ok(path) => {
             if let Err(err) = tokio::fs::remove_dir_all(&path).await {
                 if err.kind() != std::io::ErrorKind::NotFound {
-                    return Err(internal_error(err, "remove upload session directory"));
+                    return Err(err).context("remove upload session directory");
                 }
             }
         }
         Err(_) => {
-            storage::normalize_rel_path(&rel_path).map_err(|err| {
-                warn!(?err, "upload session path escapes upload root");
-                text_response(StatusCode::FORBIDDEN, "Upload path escapes storage root")
-            })?;
+            storage::normalize_rel_path(&rel_path).context("normalize upload session path")?;
         }
     }
     Ok(())

@@ -5,7 +5,9 @@ use axum::{
     http::{header, Method, Request, StatusCode},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use gono_one::{build_router, db, db::BOOTSTRAP_USER, AppState, Config};
+use gono_one::{
+    build_router, dav_handler::chunked_upload, db, db::BOOTSTRAP_USER, AppState, Config,
+};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -1082,6 +1084,51 @@ async fn chunking_v2_rejects_impossible_total_length() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+}
+
+#[tokio::test]
+async fn expired_chunk_upload_cleanup_removes_directory_then_session_row() {
+    let (_app, _temp, _password, state) = app_with_state().await;
+    let upload_id = "expired-session";
+    let session_dir = state.uploads_root.join(BOOTSTRAP_USER).join(upload_id);
+    std::fs::create_dir_all(&session_dir).expect("create expired upload dir");
+    std::fs::write(session_dir.join("1"), "stale").expect("write stale chunk");
+
+    db::upsert_upload_session(
+        &state.db,
+        upload_id,
+        BOOTSTRAP_USER,
+        std::path::Path::new("expired-target.txt"),
+        5,
+    )
+    .await
+    .expect("insert expired upload session");
+    sqlx::query(
+        r#"
+        UPDATE upload_sessions
+        SET expires_at = ?1
+        WHERE owner = ?2 AND upload_id = ?3
+        "#,
+    )
+    .bind(db::unix_timestamp() - 7_200)
+    .bind(BOOTSTRAP_USER)
+    .bind(upload_id)
+    .execute(&state.db)
+    .await
+    .expect("expire upload session");
+
+    let removed = chunked_upload::cleanup_expired_sessions(&state)
+        .await
+        .expect("cleanup expired session");
+
+    assert_eq!(removed, 1);
+    assert!(!session_dir.exists());
+    assert!(
+        db::load_upload_session(&state.db, BOOTSTRAP_USER, upload_id)
+            .await
+            .expect("load upload session")
+            .is_none()
+    );
 }
 
 fn propfind_body() -> &'static str {
