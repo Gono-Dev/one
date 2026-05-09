@@ -109,10 +109,10 @@ GONO_ONE_RELEASE_TARGET=linux-aarch64 \
 scripts/package-release.sh
 ```
 
-On tag builds, CI runs checks, litmus, packages native Linux/macOS artifacts for `x86_64` and
-`aarch64`, then creates or updates the matching GitHub Release with the `.tar.gz` files and
-`.sha256` sidecars. Manual GitHub Actions runs package the same artifacts without creating a
-GitHub Release.
+On tag builds, CI runs checks, packages native Linux/macOS artifacts for `x86_64` and `aarch64`,
+then creates or updates the matching GitHub Release with the `.tar.gz` files and `.sha256`
+sidecars. Manual GitHub Actions runs package the same artifacts and can also run the separate
+litmus compatibility job without creating a GitHub Release.
 
 Create the first GitHub Release from a clean `main` branch with:
 
@@ -249,7 +249,8 @@ Normal restarts preserve the existing Argon2id hash and do not print or regenera
 Before calling the deployment complete:
 
 - run `cargo check`, `cargo test`, and `scripts/compat-smoke.sh`;
-- run `RUN_LITMUS=1 scripts/compat-smoke.sh` before release;
+- optionally run `RUN_LITMUS=1 scripts/compat-smoke.sh` or the manual litmus workflow before
+  release;
 - connect with Nextcloud Desktop using the service root URL, such as `https://gono.cloud`;
 - verify upload, download, rename, copy, delete, large chunked upload, and restart behavior;
 - confirm capabilities advertise `notify_push` and `/push/ws` accepts WebSocket login;
