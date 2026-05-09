@@ -193,6 +193,9 @@ Before calling the deployment complete:
 - Run `NC_DAV_CONFIG=/etc/gono-one/config.toml gono-one consistency-check` after restores or
   manual filesystem maintenance. It is read-only and reports SQLite/file/xattr mismatches, orphan
   `file_id` rows, and orphan dead props.
+- Run `NC_DAV_CONFIG=/etc/gono-one/config.toml gono-one consistency-repair` first to preview safe
+  fixes. Only run `gono-one consistency-repair --apply` after a backup; it can create missing
+  `file_ids`, rewrite missing or stale xattrs/cache, and remove orphan `file_ids`/dead props.
 - Configure `[sync] change_log_retention_days` and `change_log_min_entries` for the deployment's
   sync history window. Rows older than the retention window are pruned only when they fall outside
   the minimum retained row count; clients with a token older than the retained floor receive

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use gono_one::{
-    consistency::{self, ConsistencyIssueKind},
+    consistency::{self, ConsistencyIssueKind, RepairActionKind, RepairMode},
     db, AppState, Config,
 };
 use tempfile::TempDir;
@@ -148,6 +148,107 @@ async fn consistency_check_reports_missing_xattr() {
         ConsistencyIssueKind::MissingXattr,
         "missing-xattr.txt",
     );
+}
+
+#[tokio::test]
+async fn consistency_repair_dry_run_plans_without_mutating() {
+    let temp = TempDir::new().expect("tempdir");
+    let config = test_config(&temp);
+    let initialized = AppState::initialize(config.clone())
+        .await
+        .expect("init app state");
+    let state = initialized.state;
+    std::fs::write(state.files_root.join("loose.txt"), "loose").expect("write loose file");
+
+    let repair = consistency::repair(&config, RepairMode::DryRun)
+        .await
+        .expect("repair dry run");
+    assert!(repair
+        .actions
+        .iter()
+        .any(|action| action.kind == RepairActionKind::EnsureFileRecord
+            && action.rel_path == "loose.txt"));
+    assert!(repair.actions.iter().all(|action| !action.applied));
+
+    let report = consistency::check(&config)
+        .await
+        .expect("consistency check");
+    assert_issue(
+        &report,
+        ConsistencyIssueKind::MissingFileRecord,
+        "loose.txt",
+    );
+}
+
+#[tokio::test]
+async fn consistency_repair_apply_fixes_safe_issues() {
+    let temp = TempDir::new().expect("tempdir");
+    let config = test_config(&temp);
+    let initialized = AppState::initialize(config.clone())
+        .await
+        .expect("init app state");
+    let state = initialized.state;
+
+    std::fs::write(state.files_root.join("loose.txt"), "loose").expect("write loose file");
+
+    let rel_path = Path::new("missing-xattr.txt");
+    let abs_path = state.files_root.join(rel_path);
+    std::fs::write(&abs_path, "xattr").expect("write xattr file");
+    db::ensure_file_record(
+        &state.db,
+        db::FileRecordInput {
+            owner: &state.owner,
+            rel_path,
+            abs_path: &abs_path,
+            instance_id: &state.instance_id,
+            xattr_ns: &state.xattr_ns,
+        },
+    )
+    .await
+    .expect("ensure file record");
+    xattr::remove(&abs_path, format!("{}.fileid", state.xattr_ns)).expect("remove fileid xattr");
+
+    sqlx::query(
+        r#"
+        INSERT INTO file_ids(owner, rel_path, permissions, favorite, created_at)
+        VALUES(?1, 'ghost.txt', 63, 0, ?2)
+        "#,
+    )
+    .bind(&state.owner)
+    .bind(db::unix_timestamp())
+    .execute(&state.db)
+    .await
+    .expect("insert orphan file_id");
+    db::set_dead_prop(
+        &state.db,
+        &state.owner,
+        Path::new("ghost.txt"),
+        Some("http://example.com/ns"),
+        "stale",
+        b"<x:stale xmlns:x=\"http://example.com/ns\" />",
+    )
+    .await
+    .expect("insert orphan dead prop");
+
+    let before = consistency::check(&config)
+        .await
+        .expect("consistency check");
+    assert!(!before.is_clean());
+
+    let repair = consistency::repair(&config, RepairMode::Apply)
+        .await
+        .expect("repair apply");
+    assert!(repair.actions.iter().any(|action| action.applied));
+    assert!(
+        repair.after.as_ref().expect("after report").is_clean(),
+        "{}",
+        repair.render_text()
+    );
+
+    let file_id = xattr::get(&abs_path, format!("{}.fileid", state.xattr_ns))
+        .expect("read repaired xattr")
+        .expect("fileid xattr");
+    assert!(!file_id.is_empty());
 }
 
 fn assert_issue(report: &consistency::ConsistencyReport, kind: ConsistencyIssueKind, path: &str) {

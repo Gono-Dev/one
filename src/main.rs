@@ -2,7 +2,12 @@ use std::{net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::{bail, Context};
 use axum_server::{tls_rustls::RustlsConfig, Handle};
-use gono_one::{build_router, consistency, dav_handler::chunked_upload, AppState, Config};
+use gono_one::{
+    build_router,
+    consistency::{self, RepairMode},
+    dav_handler::chunked_upload,
+    AppState, Config,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -22,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
     match command {
         Command::Serve => run_server(&config_path, config).await,
         Command::ConsistencyCheck => run_consistency_check(config).await,
+        Command::ConsistencyRepair(mode) => run_consistency_repair(config, mode).await,
         Command::Help => unreachable!("handled before config load"),
     }
 }
@@ -99,11 +105,33 @@ async fn run_consistency_check(config: Config) -> anyhow::Result<()> {
     }
 }
 
+async fn run_consistency_repair(config: Config, mode: RepairMode) -> anyhow::Result<()> {
+    let report = consistency::repair(&config, mode).await?;
+    print!("{}", report.render_text());
+    match mode {
+        RepairMode::DryRun => {
+            if report.actions.is_empty() {
+                Ok(())
+            } else {
+                std::process::exit(2);
+            }
+        }
+        RepairMode::Apply => {
+            if report.after.as_ref().is_some_and(|after| after.is_clean()) {
+                Ok(())
+            } else {
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
 fn print_help() {
     println!(concat!(
         "Usage:\n",
         "  gono-one [serve]\n",
         "  gono-one consistency-check\n",
+        "  gono-one consistency-repair [--dry-run|--apply]\n",
         "\n",
         "Environment:\n",
         "  NC_DAV_CONFIG    Path to config.toml (default: config.toml)\n",
@@ -114,6 +142,7 @@ fn print_help() {
 enum Command {
     Serve,
     ConsistencyCheck,
+    ConsistencyRepair(RepairMode),
     Help,
 }
 
@@ -124,6 +153,15 @@ impl Command {
             [] => Ok(Self::Serve),
             [command] if command == "serve" => Ok(Self::Serve),
             [command] if command == "consistency-check" => Ok(Self::ConsistencyCheck),
+            [command] if command == "consistency-repair" => {
+                Ok(Self::ConsistencyRepair(RepairMode::DryRun))
+            }
+            [command, mode] if command == "consistency-repair" && mode == "--dry-run" => {
+                Ok(Self::ConsistencyRepair(RepairMode::DryRun))
+            }
+            [command, mode] if command == "consistency-repair" && mode == "--apply" => {
+                Ok(Self::ConsistencyRepair(RepairMode::Apply))
+            }
             [command] if command == "--help" || command == "-h" || command == "help" => {
                 Ok(Self::Help)
             }
@@ -228,7 +266,7 @@ async fn stop_upload_cleanup(upload_cleanup: tokio::task::JoinHandle<()>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, LogFormat};
+    use super::{Command, LogFormat, RepairMode};
 
     #[test]
     fn log_format_parser_accepts_supported_formats() {
@@ -249,6 +287,14 @@ mod tests {
         assert_eq!(
             Command::parse(["consistency-check".to_owned()]).unwrap(),
             Command::ConsistencyCheck
+        );
+        assert_eq!(
+            Command::parse(["consistency-repair".to_owned()]).unwrap(),
+            Command::ConsistencyRepair(RepairMode::DryRun)
+        );
+        assert_eq!(
+            Command::parse(["consistency-repair".to_owned(), "--apply".to_owned()]).unwrap(),
+            Command::ConsistencyRepair(RepairMode::Apply)
         );
         assert_eq!(
             Command::parse(["--help".to_owned()]).unwrap(),

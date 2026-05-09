@@ -9,7 +9,11 @@ use sqlx::{
     Row, SqlitePool,
 };
 
-use crate::{config::Config, db::BOOTSTRAP_USER, storage};
+use crate::{
+    config::Config,
+    db::{self, BOOTSTRAP_USER},
+    storage,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsistencyReport {
@@ -30,6 +34,38 @@ pub struct ConsistencyIssue {
     pub owner: Option<String>,
     pub rel_path: Option<String>,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairReport {
+    pub mode: RepairMode,
+    pub before: ConsistencyReport,
+    pub actions: Vec<RepairAction>,
+    pub after: Option<ConsistencyReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairMode {
+    DryRun,
+    Apply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairAction {
+    pub kind: RepairActionKind,
+    pub owner: String,
+    pub rel_path: String,
+    pub detail: String,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepairActionKind {
+    DeleteFileRecord,
+    EnsureFileRecord,
+    RefreshFileMetadata,
+    DeleteDeadProps,
+    SkipUnsafe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +111,46 @@ impl ConsistencyReport {
                 issue.rel_path.as_deref().unwrap_or("-"),
                 issue.detail,
             ));
+        }
+
+        output
+    }
+}
+
+impl RepairReport {
+    pub fn render_text(&self) -> String {
+        let mut output = format!(
+            concat!(
+                "gono-one consistency repair ({})\n",
+                "before_issues: {}\n",
+                "actions: {}\n",
+            ),
+            match self.mode {
+                RepairMode::DryRun => "dry-run",
+                RepairMode::Apply => "apply",
+            },
+            self.before.issues.len(),
+            self.actions.len(),
+        );
+
+        for action in &self.actions {
+            output.push_str(&format!(
+                "- {:?} applied={} owner={} path={} detail={}\n",
+                action.kind, action.applied, action.owner, action.rel_path, action.detail,
+            ));
+        }
+
+        if let Some(after) = &self.after {
+            output.push_str(&format!("after_issues: {}\n", after.issues.len()));
+            for issue in &after.issues {
+                output.push_str(&format!(
+                    "- remaining {:?} owner={} path={} detail={}\n",
+                    issue.kind,
+                    issue.owner.as_deref().unwrap_or("-"),
+                    issue.rel_path.as_deref().unwrap_or("-"),
+                    issue.detail,
+                ));
+            }
         }
 
         output
@@ -166,6 +242,48 @@ pub async fn check(config: &Config) -> Result<ConsistencyReport> {
     });
 
     Ok(report)
+}
+
+pub async fn repair(config: &Config, mode: RepairMode) -> Result<RepairReport> {
+    let before = check(config).await?;
+    let roots = ExistingStorageRoots::load(config)?;
+    let pool = db::connect(&config.db).await?;
+    db::migrate(&pool).await?;
+    let file_records = load_file_records(&pool).await?;
+    let records_by_path: BTreeMap<(String, String), FileRecordRow> = file_records
+        .iter()
+        .cloned()
+        .map(|row| ((row.owner.clone(), row.rel_path.clone()), row))
+        .collect();
+    let records_by_id: BTreeMap<(String, i64), FileRecordRow> = file_records
+        .iter()
+        .cloned()
+        .map(|row| ((row.owner.clone(), row.id), row))
+        .collect();
+    let actions = plan_repair_actions(
+        &before,
+        &roots,
+        &config.storage.xattr_ns,
+        &records_by_path,
+        &records_by_id,
+    );
+    let actions = if mode == RepairMode::Apply {
+        apply_repair_actions(&pool, &roots, &config.storage.xattr_ns, actions).await?
+    } else {
+        actions
+    };
+    let after = if mode == RepairMode::Apply {
+        Some(check(config).await?)
+    } else {
+        None
+    };
+
+    Ok(RepairReport {
+        mode,
+        before,
+        actions,
+        after,
+    })
 }
 
 fn check_file_records(
@@ -432,6 +550,259 @@ fn check_dead_props(
     }
 }
 
+fn plan_repair_actions(
+    report: &ConsistencyReport,
+    roots: &ExistingStorageRoots,
+    xattr_ns: &str,
+    records_by_path: &BTreeMap<(String, String), FileRecordRow>,
+    records_by_id: &BTreeMap<(String, i64), FileRecordRow>,
+) -> Vec<RepairAction> {
+    let mut actions = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for issue in &report.issues {
+        let owner = issue
+            .owner
+            .clone()
+            .unwrap_or_else(|| BOOTSTRAP_USER.to_owned());
+        let rel_path = match &issue.rel_path {
+            Some(rel_path) => rel_path.clone(),
+            None => continue,
+        };
+        let action = match issue.kind {
+            ConsistencyIssueKind::InvalidFileRecordPath
+            | ConsistencyIssueKind::OrphanFileRecord => RepairAction {
+                kind: RepairActionKind::DeleteFileRecord,
+                owner,
+                rel_path,
+                detail: "delete unusable file_ids row".to_owned(),
+                applied: false,
+            },
+            ConsistencyIssueKind::MissingFileRecord => RepairAction {
+                kind: RepairActionKind::EnsureFileRecord,
+                owner,
+                rel_path,
+                detail: "create missing file_ids row and xattrs from filesystem".to_owned(),
+                applied: false,
+            },
+            ConsistencyIssueKind::MissingXattr
+            | ConsistencyIssueKind::InvalidXattr
+            | ConsistencyIssueKind::XattrMismatch
+            | ConsistencyIssueKind::StaleFileRecordCache => RepairAction {
+                kind: RepairActionKind::RefreshFileMetadata,
+                owner,
+                rel_path,
+                detail: "rewrite file xattrs and SQLite metadata cache".to_owned(),
+                applied: false,
+            },
+            ConsistencyIssueKind::XattrWithoutFileRecord => plan_xattr_without_record_action(
+                roots,
+                xattr_ns,
+                records_by_path,
+                records_by_id,
+                owner,
+                rel_path,
+            ),
+            ConsistencyIssueKind::DeadPropWithoutFile
+            | ConsistencyIssueKind::DeadPropWithoutFileRecord
+            | ConsistencyIssueKind::InvalidDeadPropPath => RepairAction {
+                kind: RepairActionKind::DeleteDeadProps,
+                owner,
+                rel_path,
+                detail: "delete dead_props rows for missing or invalid target".to_owned(),
+                applied: false,
+            },
+        };
+
+        if seen.insert((action.kind, action.owner.clone(), action.rel_path.clone())) {
+            actions.push(action);
+        }
+    }
+
+    actions.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.owner.cmp(&right.owner))
+            .then_with(|| left.rel_path.cmp(&right.rel_path))
+    });
+    actions
+}
+
+fn plan_xattr_without_record_action(
+    roots: &ExistingStorageRoots,
+    xattr_ns: &str,
+    records_by_path: &BTreeMap<(String, String), FileRecordRow>,
+    records_by_id: &BTreeMap<(String, i64), FileRecordRow>,
+    owner: String,
+    rel_path: String,
+) -> RepairAction {
+    let key = (owner.clone(), rel_path.clone());
+    if records_by_path.contains_key(&key) {
+        return RepairAction {
+            kind: RepairActionKind::RefreshFileMetadata,
+            owner,
+            rel_path,
+            detail: "rewrite xattrs to match existing SQLite row".to_owned(),
+            applied: false,
+        };
+    }
+
+    let rel_path_buf = PathBuf::from(&rel_path);
+    let file_id = storage::safe_existing_path(&roots.files_root, &rel_path_buf)
+        .ok()
+        .and_then(|abs_path| read_entry_xattrs(&abs_path, xattr_ns).ok())
+        .and_then(|xattrs| parse_i64_xattr(xattrs.file_id.as_deref()).ok().flatten());
+
+    if let Some(file_id) = file_id {
+        if records_by_id.contains_key(&(owner.clone(), file_id)) {
+            return RepairAction {
+                kind: RepairActionKind::SkipUnsafe,
+                owner,
+                rel_path,
+                detail: format!(
+                    "xattr fileid={file_id} belongs to another SQLite path; manual repair required"
+                ),
+                applied: false,
+            };
+        }
+    }
+
+    RepairAction {
+        kind: RepairActionKind::EnsureFileRecord,
+        owner,
+        rel_path,
+        detail: "attach orphan xattr fileid or create a file_ids row".to_owned(),
+        applied: false,
+    }
+}
+
+async fn apply_repair_actions(
+    pool: &SqlitePool,
+    roots: &ExistingStorageRoots,
+    xattr_ns: &str,
+    actions: Vec<RepairAction>,
+) -> Result<Vec<RepairAction>> {
+    let mut applied = Vec::with_capacity(actions.len());
+
+    for mut action in actions {
+        match action.kind {
+            RepairActionKind::DeleteFileRecord => {
+                delete_file_record(pool, &action.owner, &action.rel_path).await?;
+                action.applied = true;
+            }
+            RepairActionKind::EnsureFileRecord => {
+                ensure_file_record(pool, roots, xattr_ns, &action.owner, &action.rel_path).await?;
+                action.applied = true;
+            }
+            RepairActionKind::RefreshFileMetadata => {
+                refresh_file_metadata(pool, roots, xattr_ns, &action.owner, &action.rel_path)
+                    .await?;
+                action.applied = true;
+            }
+            RepairActionKind::DeleteDeadProps => {
+                delete_dead_props(pool, &action.owner, &action.rel_path).await?;
+                action.applied = true;
+            }
+            RepairActionKind::SkipUnsafe => {}
+        }
+        applied.push(action);
+    }
+
+    Ok(applied)
+}
+
+async fn delete_file_record(pool: &SqlitePool, owner: &str, rel_path: &str) -> Result<()> {
+    sqlx::query("DELETE FROM file_ids WHERE owner = ?1 AND rel_path = ?2")
+        .bind(owner)
+        .bind(rel_path)
+        .execute(pool)
+        .await
+        .context("delete orphan file_ids row")?;
+    Ok(())
+}
+
+async fn delete_dead_props(pool: &SqlitePool, owner: &str, rel_path: &str) -> Result<()> {
+    sqlx::query("DELETE FROM dead_props WHERE owner = ?1 AND rel_path = ?2")
+        .bind(owner)
+        .bind(rel_path)
+        .execute(pool)
+        .await
+        .context("delete orphan dead_props rows")?;
+    Ok(())
+}
+
+async fn ensure_file_record(
+    pool: &SqlitePool,
+    roots: &ExistingStorageRoots,
+    xattr_ns: &str,
+    owner: &str,
+    rel_path: &str,
+) -> Result<()> {
+    let rel_path_buf = PathBuf::from(rel_path);
+    let abs_path = storage::safe_existing_path(&roots.files_root, &rel_path_buf)
+        .with_context(|| format!("resolve filesystem entry {rel_path}"))?;
+    db::ensure_file_record(
+        pool,
+        db::FileRecordInput {
+            owner,
+            rel_path: &rel_path_buf,
+            abs_path: &abs_path,
+            instance_id: "phase1",
+            xattr_ns,
+        },
+    )
+    .await
+    .with_context(|| format!("ensure file_ids row for {rel_path}"))?;
+    Ok(())
+}
+
+async fn refresh_file_metadata(
+    pool: &SqlitePool,
+    roots: &ExistingStorageRoots,
+    xattr_ns: &str,
+    owner: &str,
+    rel_path: &str,
+) -> Result<()> {
+    let record = load_file_record(pool, owner, rel_path)
+        .await?
+        .with_context(|| format!("load file_ids row for {rel_path}"))?;
+    let rel_path_buf = PathBuf::from(rel_path);
+    let abs_path = storage::safe_existing_path(&roots.files_root, &rel_path_buf)
+        .with_context(|| format!("resolve filesystem entry {rel_path}"))?;
+    let (mtime_ns, file_size) = storage::metadata_fingerprint(&abs_path)?;
+    let etag = derive_etag(mtime_ns, file_size);
+    let permissions = record.permissions.unwrap_or(0x3f);
+    let favorite = if record.favorite { "1" } else { "0" };
+
+    write_string_xattr(&abs_path, xattr_ns, "fileid", &record.id.to_string())?;
+    write_string_xattr(&abs_path, xattr_ns, "etag", &etag)?;
+    write_string_xattr(&abs_path, xattr_ns, "favorite", favorite)?;
+    write_string_xattr(&abs_path, xattr_ns, "perms", &permissions.to_string())?;
+
+    sqlx::query(
+        r#"
+        UPDATE file_ids
+        SET etag = ?1,
+            permissions = ?2,
+            favorite = ?3,
+            mtime_ns = ?4,
+            file_size = ?5
+        WHERE owner = ?6 AND rel_path = ?7
+        "#,
+    )
+    .bind(etag)
+    .bind(permissions)
+    .bind(if record.favorite { 1 } else { 0 })
+    .bind(mtime_ns)
+    .bind(file_size)
+    .bind(owner)
+    .bind(rel_path)
+    .execute(pool)
+    .await
+    .context("refresh file_ids metadata cache")?;
+    Ok(())
+}
+
 impl ConsistencyReport {
     fn issue(
         &mut self,
@@ -492,6 +863,27 @@ async fn load_file_records(pool: &SqlitePool) -> Result<Vec<FileRecordRow>> {
     .context("load file_ids rows")?;
 
     rows.into_iter().map(file_record_from_row).collect()
+}
+
+async fn load_file_record(
+    pool: &SqlitePool,
+    owner: &str,
+    rel_path: &str,
+) -> Result<Option<FileRecordRow>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, owner, rel_path, etag, permissions, favorite, mtime_ns, file_size
+        FROM file_ids
+        WHERE owner = ?1 AND rel_path = ?2
+        "#,
+    )
+    .bind(owner)
+    .bind(rel_path)
+    .fetch_optional(pool)
+    .await
+    .context("load file_ids row")?;
+
+    row.map(file_record_from_row).transpose()
 }
 
 fn file_record_from_row(row: SqliteRow) -> Result<FileRecordRow> {
@@ -590,6 +982,11 @@ fn read_string_xattr(path: &Path, namespace: &str, name: &str) -> Result<Option<
     })
 }
 
+fn write_string_xattr(path: &Path, namespace: &str, name: &str, value: &str) -> Result<()> {
+    xattr::set(path, format!("{namespace}.{name}"), value.as_bytes())
+        .with_context(|| format!("write xattr {namespace}.{name} to {}", path.display()))
+}
+
 fn parse_i64_xattr(value: Option<&str>) -> Result<Option<i64>> {
     value
         .map(|value| {
@@ -598,4 +995,8 @@ fn parse_i64_xattr(value: Option<&str>) -> Result<Option<i64>> {
                 .with_context(|| format!("parse integer xattr value {value:?}"))
         })
         .transpose()
+}
+
+fn derive_etag(mtime_ns: i64, file_size: i64) -> String {
+    format!("{file_size:x}-{mtime_ns:x}")
 }
