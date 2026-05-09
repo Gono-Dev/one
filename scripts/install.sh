@@ -215,6 +215,30 @@ prompt_uninstall_purge() {
   esac
 }
 
+prompt_interactive_uninstall() {
+  local input
+  if is_enabled "${ASSUME_YES}"; then
+    return
+  fi
+
+  warn "uninstall will stop Gono Cloud and remove the service files plus installed binary"
+  warn "config, database, stored files, and logs are preserved by default"
+  printf "Continue uninstall and keep data? [Y/n] "
+  if ! read -r input; then
+    die "failed to read uninstall confirmation"
+  fi
+  case "${input}" in
+    [nN]|[nN][oO])
+      log "uninstall cancelled"
+      exit 0
+      ;;
+  esac
+
+  prompt_uninstall_purge
+  ASSUME_YES="1"
+  export GONO_CLOUD_YES="${ASSUME_YES}"
+}
+
 show_interactive_menu() {
   local choice
 
@@ -248,7 +272,7 @@ EOF
         ;;
       2|uninstall|remove|u|U)
         set_command "uninstall"
-        prompt_uninstall_purge
+        prompt_interactive_uninstall
         return
         ;;
       3|restart|r|R)
