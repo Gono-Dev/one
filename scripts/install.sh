@@ -203,12 +203,12 @@ prompt_uninstall_purge() {
     return
   fi
 
-  printf "Remove config, data, and logs too? [y/N] "
+  printf "Don't Remove config, data, and logs too? [Y/n] "
   if ! read -r input; then
     die "failed to read purge selection"
   fi
   case "${input}" in
-    [yY]|[yY][eE][sS])
+    [nN]|[nN][oO])
       PURGE="1"
       export GONO_CLOUD_PURGE="${PURGE}"
       ;;
