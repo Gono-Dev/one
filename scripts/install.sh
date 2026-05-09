@@ -1357,11 +1357,60 @@ show_service_status() {
   case "${PLATFORM}" in
     linux)
       require_cmd systemctl
-      systemctl status "${SERVICE_NAME}" --no-pager
+      log "service: ${SERVICE_NAME}"
+      log "binary: ${BIN_PATH}"
+      log "config: ${CONFIG_FILE}"
+      log "data: ${DATA_DIR}"
+      log "logs: ${LOG_DIR}"
+      local active enabled url
+      active="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
+      enabled="$(systemctl is-enabled "${SERVICE_NAME}" 2>/dev/null || true)"
+      log "systemd active: ${active:-unknown}"
+      log "systemd enabled: ${enabled:-unknown}"
+      url="$(health_url)"
+      if command -v curl >/dev/null 2>&1 && curl -fsS "${url}" >/dev/null 2>&1; then
+        log "health: ok (${url})"
+      else
+        warn "health: not reachable (${url})"
+      fi
+      if ! systemctl status "${SERVICE_NAME}" --no-pager -l; then
+        warn "systemctl status exited non-zero; service may be inactive or not installed"
+      fi
       ;;
     macos)
       require_cmd launchctl
-      launchctl print "system/${SERVICE_NAME}"
+      log "service: ${SERVICE_NAME}"
+      log "binary: ${BIN_PATH}"
+      log "config: ${CONFIG_FILE}"
+      log "data: ${DATA_DIR}"
+      log "logs: ${LOG_DIR}"
+      local output state pid last_exit url
+      url="$(health_url)"
+      if command -v curl >/dev/null 2>&1 && curl -fsS "${url}" >/dev/null 2>&1; then
+        log "health: ok (${url})"
+      else
+        warn "health: not reachable (${url})"
+      fi
+      if output="$(launchctl print "system/${SERVICE_NAME}" 2>&1)"; then
+        state="$(printf '%s\n' "${output}" | sed -n 's/^[[:space:]]*state = //p' | head -n 1)"
+        pid="$(printf '%s\n' "${output}" | sed -n 's/^[[:space:]]*pid = //p' | head -n 1)"
+        last_exit="$(printf '%s\n' "${output}" | sed -n 's/^[[:space:]]*last exit code = //p' | head -n 1)"
+        log "launchd state: ${state:-loaded}"
+        if [[ -n "${pid}" ]]; then
+          log "pid: ${pid}"
+        fi
+        if [[ -n "${last_exit}" ]]; then
+          log "last exit code: ${last_exit}"
+        fi
+      else
+        warn "launchctl status is unavailable for system/${SERVICE_NAME}"
+        printf '%s\n' "${output}" >&2
+        if [[ -f "${PLIST_PATH}" ]]; then
+          log "plist exists: ${PLIST_PATH}"
+        else
+          warn "plist not found: ${PLIST_PATH}"
+        fi
+      fi
       ;;
   esac
 }
