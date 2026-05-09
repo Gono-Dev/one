@@ -365,6 +365,17 @@ max_connections = ${MAX_CONNECTIONS}
 
 [auth]
 realm = "${AUTH_REALM}"
+
+[notify_push]
+enabled = true
+path = "/push"
+advertised_types = ["files", "activities", "notifications"]
+pre_auth_ttl_secs = 15
+user_connection_limit = 64
+max_debounce_secs = 15
+ping_interval_secs = 30
+auth_timeout_secs = 15
+max_connection_secs = 0
 EOF
     chown root:"${RUN_GROUP}" "${CONFIG_FILE}"
     chmod 0640 "${CONFIG_FILE}"
@@ -649,7 +660,7 @@ main() {
   else
     log "no new bootstrap password was printed; existing database/password was preserved"
   fi
-  log "configure HTTPS reverse proxy to forward ${BASE_URL} to http://${BIND}"
+  log "configure HTTPS reverse proxy, including WebSocket upgrade for ${BASE_URL}/push/ws, to forward to http://${BIND}"
 }
 
 TMP_DIR="$(mktemp -d)"

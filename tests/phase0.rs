@@ -31,7 +31,11 @@ async fn spawn_app_server(app: axum::Router) -> (String, tokio::task::JoinHandle
 }
 
 async fn login_ws(base_url: &str, username: &str, password: &str) -> TestWebSocket {
-    let (mut websocket, _response) = connect_async(ws_url(base_url))
+    login_ws_at(base_url, "/push/ws", username, password).await
+}
+
+async fn login_ws_at(base_url: &str, path: &str, username: &str, password: &str) -> TestWebSocket {
+    let (mut websocket, _response) = connect_async(ws_url(base_url, path))
         .await
         .expect("connect websocket");
     websocket
@@ -63,14 +67,19 @@ async fn next_ws_text(websocket: &mut TestWebSocket) -> String {
     }
 }
 
-fn ws_url(base_url: &str) -> String {
+fn ws_url(base_url: &str, path: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
-    if let Some(rest) = base_url.strip_prefix("https://") {
-        format!("wss://{rest}/push/ws")
-    } else if let Some(rest) = base_url.strip_prefix("http://") {
-        format!("ws://{rest}/push/ws")
+    let path = if path.starts_with('/') {
+        path.to_owned()
     } else {
-        format!("{base_url}/push/ws")
+        format!("/{path}")
+    };
+    if let Some(rest) = base_url.strip_prefix("https://") {
+        format!("wss://{rest}{path}")
+    } else if let Some(rest) = base_url.strip_prefix("http://") {
+        format!("ws://{rest}{path}")
+    } else {
+        format!("{base_url}{path}")
     }
 }
 
@@ -80,8 +89,15 @@ async fn app_with_temp_root() -> (axum::Router, TempDir, String) {
 }
 
 async fn app_with_state() -> (axum::Router, TempDir, String, Arc<AppState>) {
+    app_with_config(|_config| {}).await
+}
+
+async fn app_with_config(
+    configure: impl FnOnce(&mut Config),
+) -> (axum::Router, TempDir, String, Arc<AppState>) {
     let temp = TempDir::new().expect("tempdir");
-    let config = test_config(&temp);
+    let mut config = test_config(&temp);
+    configure(&mut config);
     let initialized = AppState::initialize(config)
         .await
         .expect("phase1 app state");
@@ -150,6 +166,65 @@ async fn capabilities_are_public() {
     assert!(body.contains("\"notify_push\""));
     assert!(body.contains("\"websocket\":\"wss://127.0.0.1:3000/push/ws\""));
     assert!(body.contains("\"pre_auth\":\"https://127.0.0.1:3000/apps/notify_push/pre_auth\""));
+}
+
+#[tokio::test]
+async fn notify_push_can_be_disabled() {
+    let (app, _temp, _password, state) = app_with_config(|config| {
+        config.notify_push.enabled = false;
+    })
+    .await;
+    assert!(state.notify_push.is_none());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ocs/v2.php/cloud/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(!body.contains("\"notify_push\""));
+}
+
+#[tokio::test]
+async fn notify_push_custom_websocket_path_is_advertised_and_routed() {
+    let (app, _temp, password, _state) = app_with_config(|config| {
+        config.notify_push.path = "/events".to_owned();
+    })
+    .await;
+
+    let capabilities = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ocs/v2.php/cloud/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(capabilities.status(), StatusCode::OK);
+    let body = to_bytes(capabilities.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("\"websocket\":\"wss://127.0.0.1:3000/events/ws\""));
+
+    let (base_url, server) = spawn_app_server(app).await;
+    let mut websocket = login_ws_at(&base_url, "/events/ws", BOOTSTRAP_USER, &password).await;
+    assert_eq!(next_ws_text(&mut websocket).await, "authenticated");
+    let _ = websocket.close(None).await;
+
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -356,6 +431,62 @@ async fn notify_push_pre_auth_websocket_token_is_one_time() {
     let mut reused = login_ws(&base_url, "", &token).await;
     assert!(next_ws_text(&mut reused).await.starts_with("err:"));
 
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn notify_push_expired_pre_auth_token_is_rejected_by_websocket() {
+    let (app, _temp, password, _state) = app_with_config(|config| {
+        config.notify_push.pre_auth_ttl_secs = 0;
+    })
+    .await;
+    let token_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/apps/notify_push/pre_auth")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(token_response.status(), StatusCode::OK);
+    let token = to_bytes(token_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token = std::str::from_utf8(&token).unwrap().to_owned();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let (base_url, server) = spawn_app_server(app).await;
+    let mut websocket = login_ws(&base_url, "", &token).await;
+    assert!(next_ws_text(&mut websocket)
+        .await
+        .starts_with("err: Invalid pre-auth token"));
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn notify_push_websocket_enforces_user_connection_limit() {
+    let (app, _temp, password, _state) = app_with_config(|config| {
+        config.notify_push.user_connection_limit = 1;
+    })
+    .await;
+    let (base_url, server) = spawn_app_server(app).await;
+
+    let mut first = login_ws(&base_url, BOOTSTRAP_USER, &password).await;
+    assert_eq!(next_ws_text(&mut first).await, "authenticated");
+
+    let mut second = login_ws(&base_url, BOOTSTRAP_USER, &password).await;
+    assert!(next_ws_text(&mut second)
+        .await
+        .starts_with("err: Too many connections"));
+
+    let _ = first.close(None).await;
     server.abort();
     let _ = server.await;
 }

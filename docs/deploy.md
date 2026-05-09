@@ -95,6 +95,28 @@ gono.one {
 }
 ```
 
+Notify Push uses WebSocket at `/push/ws`. Caddy handles WebSocket upgrade automatically. For Nginx,
+make sure the proxy keeps the upgrade headers:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:16102;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location /push/ws {
+    proxy_pass http://127.0.0.1:16102;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
 Use a custom domain or port with:
 
 ```sh
@@ -134,6 +156,7 @@ Before calling the deployment complete:
 - run `RUN_LITMUS=1 scripts/compat-smoke.sh` before release;
 - connect with Nextcloud Desktop using the service root URL, such as `https://gono.one`;
 - verify upload, download, rename, copy, delete, large chunked upload, and restart behavior;
+- confirm capabilities advertise `notify_push` and `/push/ws` accepts WebSocket login;
 - confirm `/metrics` requires Basic Auth and logs are collected in the expected format.
 
 ## Operational Notes

@@ -19,6 +19,7 @@ The script creates a temporary config and data directory, starts `gono-one` over
 - root path WebDAV compatibility
 - `PUT`, `GET`, `COPY`, `MOVE`, `DELETE`
 - Nextcloud chunking v2 `MKCOL + PUT chunks + MOVE .file`
+- notify_push capabilities and WebSocket authentication
 - authenticated `/metrics`
 
 Set `KEEP_SMOKE_DIR=1` to keep the temporary data directory for inspection. Set `NC_DAV_SMOKE_PORT=16102` to force a port.
