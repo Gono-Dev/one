@@ -132,6 +132,16 @@ GONO_ONE_INSTALL_SOURCE=release scripts/install.sh
 `GONO_ONE_INSTALL_SOURCE=auto` is the default: local repository installs use the local binary, while
 `bash <(curl -sL https://run.gono.one)` continues to use release artifacts.
 
+The installer also accepts command-line options for the common environment variables:
+
+```sh
+scripts/install.sh --help
+scripts/install.sh --debug
+scripts/install.sh --bin target/release/gono-one
+scripts/install.sh --release --version latest
+scripts/install.sh --domain files.example.com --bind 127.0.0.1:18080
+```
+
 ## Domain And Reverse Proxy
 
 The installer defaults to:

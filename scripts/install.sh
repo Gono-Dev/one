@@ -32,6 +32,10 @@ RUN_USER=""
 RUN_GROUP=""
 DOMAIN="${GONO_ONE_DOMAIN:-gono.one}"
 BASE_URL="${GONO_ONE_BASE_URL:-https://${DOMAIN}}"
+BASE_URL_EXPLICIT=0
+if [[ -n "${GONO_ONE_BASE_URL+x}" ]]; then
+  BASE_URL_EXPLICIT=1
+fi
 BIND="${GONO_ONE_BIND:-127.0.0.1:16102}"
 XATTR_NS="${GONO_ONE_XATTR_NS:-user.nc}"
 AUTH_REALM="${GONO_ONE_AUTH_REALM:-Nextcloud}"
@@ -62,6 +66,310 @@ die() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+usage_name() {
+  if [[ -n "${SCRIPT_PATH}" && -n "${REPO_ROOT}" && "${SCRIPT_PATH}" == "${REPO_ROOT}/"* ]]; then
+    printf '%s\n' "${SCRIPT_PATH#"${REPO_ROOT}/"}"
+  elif [[ -n "${SCRIPT_PATH}" ]]; then
+    printf '%s\n' "${SCRIPT_PATH}"
+  else
+    printf '%s\n' "bash <(curl -sL ${INSTALL_URL})"
+  fi
+}
+
+show_usage() {
+  cat <<EOF
+Gono One installer
+
+Usage:
+  $(usage_name) [options]
+  bash <(curl -sL ${INSTALL_URL}) [options]
+
+Source options:
+  --local                    Use local repository/binary source
+  --release                  Download a release artifact
+  --install-source VALUE     auto, local, or release (default: ${INSTALL_SOURCE})
+  --bin PATH                 Install this local gono-one binary
+  --bin-url URL              Download this exact binary/archive URL
+  --version VERSION          Release version or latest (default: ${VERSION})
+  --release-base URL         Release base URL (default: ${RELEASE_BASE})
+  --sha256 HASH              Verify downloaded artifact sha256
+
+Local build options:
+  --build-profile VALUE      release or debug (default: ${LOCAL_BUILD_PROFILE})
+  --debug                    Same as --build-profile debug
+  --local-build              Force cargo build for local source
+  --no-local-build           Reuse existing local binary
+
+Target options:
+  --arch ARCH                Override architecture detection
+  --domain DOMAIN            Public domain (default: ${DOMAIN})
+  --base-url URL             Public base URL (default: ${BASE_URL})
+  --bind ADDR                Local bind address (default: ${BIND})
+  --install-dir DIR          Install prefix (default: platform-specific)
+  --config FILE              Config file path
+  --config-dir DIR           Config directory
+  --state-dir DIR            State directory
+  --data-dir DIR             Data directory
+  --db-path FILE             SQLite database path
+  --log-dir DIR              Log directory
+  --tls-dir DIR              TLS directory
+
+Service options:
+  --service-name NAME        systemd/launchd service name
+  --user USER                Service user
+  --group GROUP              Service group
+  --health-url URL           Health check URL
+  --insecure-http VALUE      1 or 0 (default: ${INSECURE_HTTP})
+  --no-insecure-http         Same as --insecure-http 0
+  --log-format VALUE         text, compact, or json (default: ${LOG_FORMAT})
+  --rust-log VALUE           RUST_LOG value (default: ${RUST_LOG_VALUE})
+
+Other:
+  -h, --help, help           Show this help
+
+Examples:
+  scripts/install.sh --debug
+  scripts/install.sh --bin target/release/gono-one
+  scripts/install.sh --release --version latest
+  scripts/install.sh --domain files.example.com
+  bash <(curl -sL ${INSTALL_URL}) --base-url https://files.example.com
+
+Environment variables are still supported. For example:
+  GONO_ONE_BIN=/path/to/gono-one scripts/install.sh
+  GONO_ONE_INSTALL_SOURCE=release scripts/install.sh
+EOF
+}
+
+need_arg() {
+  local option="$1"
+  local value="${2:-}"
+  [[ -n "${value}" ]] || die "${option} requires a value"
+}
+
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      -h|--help|help)
+        show_usage
+        exit 0
+        ;;
+      --local)
+        INSTALL_SOURCE="local"
+        export GONO_ONE_INSTALL_SOURCE="${INSTALL_SOURCE}"
+        shift
+        ;;
+      --release)
+        INSTALL_SOURCE="release"
+        export GONO_ONE_INSTALL_SOURCE="${INSTALL_SOURCE}"
+        shift
+        ;;
+      --install-source)
+        need_arg "$1" "${2:-}"
+        INSTALL_SOURCE="$2"
+        export GONO_ONE_INSTALL_SOURCE="${INSTALL_SOURCE}"
+        shift 2
+        ;;
+      --bin)
+        need_arg "$1" "${2:-}"
+        LOCAL_BIN="$2"
+        export GONO_ONE_BIN="${LOCAL_BIN}"
+        shift 2
+        ;;
+      --bin-url)
+        need_arg "$1" "${2:-}"
+        BIN_URL="$2"
+        export GONO_ONE_BIN_URL="${BIN_URL}"
+        shift 2
+        ;;
+      --version)
+        need_arg "$1" "${2:-}"
+        VERSION="$2"
+        export GONO_ONE_VERSION="${VERSION}"
+        shift 2
+        ;;
+      --release-base)
+        need_arg "$1" "${2:-}"
+        RELEASE_BASE="$2"
+        export GONO_ONE_RELEASE_BASE="${RELEASE_BASE}"
+        shift 2
+        ;;
+      --sha256)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_SHA256="$2"
+        shift 2
+        ;;
+      --build-profile)
+        need_arg "$1" "${2:-}"
+        LOCAL_BUILD_PROFILE="$2"
+        export GONO_ONE_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
+        shift 2
+        ;;
+      --debug)
+        LOCAL_BUILD_PROFILE="debug"
+        export GONO_ONE_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
+        shift
+        ;;
+      --local-build)
+        LOCAL_BUILD="1"
+        export GONO_ONE_LOCAL_BUILD="${LOCAL_BUILD}"
+        shift
+        ;;
+      --no-local-build)
+        LOCAL_BUILD="0"
+        export GONO_ONE_LOCAL_BUILD="${LOCAL_BUILD}"
+        shift
+        ;;
+      --arch)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_ARCH="$2"
+        shift 2
+        ;;
+      --domain)
+        need_arg "$1" "${2:-}"
+        DOMAIN="$2"
+        export GONO_ONE_DOMAIN="${DOMAIN}"
+        if [[ "${BASE_URL_EXPLICIT}" == "0" ]]; then
+          BASE_URL="https://${DOMAIN}"
+          export GONO_ONE_BASE_URL="${BASE_URL}"
+        fi
+        shift 2
+        ;;
+      --base-url)
+        need_arg "$1" "${2:-}"
+        BASE_URL="$2"
+        BASE_URL_EXPLICIT=1
+        export GONO_ONE_BASE_URL="${BASE_URL}"
+        shift 2
+        ;;
+      --bind)
+        need_arg "$1" "${2:-}"
+        BIND="$2"
+        export GONO_ONE_BIND="${BIND}"
+        shift 2
+        ;;
+      --install-dir)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_INSTALL_DIR="$2"
+        shift 2
+        ;;
+      --config)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_CONFIG="$2"
+        shift 2
+        ;;
+      --config-dir)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_CONFIG_DIR="$2"
+        shift 2
+        ;;
+      --state-dir)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_STATE_DIR="$2"
+        shift 2
+        ;;
+      --data-dir)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_DATA_DIR="$2"
+        shift 2
+        ;;
+      --db-path)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_DB_PATH="$2"
+        shift 2
+        ;;
+      --log-dir)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_LOG_DIR="$2"
+        shift 2
+        ;;
+      --tls-dir)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_TLS_DIR="$2"
+        shift 2
+        ;;
+      --service-name)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_SERVICE_NAME="$2"
+        shift 2
+        ;;
+      --user)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_USER="$2"
+        shift 2
+        ;;
+      --group)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_GROUP="$2"
+        shift 2
+        ;;
+      --health-url)
+        need_arg "$1" "${2:-}"
+        HEALTH_URL="$2"
+        export GONO_ONE_HEALTH_URL="${HEALTH_URL}"
+        shift 2
+        ;;
+      --insecure-http)
+        need_arg "$1" "${2:-}"
+        INSECURE_HTTP="$2"
+        export GONO_ONE_INSECURE_HTTP="${INSECURE_HTTP}"
+        shift 2
+        ;;
+      --no-insecure-http)
+        INSECURE_HTTP="0"
+        export GONO_ONE_INSECURE_HTTP="${INSECURE_HTTP}"
+        shift
+        ;;
+      --log-format)
+        need_arg "$1" "${2:-}"
+        LOG_FORMAT="$2"
+        export GONO_ONE_LOG_FORMAT="${LOG_FORMAT}"
+        shift 2
+        ;;
+      --rust-log)
+        need_arg "$1" "${2:-}"
+        RUST_LOG_VALUE="$2"
+        export RUST_LOG="${RUST_LOG_VALUE}"
+        shift 2
+        ;;
+      --xattr-ns)
+        need_arg "$1" "${2:-}"
+        XATTR_NS="$2"
+        export GONO_ONE_XATTR_NS="${XATTR_NS}"
+        shift 2
+        ;;
+      --auth-realm)
+        need_arg "$1" "${2:-}"
+        AUTH_REALM="$2"
+        export GONO_ONE_AUTH_REALM="${AUTH_REALM}"
+        shift 2
+        ;;
+      --max-connections)
+        need_arg "$1" "${2:-}"
+        MAX_CONNECTIONS="$2"
+        export GONO_ONE_DB_MAX_CONNECTIONS="${MAX_CONNECTIONS}"
+        shift 2
+        ;;
+      --plist-path)
+        need_arg "$1" "${2:-}"
+        export GONO_ONE_PLIST_PATH="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        [[ "$#" -eq 0 ]] || die "unexpected extra arguments: $*"
+        ;;
+      -*)
+        show_usage >&2
+        die "unknown option: $1"
+        ;;
+      *)
+        show_usage >&2
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
 }
 
 resolve_script_context() {
@@ -820,6 +1128,7 @@ service_log_hint() {
 main() {
   require_cmd uname
   resolve_script_context
+  parse_args "$@"
   set_platform_defaults
   prepare_local_binary_before_sudo
   require_root "$@"
