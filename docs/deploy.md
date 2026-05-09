@@ -109,9 +109,25 @@ GONO_ONE_RELEASE_TARGET=linux-aarch64 \
 scripts/package-release.sh
 ```
 
-On tag builds or manual GitHub Actions runs, CI also uploads native Linux/macOS package artifacts.
-After verifying them, mirror the latest-style files under `https://run.gono.cloud/releases/latest/`
-and the versioned files under `https://run.gono.cloud/releases/<version>/`.
+On tag builds, CI runs checks, litmus, packages native Linux/macOS artifacts for `x86_64` and
+`aarch64`, then creates or updates the matching GitHub Release with the `.tar.gz` files and
+`.sha256` sidecars. Manual GitHub Actions runs package the same artifacts without creating a
+GitHub Release.
+
+Create the first GitHub Release from a clean `main` branch with:
+
+```sh
+git push origin main
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+After verifying the GitHub Release, mirror the latest-style files under
+`https://run.gono.cloud/releases/latest/` and the versioned files under
+`https://run.gono.cloud/releases/<version>/`.
+
+Linux `armv7` and `armv6` remain installer-supported artifact names, but they require a separate
+self-hosted or cross-build release step before they can be mirrored to `run.gono.cloud`.
 
 ## Local Install
 

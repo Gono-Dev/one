@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   checks:
     name: Rust checks
@@ -50,15 +53,21 @@ jobs:
         run: RUN_LITMUS=1 scripts/compat-smoke.sh
 
   package:
-    name: Package release artifact
+    name: Package ${{ matrix.release_target }}
     runs-on: ${{ matrix.os }}
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+        include:
+          - os: ubuntu-latest
+            release_target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            release_target: linux-aarch64
+          - os: macos-15-intel
+            release_target: macos-x86_64
+          - os: macos-latest
+            release_target: macos-aarch64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,10 +78,69 @@ jobs:
           rustup default stable
 
       - name: Package
+        env:
+          GONO_ONE_RELEASE_TARGET: ${{ matrix.release_target }}
         run: scripts/package-release.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gono-one-${{ matrix.os }}
+          name: gono-one-${{ matrix.release_target }}
           path: dist/*
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - checks
+      - litmus
+      - package
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gono-one-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          tag="${GITHUB_REF_NAME}"
+          notes_file="$(mktemp)"
+          cat >"${notes_file}" <<EOF
+          Gono One ${tag}
+
+          Install:
+
+          \`\`\`sh
+          bash <(curl -sL https://run.gono.cloud)
+          \`\`\`
+
+          This release includes native Linux and macOS artifacts for x86_64 and aarch64, plus
+          sha256 sidecars.
+          EOF
+
+          assets=(release-assets/*)
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "no release artifacts were downloaded" >&2
+            exit 1
+          fi
+          printf '%s\n' "${assets[@]}" | sort
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --title "Gono One ${tag}" --notes-file "${notes_file}"
+            gh release upload "${tag}" "${assets[@]}" --clobber
+          else
+            gh release create "${tag}" "${assets[@]}" \
+              --title "Gono One ${tag}" \
+              --notes-file "${notes_file}" \
+              --verify-tag
+          fi
