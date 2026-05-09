@@ -196,8 +196,10 @@ scripts/install.sh uninstall --purge
 ```
 
 The user-management menu wraps the installed `gono-cloud` binary and the configured SQLite database.
-It can list local application users, create a user with a newly generated app password, or delete a
-local user. App passwords are printed once when a user is created.
+It can list local application users with their app password labels/counts, create a user with a
+newly generated app password, or delete a local user. App passwords are printed once when a user is
+created; existing plaintext app passwords cannot be displayed later because only password hashes are
+stored.
 
 ## Domain And Reverse Proxy
 

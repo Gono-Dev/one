@@ -33,6 +33,7 @@ pub struct LocalUser {
     pub enabled: bool,
     pub created_at: i64,
     pub app_password_count: i64,
+    pub app_password_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,10 +178,21 @@ pub async fn list_local_users(pool: &SqlitePool) -> anyhow::Result<Vec<LocalUser
             COALESCE(users.display_name, users.username) AS display_name,
             users.enabled,
             users.created_at,
-            COUNT(app_passwords.id) AS app_password_count
+            (
+                SELECT COUNT(*)
+                FROM app_passwords
+                WHERE app_passwords.username = users.username
+            ) AS app_password_count,
+            COALESCE((
+                SELECT GROUP_CONCAT(label, ', ')
+                FROM (
+                    SELECT label
+                    FROM app_passwords
+                    WHERE app_passwords.username = users.username
+                    ORDER BY label
+                )
+            ), '') AS app_password_labels
         FROM users
-        LEFT JOIN app_passwords ON app_passwords.username = users.username
-        GROUP BY users.username, users.display_name, users.enabled, users.created_at
         ORDER BY users.username
         "#,
     )
@@ -196,6 +208,12 @@ pub async fn list_local_users(pool: &SqlitePool) -> anyhow::Result<Vec<LocalUser
                 enabled: row.try_get::<i64, _>("enabled")? != 0,
                 created_at: row.try_get("created_at")?,
                 app_password_count: row.try_get("app_password_count")?,
+                app_password_labels: row
+                    .try_get::<String, _>("app_password_labels")?
+                    .split(", ")
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
             })
         })
         .collect()
@@ -1331,6 +1349,10 @@ mod tests {
         assert_eq!(users[0].username, "alice");
         assert_eq!(users[0].display_name, "Alice Example");
         assert_eq!(users[0].app_password_count, 1);
+        assert_eq!(
+            users[0].app_password_labels,
+            vec![DEFAULT_APP_PASSWORD_LABEL.to_owned()]
+        );
 
         let store = SqliteUserStore::new(pool.clone());
         assert!(store

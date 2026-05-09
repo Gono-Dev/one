@@ -148,15 +148,24 @@ async fn run_user_list(config: Config) -> anyhow::Result<()> {
     }
 
     println!(
-        "{:<24} {:<8} {:<14} DISPLAY_NAME",
-        "USERNAME", "ENABLED", "APP_PASSWORDS"
+        "{:<24} {:<24} {:<8} DISPLAY_NAME",
+        "USERNAME", "APP_PASSWORDS", "ENABLED"
     );
     for user in users {
+        let app_passwords = if user.app_password_labels.is_empty() {
+            "- (0)".to_owned()
+        } else {
+            format!(
+                "{} ({})",
+                user.app_password_labels.join(","),
+                user.app_password_count
+            )
+        };
         println!(
-            "{:<24} {:<8} {:<14} {}",
+            "{:<24} {:<24} {:<8} {}",
             user.username,
+            app_passwords,
             if user.enabled { "yes" } else { "no" },
-            user.app_password_count,
             user.display_name
         );
     }
