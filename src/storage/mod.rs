@@ -35,6 +35,7 @@ impl StorageLayout {
             .canonicalize()
             .with_context(|| format!("canonicalize uploads directory {}", uploads_dir.display()))?;
 
+        validate_xattr_namespace(&config.xattr_ns)?;
         probe_xattr(&files_root, &config.xattr_ns)?;
         ensure_inode_space(&files_root)?;
         ensure_inode_space(&uploads_root)?;
@@ -46,6 +47,21 @@ impl StorageLayout {
             uploads_root,
         })
     }
+}
+
+fn validate_xattr_namespace(namespace: &str) -> anyhow::Result<()> {
+    if namespace.is_empty() {
+        bail!("xattr namespace must not be empty");
+    }
+    if !namespace
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!(
+            "xattr namespace must contain only ASCII letters, digits, '.', '_' or '-': {namespace:?}"
+        );
+    }
+    Ok(())
 }
 
 fn probe_xattr(root: &Path, namespace: &str) -> anyhow::Result<()> {
@@ -119,6 +135,16 @@ fn ensure_same_partition(files_root: &Path, uploads_root: &Path) -> anyhow::Resu
         .with_context(|| format!("stat uploads directory {}", uploads_root.display()))?
         .dev();
 
+    ensure_same_partition_dev(files_root, files_dev, uploads_root, uploads_dev)
+}
+
+#[cfg(unix)]
+fn ensure_same_partition_dev(
+    files_root: &Path,
+    files_dev: u64,
+    uploads_root: &Path,
+    uploads_dev: u64,
+) -> anyhow::Result<()> {
     if files_dev != uploads_dev {
         bail!(
             "files and uploads must be on the same partition: {} dev={} {} dev={}",
@@ -243,11 +269,49 @@ fn ensure_inside(canonical_root: &Path, path: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_inode_space;
+    use super::{ensure_inode_space, validate_xattr_namespace};
+
+    #[cfg(unix)]
+    use super::{ensure_same_partition, ensure_same_partition_dev};
 
     #[test]
     fn inode_probe_accepts_tempdir() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         ensure_inode_space(temp.path()).expect("inode space probe");
+    }
+
+    #[test]
+    fn xattr_namespace_validation_rejects_unsafe_names() {
+        validate_xattr_namespace("user.nc").expect("default xattr namespace");
+        validate_xattr_namespace("com.example-gono_1").expect("custom xattr namespace");
+
+        assert!(validate_xattr_namespace("").is_err());
+        assert!(validate_xattr_namespace("user/nc").is_err());
+        assert!(validate_xattr_namespace("user nc").is_err());
+        assert!(validate_xattr_namespace("user.nc\0bad").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_partition_probe_accepts_temp_layout() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let files = temp.path().join("files");
+        let uploads = temp.path().join("uploads");
+        std::fs::create_dir_all(&files).expect("files dir");
+        std::fs::create_dir_all(&uploads).expect("uploads dir");
+
+        ensure_same_partition(&files, &uploads).expect("same temp partition");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_partition_probe_rejects_different_devices() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let files = temp.path().join("files");
+        let uploads = temp.path().join("uploads");
+
+        let err = ensure_same_partition_dev(&files, 1, &uploads, 2)
+            .expect_err("different devices rejected");
+        assert!(format!("{err:#}").contains("files and uploads must be on the same partition"));
     }
 }

@@ -197,7 +197,8 @@ Before calling the deployment complete:
   sync history window. Rows older than the retention window are pruned only when they fall outside
   the minimum retained row count; clients with a token older than the retained floor receive
   `DAV:valid-sync-token` and must do a full resync.
-- Keep `data/files` and `data/uploads` on the same partition.
+- Keep `data/files` and `data/uploads` on the same partition. Startup rejects split partitions,
+  validates the xattr namespace, and probes xattr writes before accepting traffic.
 - Current WebDAV locks are in memory; a restart drops locks. Document this for MVP deployments.
 - Linux service status: `systemctl status gono-one`.
 - macOS service status: `launchctl print system/one.gono.gono-one`.

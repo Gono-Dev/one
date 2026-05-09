@@ -12,7 +12,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::{rngs::OsRng, RngCore};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
-    Row, SqlitePool,
+    Row, SqliteConnection, SqlitePool,
 };
 
 use crate::{config::DbConfig, storage};
@@ -790,15 +790,19 @@ async fn upsert_file_record(
         }
     }
 
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin file metadata transaction")?;
     let id = if force_new_id {
-        delete_by_rel_path(pool, input.owner, &rel_path).await?;
-        insert_file_record(pool, input.owner, &rel_path).await?
+        delete_by_rel_path(&mut *tx, input.owner, &rel_path).await?;
+        insert_file_record(&mut *tx, input.owner, &rel_path).await?
     } else if let Some(existing) = existing.as_ref() {
         existing.id
     } else if let Some(xattr_id) = read_i64_xattr(input.abs_path, input.xattr_ns, "fileid")? {
-        attach_xattr_file_id(pool, input.owner, &rel_path, xattr_id).await?
+        attach_xattr_file_id(&mut *tx, input.owner, &rel_path, xattr_id).await?
     } else {
-        insert_file_record(pool, input.owner, &rel_path).await?
+        insert_file_record(&mut *tx, input.owner, &rel_path).await?
     };
 
     let favorite = if force_new_id {
@@ -849,9 +853,13 @@ async fn upsert_file_record(
     .bind(file_size)
     .bind(input.owner)
     .bind(&rel_path)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("update file metadata cache")?;
+
+    tx.commit()
+        .await
+        .context("commit file metadata transaction")?;
 
     Ok(FileRecord {
         id,
@@ -931,17 +939,25 @@ async fn load_by_rel_path(
     row.map(FileRecordRow::try_from_row).transpose()
 }
 
-async fn delete_by_rel_path(pool: &SqlitePool, owner: &str, rel_path: &str) -> anyhow::Result<()> {
+async fn delete_by_rel_path(
+    conn: &mut SqliteConnection,
+    owner: &str,
+    rel_path: &str,
+) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM file_ids WHERE owner = ?1 AND rel_path = ?2")
         .bind(owner)
         .bind(rel_path)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .context("delete existing file_id row")?;
     Ok(())
 }
 
-async fn insert_file_record(pool: &SqlitePool, owner: &str, rel_path: &str) -> anyhow::Result<i64> {
+async fn insert_file_record(
+    conn: &mut SqliteConnection,
+    owner: &str,
+    rel_path: &str,
+) -> anyhow::Result<i64> {
     let now = unix_timestamp();
     let result = sqlx::query(
         r#"
@@ -953,7 +969,7 @@ async fn insert_file_record(pool: &SqlitePool, owner: &str, rel_path: &str) -> a
     .bind(rel_path)
     .bind(0x3f_i64)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .context("insert file_id row")?;
 
@@ -961,7 +977,7 @@ async fn insert_file_record(pool: &SqlitePool, owner: &str, rel_path: &str) -> a
 }
 
 async fn attach_xattr_file_id(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     owner: &str,
     rel_path: &str,
     id: i64,
@@ -977,7 +993,7 @@ async fn attach_xattr_file_id(
     .bind(rel_path)
     .bind(owner)
     .bind(id)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .context("reattach xattr file_id row")?
     .rows_affected();
@@ -994,7 +1010,7 @@ async fn attach_xattr_file_id(
         .bind(rel_path)
         .bind(0x3f_i64)
         .bind(now)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .context("insert xattr file_id row")?;
     }
@@ -1078,7 +1094,69 @@ fn read_xattr(path: &Path, namespace: &str, name: &str) -> anyhow::Result<Option
         .with_context(|| format!("read xattr {namespace}.{name} from {}", path.display()))
 }
 
+#[cfg(test)]
+static FAIL_NEXT_XATTR_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn write_xattr(path: &Path, namespace: &str, name: &str, value: &str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_XATTR_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("injected xattr write failure");
+    }
+
     xattr::set(path, xattr_key(namespace, name), value.as_bytes())
         .with_context(|| format!("write xattr {namespace}.{name} to {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    async fn temp_pool(temp: &tempfile::TempDir) -> SqlitePool {
+        let config = DbConfig {
+            path: temp
+                .path()
+                .join("gono-one.db")
+                .to_string_lossy()
+                .into_owned(),
+            max_connections: 1,
+        };
+        let pool = connect(&config).await.expect("connect sqlite");
+        migrate(&pool).await.expect("migrate sqlite");
+        pool
+    }
+
+    #[tokio::test]
+    async fn xattr_write_failure_rolls_back_new_file_record() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let abs_path = temp.path().join("failed-xattr.txt");
+        std::fs::write(&abs_path, "body").expect("write test file");
+
+        FAIL_NEXT_XATTR_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = ensure_file_record(
+            &pool,
+            FileRecordInput {
+                owner: BOOTSTRAP_USER,
+                rel_path: Path::new("failed-xattr.txt"),
+                abs_path: &abs_path,
+                instance_id: "test",
+                xattr_ns: "user.nc",
+            },
+        )
+        .await
+        .expect_err("injected xattr failure");
+        assert!(format!("{err:#}").contains("injected xattr write failure"));
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM file_ids WHERE owner = ?1 AND rel_path = ?2")
+                .bind(BOOTSTRAP_USER)
+                .bind("failed-xattr.txt")
+                .fetch_one(&pool)
+                .await
+                .expect("count file rows");
+        assert_eq!(count, 0);
+    }
 }
