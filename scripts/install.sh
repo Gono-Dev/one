@@ -1362,8 +1362,26 @@ follow_service_logs() {
       ;;
     macos)
       require_cmd tail
-      touch "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
-      tail -f "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
+      local stdout_log stderr_log readable_logs
+      stdout_log="${LOG_DIR}/stdout.log"
+      stderr_log="${LOG_DIR}/stderr.log"
+      readable_logs=()
+
+      if [[ -r "${stdout_log}" ]]; then
+        readable_logs+=("${stdout_log}")
+      else
+        warn "stdout log is not readable: ${stdout_log}"
+      fi
+      if [[ -r "${stderr_log}" ]]; then
+        readable_logs+=("${stderr_log}")
+      else
+        warn "stderr log is not readable: ${stderr_log}"
+      fi
+
+      if [[ "${#readable_logs[@]}" -eq 0 ]]; then
+        die "no readable macOS log files found. Try 'sudo $(usage_name) logs' or check '$(service_status_hint)'."
+      fi
+      tail -f "${readable_logs[@]}"
       ;;
   esac
 }
