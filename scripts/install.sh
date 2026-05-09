@@ -72,6 +72,14 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+sudo_bash() {
+  if [[ -r /dev/tty ]]; then
+    sudo -E bash "$@" </dev/tty
+  else
+    sudo -E bash "$@"
+  fi
+}
+
 usage_name() {
   if [[ -n "${SCRIPT_PATH}" && -n "${REPO_ROOT}" && "${SCRIPT_PATH}" == "${REPO_ROOT}/"* ]]; then
     printf '%s\n' "${SCRIPT_PATH#"${REPO_ROOT}/"}"
@@ -649,6 +657,7 @@ set_platform_defaults() {
 
 require_root() {
   local -a forwarded_args
+  local sudo_script
   forwarded_args=("$@")
 
   if [[ "${EUID}" -eq 0 ]]; then
@@ -668,9 +677,12 @@ require_root() {
   if command -v sudo >/dev/null 2>&1; then
     log "re-running installer with sudo"
     if [[ -n "${SCRIPT_PATH}" && -r "${SCRIPT_PATH}" ]]; then
-      sudo -E bash "${SCRIPT_PATH}" "${forwarded_args[@]}"
+      sudo_bash "${SCRIPT_PATH}" "${forwarded_args[@]}"
     else
-      curl -fsSL "${INSTALL_URL}" | sudo -E bash -s -- "${forwarded_args[@]}"
+      sudo_script="${TMP_DIR}/gono-cloud-install.sh"
+      curl -fsSL "${INSTALL_URL}" -o "${sudo_script}"
+      chmod 0700 "${sudo_script}"
+      sudo_bash "${sudo_script}" "${forwarded_args[@]}"
     fi
     exit $?
   fi
