@@ -37,7 +37,7 @@ async fn handle_inner(
     request: Request<Body>,
 ) -> anyhow::Result<Response<Body>> {
     let request_path = original_request_uri(&request).path().to_owned();
-    let href_prefix = mount_prefix_for_path(&request_path);
+    let href_prefix = mount_prefix_for_path(&request_path, &state.owner);
     let body = to_bytes(request.into_body(), SEARCH_BODY_LIMIT)
         .await
         .context("read SEARCH body")?;
@@ -55,7 +55,7 @@ async fn handle_inner(
     append_search_matches(
         &mut xml,
         &state,
-        href_prefix,
+        &href_prefix,
         scope_rel,
         scope_abs,
         search.depth,

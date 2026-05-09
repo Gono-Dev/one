@@ -147,25 +147,79 @@ async fn status_php_is_public_and_nextcloud_shaped() {
 #[tokio::test]
 async fn capabilities_are_public() {
     let (app, _temp, _password) = app_with_temp_root().await;
-    let response = app
+    for uri in [
+        "/ocs/v1.php/cloud/capabilities",
+        "/ocs/v2.php/cloud/capabilities",
+        "/index.php/ocs/v1.php/cloud/capabilities",
+        "/index.php/ocs/v2.php/cloud/capabilities",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("\"status\":\"ok\""));
+        assert!(body.contains("\"chunking\":\"1.0\""));
+        assert!(body.contains("\"notify_push\""));
+        assert!(body.contains("\"websocket\":\"wss://127.0.0.1:3000/push/ws\""));
+        assert!(body.contains("\"pre_auth\":\"https://127.0.0.1:3000/apps/notify_push/pre_auth\""));
+    }
+}
+
+#[tokio::test]
+async fn ocs_user_endpoints_require_auth_and_return_profile() {
+    let (app, _temp, password) = app_with_temp_root().await;
+
+    let unauthorized = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/ocs/v2.php/cloud/capabilities")
+                .uri("/ocs/v2.php/cloud/user")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = std::str::from_utf8(&body).unwrap();
-    assert!(body.contains("\"status\":\"ok\""));
-    assert!(body.contains("\"chunking\":\"1.0\""));
-    assert!(body.contains("\"notify_push\""));
-    assert!(body.contains("\"websocket\":\"wss://127.0.0.1:3000/push/ws\""));
-    assert!(body.contains("\"pre_auth\":\"https://127.0.0.1:3000/apps/notify_push/pre_auth\""));
+    for uri in [
+        "/ocs/v1.php/cloud/user",
+        "/ocs/v2.php/cloud/user",
+        "/index.php/ocs/v1.php/cloud/user",
+        "/index.php/ocs/v2.php/cloud/user",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("\"status\":\"ok\""));
+        assert!(body.contains("\"id\":\"gono\""));
+        assert!(body.contains("\"displayname\":\"gono\""));
+        assert!(body.contains("\"quota\""));
+    }
 }
 
 #[tokio::test]
@@ -759,6 +813,7 @@ async fn root_webdav_path_shares_storage_with_remote_php_dav() {
     assert!(put.headers().contains_key("oc-fileid"));
 
     let get = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -772,6 +827,110 @@ async fn root_webdav_path_shares_storage_with_remote_php_dav() {
     assert_eq!(get.status(), StatusCode::OK);
     let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
     assert_eq!(&body[..], b"root compatible");
+}
+
+#[tokio::test]
+async fn standard_nextcloud_files_webdav_path_shares_storage_with_remote_php_dav() {
+    let (app, _temp, password) = app_with_temp_root().await;
+
+    let propfind = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/files/gono/")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(propfind.status(), StatusCode::MULTI_STATUS);
+    let propfind_body = to_bytes(propfind.into_body(), usize::MAX).await.unwrap();
+    let propfind_body = std::str::from_utf8(&propfind_body).unwrap();
+    assert!(propfind_body.contains("oc:fileid"));
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/standard-path.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("standard nextcloud path"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+    assert!(put.headers().contains_key("oc-fileid"));
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/remote.php/dav/standard-path.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"standard nextcloud path");
+
+    let copy = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/files/gono/standard-path.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(
+                    "Destination",
+                    "/remote.php/dav/files/gono/standard-copy.txt",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(copy.status().is_success());
+
+    let moved = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MOVE").unwrap())
+                .uri("/remote.php/dav/files/gono/standard-copy.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(
+                    "Destination",
+                    "/remote.php/dav/files/gono/standard-moved.txt",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(moved.status().is_success());
+
+    let delete = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/remote.php/dav/files/gono/standard-moved.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

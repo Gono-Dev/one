@@ -267,6 +267,14 @@ echo "checking public endpoints"
 curl -fsS "${BASE_URL}/status.php" | grep -q '"installed":true'
 curl -fsS "${BASE_URL}/ocs/v2.php/cloud/capabilities" | grep -q '"chunking":"1.0"'
 curl -fsS "${BASE_URL}/ocs/v2.php/cloud/capabilities" | grep -q '"notify_push"'
+curl -fsS "${BASE_URL}/index.php/ocs/v2.php/cloud/capabilities" | grep -q '"chunking":"1.0"'
+
+echo "checking OCS user endpoints"
+assert_status "401" "GET" "${BASE_URL}/ocs/v2.php/cloud/user"
+curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v1.php/cloud/user" | grep -q '"id":"gono"'
+curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/cloud/user" | grep -q '"displayname":"gono"'
+curl -fsS -u "${AUTH}" "${BASE_URL}/index.php/ocs/v1.php/cloud/user" | grep -q '"id":"gono"'
+curl -fsS -u "${AUTH}" "${BASE_URL}/index.php/ocs/v2.php/cloud/user" | grep -q '"displayname":"gono"'
 
 echo "checking notify_push websocket"
 websocket_smoke
@@ -292,6 +300,23 @@ curl -fsS -u "${AUTH}" \
   "${BASE_URL}/" | grep -q 'oc:fileid'
 curl -fsS -u "${AUTH}" -X PUT --data-binary 'root smoke' "${BASE_URL}/root-smoke.txt" >/dev/null
 curl -fsS -u "${AUTH}" "${DAV_URL}/root-smoke.txt" | grep -q 'root smoke'
+
+echo "checking standard Nextcloud files WebDAV compatibility"
+curl -fsS -u "${AUTH}" \
+  -X PROPFIND \
+  -H "Depth: 0" \
+  -H "Content-Type: application/xml" \
+  --data '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><d:getetag/><oc:fileid/><oc:permissions/></d:prop></d:propfind>' \
+  "${DAV_URL}/files/gono/" | grep -q 'oc:fileid'
+curl -fsS -u "${AUTH}" -X PUT --data-binary 'standard nextcloud smoke' "${DAV_URL}/files/gono/standard-smoke.txt" >/dev/null
+curl -fsS -u "${AUTH}" "${DAV_URL}/standard-smoke.txt" | grep -q 'standard nextcloud smoke'
+assert_status_any "201,204" "COPY" "${DAV_URL}/files/gono/standard-smoke.txt" \
+  -u "${AUTH}" \
+  -H "Destination: ${DAV_URL}/files/gono/standard-smoke-copy.txt"
+assert_status_any "201,204" "MOVE" "${DAV_URL}/files/gono/standard-smoke-copy.txt" \
+  -u "${AUTH}" \
+  -H "Destination: ${DAV_URL}/files/gono/standard-smoke-moved.txt"
+assert_status "204" "DELETE" "${DAV_URL}/files/gono/standard-smoke-moved.txt" -u "${AUTH}"
 
 echo "checking basic WebDAV writes"
 curl -fsS -u "${AUTH}" -X PUT --data-binary 'hello smoke' "${DAV_URL}/smoke.txt" >/dev/null

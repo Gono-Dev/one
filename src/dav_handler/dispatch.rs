@@ -84,7 +84,7 @@ impl NcDavService {
         let method = request.method().clone();
         let original_uri = original_request_uri(&request);
         let request_path = original_uri.path().to_owned();
-        let mount_prefix = mount_prefix_for_path(&request_path);
+        let mount_prefix = mount_prefix_for_path(&request_path, &self.state.owner);
         let destination = request
             .headers()
             .get("destination")
@@ -97,7 +97,7 @@ impl NcDavService {
         };
         if matches!(method.as_str(), "COPY" | "MOVE") {
             if let Some(destination) = destination.as_deref() {
-                if let Err(err) = parse_rel_path(destination) {
+                if let Err(err) = parse_rel_path_for_owner(destination, &self.state.owner) {
                     error!(?err, "failed to validate Destination header");
                     return (StatusCode::BAD_REQUEST, "Invalid Destination header").into_response();
                 }
@@ -124,7 +124,7 @@ impl NcDavService {
             .handler
             .handle_with(
                 DavConfig::new()
-                    .strip_prefix(mount_prefix)
+                    .strip_prefix(mount_prefix.as_str())
                     .principal(principal),
                 request,
             )
@@ -156,7 +156,7 @@ impl NcDavService {
         let status = response.status();
 
         if method == Method::DELETE {
-            let source_rel = match parse_rel_path(request_path) {
+            let source_rel = match parse_rel_path_for_owner(request_path, &self.state.owner) {
                 Ok(path) => path,
                 Err(err) => {
                     error!(?err, "failed to resolve DELETE source path");
@@ -176,7 +176,12 @@ impl NcDavService {
             };
         }
 
-        let target_rel = match write_target_rel_path(method, request_path, destination.as_deref()) {
+        let target_rel = match write_target_rel_path(
+            method,
+            request_path,
+            destination.as_deref(),
+            &self.state.owner,
+        ) {
             Ok(Some(path)) => path,
             Ok(None) => {
                 if method.as_str() == "PROPPATCH" {
@@ -218,7 +223,7 @@ impl NcDavService {
         };
 
         if method.as_str() == "MOVE" {
-            let source_rel = match parse_rel_path(request_path) {
+            let source_rel = match parse_rel_path_for_owner(request_path, &self.state.owner) {
                 Ok(path) => path,
                 Err(err) => {
                     error!(?err, "failed to resolve MOVE source path");
@@ -267,7 +272,7 @@ impl NcDavService {
                 return metadata_error_response();
             }
         };
-        let rel_path = match parse_rel_path(request_path) {
+        let rel_path = match parse_rel_path_for_owner(request_path, &self.state.owner) {
             Ok(path) => path,
             Err(err) => {
                 error!(?err, "failed to resolve PROPPATCH target path");
@@ -281,7 +286,7 @@ impl NcDavService {
     }
 
     async fn record_for_request_path(&self, request_path: &str) -> anyhow::Result<db::FileRecord> {
-        let rel_path = parse_rel_path(request_path)?;
+        let rel_path = parse_rel_path_for_owner(request_path, &self.state.owner)?;
         let abs_path = storage::safe_existing_path(&self.state.files_root, &rel_path)?;
         db::ensure_file_record(
             &self.state.db,
@@ -549,6 +554,7 @@ fn write_target_rel_path(
     method: &Method,
     request_path: &str,
     destination: Option<&str>,
+    owner: &str,
 ) -> anyhow::Result<Option<PathBuf>> {
     let path = match method.as_str() {
         "PUT" | "MKCOL" => Some(request_path),
@@ -557,7 +563,8 @@ fn write_target_rel_path(
         _ => None,
     };
 
-    path.map(parse_rel_path).transpose()
+    path.map(|path| parse_rel_path_for_owner(path, owner))
+        .transpose()
 }
 
 pub(crate) fn original_request_uri(request: &Request<Body>) -> Uri {
@@ -568,27 +575,47 @@ pub(crate) fn original_request_uri(request: &Request<Body>) -> Uri {
         .unwrap_or_else(|| request.uri().clone())
 }
 
-pub(crate) fn mount_prefix_for_path(path: &str) -> &'static str {
-    if path.starts_with("/remote.php/webdav") {
-        "/remote.php/webdav"
-    } else if path.starts_with("/remote.php/dav") {
-        "/remote.php/dav"
-    } else {
-        ""
+pub(crate) fn mount_prefix_for_path(path: &str, owner: &str) -> String {
+    let remote_dav_files = format!("/remote.php/dav/files/{owner}");
+    if has_path_prefix(path, &remote_dav_files) {
+        return remote_dav_files;
     }
+    if has_path_prefix(path, "/remote.php/webdav") {
+        return "/remote.php/webdav".to_owned();
+    }
+    if has_path_prefix(path, "/remote.php/dav") {
+        return "/remote.php/dav".to_owned();
+    }
+    String::new()
 }
 
 pub(crate) fn parse_rel_path(path_or_uri: &str) -> anyhow::Result<PathBuf> {
+    parse_rel_path_for_owner(path_or_uri, "gono")
+}
+
+pub(crate) fn parse_rel_path_for_owner(path_or_uri: &str, owner: &str) -> anyhow::Result<PathBuf> {
     let path = if path_or_uri.starts_with("http://") || path_or_uri.starts_with("https://") {
         path_or_uri.parse::<Uri>()?.path().to_owned()
     } else {
         path_or_uri.to_owned()
     };
     reject_parent_segments(&path)?;
-    let path = path
-        .strip_prefix("/remote.php/dav")
-        .or_else(|| path.strip_prefix("/remote.php/webdav"))
-        .unwrap_or(&path);
+    let (path, supports_owner_files_mount) =
+        if let Some(path) = path.strip_prefix("/remote.php/dav") {
+            (path, true)
+        } else if let Some(path) = path.strip_prefix("/remote.php/webdav") {
+            (path, false)
+        } else {
+            (path.as_str(), false)
+        };
+    let owner_prefix = format!("/files/{owner}");
+    let path = if supports_owner_files_mount && path == owner_prefix {
+        "/"
+    } else if supports_owner_files_mount {
+        path.strip_prefix(&(owner_prefix + "/")).unwrap_or(path)
+    } else {
+        path
+    };
     let path = if path.starts_with('/') {
         path.to_owned()
     } else {
@@ -596,6 +623,13 @@ pub(crate) fn parse_rel_path(path_or_uri: &str) -> anyhow::Result<PathBuf> {
     };
     let dav_path = DavPath::new(&path)?;
     Ok(Path::new(dav_path.as_rel_ospath()).to_path_buf())
+}
+
+fn has_path_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn reject_parent_segments(path: &str) -> anyhow::Result<()> {

@@ -10,7 +10,9 @@ use quick_xml::{escape::escape, events::Event, Reader};
 use tracing::error;
 
 use crate::{
-    dav_handler::dispatch::{mount_prefix_for_path, original_request_uri, parse_rel_path},
+    dav_handler::dispatch::{
+        mount_prefix_for_path, original_request_uri, parse_rel_path_for_owner,
+    },
     db,
     state::AppState,
     storage,
@@ -33,18 +35,18 @@ async fn handle_inner(
     request: Request<Body>,
 ) -> anyhow::Result<Response<Body>> {
     let request_path = original_request_uri(&request).path().to_owned();
-    let href_prefix = mount_prefix_for_path(&request_path);
+    let href_prefix = mount_prefix_for_path(&request_path, &state.owner);
     let body = to_bytes(request.into_body(), REPORT_BODY_LIMIT)
         .await
         .context("read REPORT body")?;
     let report = parse_report_body(&body)?;
 
     if report.filter_files {
-        return handle_filter_files(state, &request_path, href_prefix, &report).await;
+        return handle_filter_files(state, &request_path, &href_prefix, &report).await;
     }
 
     if report.sync_collection {
-        return handle_sync_collection(state, href_prefix, &report).await;
+        return handle_sync_collection(state, &href_prefix, &report).await;
     }
 
     Ok((
@@ -124,7 +126,7 @@ async fn handle_filter_files(
             .into_response());
     };
 
-    let scope_rel = parse_rel_path(request_path)?;
+    let scope_rel = parse_rel_path_for_owner(request_path, &state.owner)?;
     let scope_abs = storage::safe_existing_path(&state.files_root, &scope_rel)?;
     let mut xml = multistatus_start();
     append_filter_matches(

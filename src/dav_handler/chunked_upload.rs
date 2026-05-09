@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 
 use crate::{
-    dav_handler::dispatch::parse_rel_path,
+    dav_handler::dispatch::{parse_rel_path, parse_rel_path_for_owner},
     db,
     state::AppState,
     storage::{self, safe_create_path, safe_existing_path, safe_write_path},
@@ -99,7 +99,7 @@ async fn mkcol_session(
         ));
     }
 
-    let target_rel = destination_rel_path(request.headers())?;
+    let target_rel = destination_rel_path(request.headers(), &state.owner)?;
     validate_target_path(&state, &target_rel)?;
     let total_size = parse_total_length(request.headers())?.unwrap_or(0);
     check_available_space(&state, total_size)?;
@@ -143,7 +143,7 @@ async fn put_chunk(
     if let Some(total_size) = total_size {
         check_available_space(&state, total_size)?;
     }
-    let destination = destination_rel_path(request.headers())?;
+    let destination = destination_rel_path(request.headers(), &state.owner)?;
     let session = require_session(&state, &upload_path).await?;
     ensure_destination_matches(&destination, &session.target_path)?;
 
@@ -181,7 +181,7 @@ async fn move_file(
         ));
     }
 
-    let destination = destination_rel_path(request.headers())?;
+    let destination = destination_rel_path(request.headers(), &state.owner)?;
     let session = require_session(&state, &upload_path).await?;
     ensure_destination_matches(&destination, &session.target_path)?;
     validate_target_path(&state, &destination)?;
@@ -395,12 +395,12 @@ async fn remove_session_dir_inner(
     Ok(())
 }
 
-fn destination_rel_path(headers: &HeaderMap) -> ChunkResult<PathBuf> {
+fn destination_rel_path(headers: &HeaderMap, owner: &str) -> ChunkResult<PathBuf> {
     let destination = headers
         .get("destination")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| text_response(StatusCode::BAD_REQUEST, "Destination header is required"))?;
-    parse_rel_path(destination).map_err(|err| {
+    parse_rel_path_for_owner(destination, owner).map_err(|err| {
         warn!(?err, "invalid chunked upload destination header");
         text_response(StatusCode::BAD_REQUEST, "Invalid Destination header")
     })
