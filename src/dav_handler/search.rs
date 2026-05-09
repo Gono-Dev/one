@@ -13,7 +13,12 @@ use dav_server::davpath::DavPath;
 use quick_xml::{escape::escape, events::Event, Reader};
 use tracing::{error, warn};
 
-use crate::{db, state::AppState, storage};
+use crate::{
+    dav_handler::dispatch::{mount_prefix_for_path, original_request_uri},
+    db,
+    state::AppState,
+    storage,
+};
 
 const SEARCH_BODY_LIMIT: usize = 1024 * 1024;
 
@@ -31,6 +36,8 @@ async fn handle_inner(
     state: Arc<AppState>,
     request: Request<Body>,
 ) -> anyhow::Result<Response<Body>> {
+    let request_path = original_request_uri(&request).path().to_owned();
+    let href_prefix = mount_prefix_for_path(&request_path);
     let body = to_bytes(request.into_body(), SEARCH_BODY_LIMIT)
         .await
         .context("read SEARCH body")?;
@@ -48,6 +55,7 @@ async fn handle_inner(
     append_search_matches(
         &mut xml,
         &state,
+        href_prefix,
         scope_rel,
         scope_abs,
         search.depth,
@@ -62,6 +70,7 @@ async fn handle_inner(
 async fn append_search_matches(
     xml: &mut String,
     state: &AppState,
+    href_prefix: &str,
     scope_rel: PathBuf,
     scope_abs: PathBuf,
     depth: SearchDepth,
@@ -86,7 +95,7 @@ async fn append_search_matches(
 
         if matches_filters(&record, filters) {
             let rel_path = storage::rel_path_string(&rel_path)?;
-            append_resource_response(xml, &rel_path, &record, metadata.is_dir());
+            append_resource_response(xml, href_prefix, &rel_path, &record, metadata.is_dir());
         }
 
         if metadata.is_dir() && depth.allows_children_at(level) {
@@ -118,12 +127,13 @@ fn matches_filters(record: &db::FileRecord, filters: &[SearchFilter]) -> bool {
 
 fn append_resource_response(
     xml: &mut String,
+    href_prefix: &str,
     rel_path: &str,
     record: &db::FileRecord,
     is_collection: bool,
 ) {
     xml.push_str("<d:response><d:href>");
-    xml.push_str(&escape(&href_for_rel_path(rel_path)));
+    xml.push_str(&escape(&href_for_rel_path(href_prefix, rel_path)));
     xml.push_str("</d:href><d:propstat><d:prop>");
     if is_collection {
         xml.push_str("<d:resourcetype><d:collection/></d:resourcetype>");
@@ -372,12 +382,18 @@ fn xml_response(xml: String) -> Response<Body> {
         .expect("valid SEARCH response")
 }
 
-fn href_for_rel_path(rel_path: &str) -> String {
+fn href_for_rel_path(href_prefix: &str, rel_path: &str) -> String {
     let encoded = percent_encode_path(rel_path);
-    if encoded.is_empty() {
-        "/remote.php/dav/".to_owned()
+    if href_prefix.is_empty() {
+        if encoded.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{encoded}")
+        }
+    } else if encoded.is_empty() {
+        format!("{href_prefix}/")
     } else {
-        format!("/remote.php/dav/{encoded}")
+        format!("{href_prefix}/{encoded}")
     }
 }
 

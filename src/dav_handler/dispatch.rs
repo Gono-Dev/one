@@ -317,7 +317,7 @@ fn write_target_rel_path(
     path.map(parse_rel_path).transpose()
 }
 
-fn original_request_uri(request: &Request<Body>) -> Uri {
+pub(crate) fn original_request_uri(request: &Request<Body>) -> Uri {
     request
         .extensions()
         .get::<OriginalUri>()
@@ -325,11 +325,13 @@ fn original_request_uri(request: &Request<Body>) -> Uri {
         .unwrap_or_else(|| request.uri().clone())
 }
 
-fn mount_prefix_for_path(path: &str) -> &'static str {
+pub(crate) fn mount_prefix_for_path(path: &str) -> &'static str {
     if path.starts_with("/remote.php/webdav") {
         "/remote.php/webdav"
-    } else {
+    } else if path.starts_with("/remote.php/dav") {
         "/remote.php/dav"
+    } else {
+        ""
     }
 }
 

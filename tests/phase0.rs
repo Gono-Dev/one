@@ -170,6 +170,79 @@ async fn webdav_requires_basic_auth() {
 }
 
 #[tokio::test]
+async fn root_webdav_path_requires_basic_auth() {
+    let (app, _temp, _password) = app_with_temp_root().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/")
+                .header("Depth", "0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
+}
+
+#[tokio::test]
+async fn root_webdav_path_shares_storage_with_remote_php_dav() {
+    let (app, _temp, password) = app_with_temp_root().await;
+
+    let propfind = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(propfind.status(), StatusCode::MULTI_STATUS);
+    let propfind_body = to_bytes(propfind.into_body(), usize::MAX).await.unwrap();
+    let propfind_body = std::str::from_utf8(&propfind_body).unwrap();
+    assert!(propfind_body.contains("oc:fileid"));
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/root-path.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("root compatible"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+    assert!(put.headers().contains_key("oc-fileid"));
+
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/remote.php/dav/root-path.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"root compatible");
+}
+
+#[tokio::test]
 async fn propfind_depth_0_injects_nextcloud_props() {
     let (app, _temp, password) = app_with_temp_root().await;
     let response = app
@@ -827,6 +900,43 @@ async fn report_sync_collection_returns_changes_since_old_token() {
 }
 
 #[tokio::test]
+async fn root_path_report_sync_collection_uses_root_hrefs() {
+    let (app, _temp, password, _state) = app_with_state().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/root-report.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("root report"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(sync_collection_body("0")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("<d:href>/root-report.txt</d:href>"));
+    assert!(!body.contains("/remote.php/dav/root-report.txt"));
+}
+
+#[tokio::test]
 async fn report_sync_collection_marks_deleted_paths_not_found() {
     let (app, _temp, password, state) = app_with_state().await;
     let put = app
@@ -1145,6 +1255,48 @@ async fn search_by_file_id_returns_exact_match() {
     assert!(body.contains("/remote.php/dav/search-id-target.txt"));
     assert!(!body.contains("/remote.php/dav/search-id-other.txt"));
     assert!(body.contains("<oc:fileid>"));
+}
+
+#[tokio::test]
+async fn root_path_search_uses_root_hrefs() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let target = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/root-search.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("root search"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(target.status().is_success());
+    let oc_file_id = target.headers().get("oc-fileid").unwrap().to_str().unwrap();
+    let numeric_file_id: String = oc_file_id
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"SEARCH").unwrap())
+                .uri("/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(search_file_id_body(&numeric_file_id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("<d:href>/root-search.txt</d:href>"));
+    assert!(!body.contains("/remote.php/dav/root-search.txt"));
 }
 
 #[tokio::test]

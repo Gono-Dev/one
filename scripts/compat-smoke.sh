@@ -165,6 +165,7 @@ curl -fsS "${BASE_URL}/ocs/v2.php/cloud/capabilities" | grep -q '"chunking":"1.0
 
 echo "checking Basic Auth"
 assert_status "401" "PROPFIND" "${DAV_URL}/" -H "Depth: 0"
+assert_status "401" "PROPFIND" "${BASE_URL}/" -H "Depth: 0"
 
 echo "checking PROPFIND"
 curl -fsS -u "${AUTH}" \
@@ -173,6 +174,16 @@ curl -fsS -u "${AUTH}" \
   -H "Content-Type: application/xml" \
   --data '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><d:getetag/><oc:fileid/><oc:permissions/></d:prop></d:propfind>' \
   "${DAV_URL}/" | grep -q 'oc:fileid'
+
+echo "checking root WebDAV compatibility"
+curl -fsS -u "${AUTH}" \
+  -X PROPFIND \
+  -H "Depth: 0" \
+  -H "Content-Type: application/xml" \
+  --data '<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><d:getetag/><oc:fileid/><oc:permissions/></d:prop></d:propfind>' \
+  "${BASE_URL}/" | grep -q 'oc:fileid'
+curl -fsS -u "${AUTH}" -X PUT --data-binary 'root smoke' "${BASE_URL}/root-smoke.txt" >/dev/null
+curl -fsS -u "${AUTH}" "${DAV_URL}/root-smoke.txt" | grep -q 'root smoke'
 
 echo "checking basic WebDAV writes"
 curl -fsS -u "${AUTH}" -X PUT --data-binary 'hello smoke' "${DAV_URL}/smoke.txt" >/dev/null

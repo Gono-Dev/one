@@ -16,6 +16,7 @@ The script creates a temporary config and data directory, starts `gono-one` over
 - capabilities
 - Basic Auth failure
 - `PROPFIND`
+- root path WebDAV compatibility
 - `PUT`, `GET`, `COPY`, `MOVE`, `DELETE`
 - Nextcloud chunking v2 `MKCOL + PUT chunks + MOVE .file`
 - authenticated `/metrics`
@@ -46,7 +47,7 @@ Start the service with a real TLS certificate or with local-only HTTP for develo
 http://127.0.0.1:<port>
 ```
 
-WebDAV-only clients can connect directly to `http://127.0.0.1:<port>/remote.php/dav`. Use user `gono` and the generated app password from the first startup log. Check these operations:
+WebDAV-only clients can connect directly to either `http://127.0.0.1:<port>/remote.php/dav/` or the root path `http://127.0.0.1:<port>/`. Both paths expose the same storage namespace. Use user `gono` and the generated app password from the first startup log. Check these operations:
 
 - First connection completes.
 - Upload a small file.

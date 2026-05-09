@@ -64,7 +64,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(|| async { Redirect::permanent("/remote.php/dav") }),
         )
         .nest_service("/remote.php/dav", dav_service.clone())
-        .nest_service("/remote.php/webdav", dav_service)
+        .nest_service("/remote.php/webdav", dav_service.clone())
+        .fallback_service(dav_service)
         .with_state(state)
 }
 
