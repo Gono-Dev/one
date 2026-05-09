@@ -179,6 +179,7 @@ struct DeadPropRow {
 
 #[derive(Debug, Clone)]
 struct FsEntry {
+    owner: String,
     rel_path: String,
     abs_path: PathBuf,
 }
@@ -196,7 +197,7 @@ pub async fn check(config: &Config) -> Result<ConsistencyReport> {
     let pool = connect_read_only(&config.db.path, config.db.max_connections).await?;
     let file_records = load_file_records(&pool).await?;
     let dead_props = load_dead_props(&pool).await?;
-    let filesystem_entries = collect_filesystem_entries(&roots.files_root)?;
+    let filesystem_entries = collect_filesystem_entries(&roots)?;
 
     let mut report = ConsistencyReport {
         stats: ConsistencyStats {
@@ -217,10 +218,10 @@ pub async fn check(config: &Config) -> Result<ConsistencyReport> {
         .cloned()
         .map(|row| ((row.owner.clone(), row.id), row))
         .collect();
-    let fs_by_path: BTreeMap<String, FsEntry> = filesystem_entries
+    let fs_by_path: BTreeMap<(String, String), FsEntry> = filesystem_entries
         .iter()
         .cloned()
-        .map(|entry| (entry.rel_path.clone(), entry))
+        .map(|entry| ((entry.owner.clone(), entry.rel_path.clone()), entry))
         .collect();
 
     check_file_records(&roots, &config.storage.xattr_ns, &file_records, &mut report);
@@ -306,7 +307,19 @@ fn check_file_records(
             }
         };
         let rel_path_buf = PathBuf::from(&rel_path);
-        let abs_path = match storage::safe_existing_path(&roots.files_root, &rel_path_buf) {
+        let files_root = match roots.files_root_for_owner(&record.owner) {
+            Ok(files_root) => files_root,
+            Err(err) => {
+                report.issue(
+                    ConsistencyIssueKind::OrphanFileRecord,
+                    Some(&record.owner),
+                    Some(&record.rel_path),
+                    format!("owner files root is not readable: {err}"),
+                );
+                continue;
+            }
+        };
+        let abs_path = match storage::safe_existing_path(&files_root, &rel_path_buf) {
             Ok(abs_path) => abs_path,
             Err(err) => {
                 report.issue(
@@ -448,13 +461,13 @@ fn check_filesystem_entries(
             continue;
         }
 
-        let key = (BOOTSTRAP_USER.to_owned(), entry.rel_path.clone());
+        let key = (entry.owner.clone(), entry.rel_path.clone());
         let xattrs = match read_entry_xattrs(&entry.abs_path, xattr_ns) {
             Ok(xattrs) => xattrs,
             Err(err) => {
                 report.issue(
                     ConsistencyIssueKind::InvalidXattr,
-                    Some(BOOTSTRAP_USER),
+                    Some(&entry.owner),
                     Some(&entry.rel_path),
                     format!("could not read xattrs: {err}"),
                 );
@@ -465,18 +478,18 @@ fn check_filesystem_entries(
         if !records_by_path.contains_key(&key) {
             report.issue(
                 ConsistencyIssueKind::MissingFileRecord,
-                Some(BOOTSTRAP_USER),
+                Some(&entry.owner),
                 Some(&entry.rel_path),
                 "filesystem entry has no SQLite file_ids row",
             );
         }
 
         if let Some(file_id) = parse_i64_xattr(xattrs.file_id.as_deref()).unwrap_or(None) {
-            match records_by_id.get(&(BOOTSTRAP_USER.to_owned(), file_id)) {
+            match records_by_id.get(&(entry.owner.clone(), file_id)) {
                 Some(record) if record.rel_path == entry.rel_path => {}
                 Some(record) => report.issue(
                     ConsistencyIssueKind::XattrWithoutFileRecord,
-                    Some(BOOTSTRAP_USER),
+                    Some(&entry.owner),
                     Some(&entry.rel_path),
                     format!(
                         "xattr fileid={} belongs to SQLite path {}",
@@ -485,7 +498,7 @@ fn check_filesystem_entries(
                 ),
                 None => report.issue(
                     ConsistencyIssueKind::XattrWithoutFileRecord,
-                    Some(BOOTSTRAP_USER),
+                    Some(&entry.owner),
                     Some(&entry.rel_path),
                     format!("xattr fileid={} has no SQLite row", file_id),
                 ),
@@ -497,7 +510,7 @@ fn check_filesystem_entries(
 fn check_dead_props(
     dead_props: &[DeadPropRow],
     records_by_path: &BTreeMap<(String, String), FileRecordRow>,
-    fs_by_path: &BTreeMap<String, FsEntry>,
+    fs_by_path: &BTreeMap<(String, String), FsEntry>,
     report: &mut ConsistencyReport,
 ) {
     let mut seen = BTreeSet::new();
@@ -524,7 +537,7 @@ fn check_dead_props(
             }
         };
 
-        if !fs_by_path.contains_key(&rel_path) {
+        if !fs_by_path.contains_key(&(prop.owner.clone(), rel_path.clone())) {
             report.issue(
                 ConsistencyIssueKind::DeadPropWithoutFile,
                 Some(&prop.owner),
@@ -648,8 +661,10 @@ fn plan_xattr_without_record_action(
     }
 
     let rel_path_buf = PathBuf::from(&rel_path);
-    let file_id = storage::safe_existing_path(&roots.files_root, &rel_path_buf)
+    let file_id = roots
+        .files_root_for_owner(&owner)
         .ok()
+        .and_then(|files_root| storage::safe_existing_path(&files_root, &rel_path_buf).ok())
         .and_then(|abs_path| read_entry_xattrs(&abs_path, xattr_ns).ok())
         .and_then(|xattrs| parse_i64_xattr(xattrs.file_id.as_deref()).ok().flatten());
 
@@ -739,7 +754,8 @@ async fn ensure_file_record(
     rel_path: &str,
 ) -> Result<()> {
     let rel_path_buf = PathBuf::from(rel_path);
-    let abs_path = storage::safe_existing_path(&roots.files_root, &rel_path_buf)
+    let files_root = roots.files_root_for_owner(owner)?;
+    let abs_path = storage::safe_existing_path(&files_root, &rel_path_buf)
         .with_context(|| format!("resolve filesystem entry {rel_path}"))?;
     db::ensure_file_record(
         pool,
@@ -767,7 +783,8 @@ async fn refresh_file_metadata(
         .await?
         .with_context(|| format!("load file_ids row for {rel_path}"))?;
     let rel_path_buf = PathBuf::from(rel_path);
-    let abs_path = storage::safe_existing_path(&roots.files_root, &rel_path_buf)
+    let files_root = roots.files_root_for_owner(owner)?;
+    let abs_path = storage::safe_existing_path(&files_root, &rel_path_buf)
         .with_context(|| format!("resolve filesystem entry {rel_path}"))?;
     let (mtime_ns, file_size) = storage::metadata_fingerprint(&abs_path)?;
     let etag = derive_etag(mtime_ns, file_size);
@@ -822,17 +839,23 @@ impl ConsistencyReport {
 
 #[derive(Debug, Clone)]
 struct ExistingStorageRoots {
-    files_root: PathBuf,
+    data_root: PathBuf,
 }
 
 impl ExistingStorageRoots {
     fn load(config: &Config) -> Result<Self> {
         let data_dir = Path::new(&config.storage.data_dir);
-        let files_dir = data_dir.join("files");
-        let files_root = files_dir
+        let data_root = data_dir
             .canonicalize()
-            .with_context(|| format!("canonicalize files directory {}", files_dir.display()))?;
-        Ok(Self { files_root })
+            .with_context(|| format!("canonicalize data directory {}", data_dir.display()))?;
+        Ok(Self { data_root })
+    }
+
+    fn files_root_for_owner(&self, owner: &str) -> Result<PathBuf> {
+        db::validate_username(owner)?;
+        let rel_root = Path::new("users").join(owner).join("files");
+        storage::safe_existing_path(&self.data_root, &rel_root)
+            .with_context(|| format!("resolve files root for owner {owner}"))
     }
 }
 
@@ -923,17 +946,54 @@ fn dead_prop_from_row(row: SqliteRow) -> Result<DeadPropRow> {
     })
 }
 
-fn collect_filesystem_entries(files_root: &Path) -> Result<Vec<FsEntry>> {
-    let mut entries = vec![FsEntry {
-        rel_path: String::new(),
-        abs_path: files_root.to_path_buf(),
-    }];
-    collect_child_entries(files_root, Path::new(""), &mut entries)?;
-    entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+fn collect_filesystem_entries(roots: &ExistingStorageRoots) -> Result<Vec<FsEntry>> {
+    let users_root = roots.data_root.join("users");
+    if !users_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    for owner_entry in std::fs::read_dir(&users_root)
+        .with_context(|| format!("read users directory {}", users_root.display()))?
+    {
+        let owner_entry =
+            owner_entry.with_context(|| format!("read users entry {}", users_root.display()))?;
+        let owner_name = owner_entry.file_name().to_string_lossy().into_owned();
+        if db::validate_username(&owner_name).is_err() {
+            continue;
+        }
+        let files_root = owner_entry.path().join("files");
+        if !files_root.is_dir() {
+            continue;
+        }
+        let files_root = files_root
+            .canonicalize()
+            .with_context(|| format!("canonicalize files directory {}", files_root.display()))?;
+        storage::safe_existing_path(
+            &roots.data_root,
+            &Path::new("users").join(&owner_name).join("files"),
+        )?;
+        entries.push(FsEntry {
+            owner: owner_name.clone(),
+            rel_path: String::new(),
+            abs_path: files_root.clone(),
+        });
+        collect_child_entries(&files_root, &owner_name, Path::new(""), &mut entries)?;
+    }
+    entries.sort_by(|left, right| {
+        left.owner
+            .cmp(&right.owner)
+            .then_with(|| left.rel_path.cmp(&right.rel_path))
+    });
     Ok(entries)
 }
 
-fn collect_child_entries(root: &Path, rel_path: &Path, entries: &mut Vec<FsEntry>) -> Result<()> {
+fn collect_child_entries(
+    root: &Path,
+    owner: &str,
+    rel_path: &Path,
+    entries: &mut Vec<FsEntry>,
+) -> Result<()> {
     let dir = root.join(rel_path);
     for entry in
         std::fs::read_dir(&dir).with_context(|| format!("read directory {}", dir.display()))?
@@ -945,11 +1005,12 @@ fn collect_child_entries(root: &Path, rel_path: &Path, entries: &mut Vec<FsEntry
         let child_rel = rel_path.join(entry.file_name());
         let child_rel_string = storage::rel_path_string(&child_rel)?;
         entries.push(FsEntry {
+            owner: owner.to_owned(),
             rel_path: child_rel_string,
             abs_path: entry.path(),
         });
         if file_type.is_dir() {
-            collect_child_entries(root, &child_rel, entries)?;
+            collect_child_entries(root, owner, &child_rel, entries)?;
         }
     }
     Ok(())

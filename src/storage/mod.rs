@@ -3,7 +3,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use crate::config::StorageConfig;
+use crate::{config::StorageConfig, db::BOOTSTRAP_USER};
 use anyhow::{bail, Context};
 
 #[derive(Debug, Clone)]
@@ -18,7 +18,7 @@ impl StorageLayout {
         let data_dir = Path::new(&config.data_dir);
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create data directory {}", data_dir.display()))?;
-        let files_dir = data_dir.join("files");
+        let files_dir = data_dir.join("users").join(BOOTSTRAP_USER).join("files");
         let uploads_dir = data_dir.join("uploads");
         std::fs::create_dir_all(&files_dir)
             .with_context(|| format!("create files directory {}", files_dir.display()))?;

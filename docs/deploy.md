@@ -47,7 +47,7 @@ Default macOS layout:
 /opt/gono-cloud/bin/gono-cloud
 /Library/Application Support/Gono Cloud/config.toml
 /Library/Application Support/Gono Cloud/gono-cloud.db
-/Library/Application Support/Gono Cloud/data/files
+/Library/Application Support/Gono Cloud/data/users/<username>/files
 /Library/Application Support/Gono Cloud/data/uploads
 /Library/LaunchDaemons/cloud.gono.gono-cloud.plist
 /Library/Logs/Gono Cloud/
@@ -285,7 +285,7 @@ Before calling the deployment complete:
 
 ## Operational Notes
 
-- Back up SQLite, `data/files`, and xattrs from the same point in time.
+- Back up SQLite, `data/users`, and xattrs from the same point in time.
 - Run `NC_DAV_CONFIG=/etc/gono-cloud/config.toml gono-cloud consistency-check` after restores or
   manual filesystem maintenance. It is read-only and reports SQLite/file/xattr mismatches, orphan
   `file_id` rows, and orphan dead props.
@@ -296,7 +296,7 @@ Before calling the deployment complete:
   sync history window. Rows older than the retention window are pruned only when they fall outside
   the minimum retained row count; clients with a token older than the retained floor receive
   `DAV:valid-sync-token` and must do a full resync.
-- Keep `data/files` and `data/uploads` on the same partition. Startup rejects split partitions,
+- Keep `data/users/gono/files` and `data/uploads` on the same partition. Startup rejects split partitions,
   validates the xattr namespace, and probes xattr writes before accepting traffic.
 - WebDAV locks are persisted in SQLite. A normal restart preserves active locks until they expire
   or the client sends `UNLOCK`; run a single service instance for now so lock conflict checks stay

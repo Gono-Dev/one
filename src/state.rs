@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use sqlx::SqlitePool;
 use tracing::{info, warn};
@@ -8,7 +11,7 @@ use crate::{
     config::{Config, NotifyPushConfig, SyncConfig},
     db::{self, BootstrapOutcome, BOOTSTRAP_USER},
     notify_push::NotifyRuntime,
-    storage::StorageLayout,
+    storage::{self, StorageLayout},
 };
 
 #[derive(Debug)]
@@ -84,17 +87,15 @@ impl AppState {
 
     pub fn files_root_for_owner(&self, owner: &str) -> anyhow::Result<PathBuf> {
         db::validate_username(owner)?;
-        if owner == self.owner {
-            Ok(self.files_root.clone())
-        } else {
-            Ok(self.data_root.join("users").join(owner).join("files"))
-        }
+        Ok(self.data_root.join("users").join(owner).join("files"))
     }
 
     pub async fn ensure_files_root_for_owner(&self, owner: &str) -> anyhow::Result<PathBuf> {
-        let files_root = self.files_root_for_owner(owner)?;
+        db::validate_username(owner)?;
+        let rel_root = Path::new("users").join(owner).join("files");
+        let files_root = self.data_root.join(&rel_root);
         tokio::fs::create_dir_all(&files_root).await?;
-        Ok(files_root)
+        storage::safe_existing_path(&self.data_root, &rel_root)
     }
 
     pub fn notify_file_changed(&self, file_id: Option<i64>) {

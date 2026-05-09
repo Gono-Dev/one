@@ -1285,6 +1285,10 @@ async fn local_users_are_confined_to_their_own_nextcloud_files_root() {
     let alice = db::create_local_user(&state.db, "alice", Some("Alice"))
         .await
         .expect("create alice");
+    assert!(state
+        .files_root
+        .ends_with(std::path::Path::new("users").join("gono").join("files")));
+    assert!(!temp.path().join("data/files").exists());
 
     let alice_on_gono = app
         .clone()
@@ -1980,7 +1984,7 @@ async fn symlink_parent_escape_is_rejected_for_put() {
     let (app, temp, password) = app_with_temp_root().await;
     let outside = temp.path().join("outside");
     std::fs::create_dir_all(&outside).expect("outside dir");
-    symlink(&outside, temp.path().join("data/files/link")).expect("create symlink");
+    symlink(&outside, temp.path().join("data/users/gono/files/link")).expect("create symlink");
 
     let response = app
         .oneshot(
@@ -2006,7 +2010,11 @@ async fn symlink_existing_target_escape_is_rejected_for_get() {
     let (app, temp, password) = app_with_temp_root().await;
     let outside = temp.path().join("outside-secret.txt");
     std::fs::write(&outside, "secret").expect("outside secret");
-    symlink(&outside, temp.path().join("data/files/secret-link.txt")).expect("create symlink");
+    symlink(
+        &outside,
+        temp.path().join("data/users/gono/files/secret-link.txt"),
+    )
+    .expect("create symlink");
 
     let response = app
         .oneshot(
@@ -2026,7 +2034,7 @@ async fn symlink_existing_target_escape_is_rejected_for_get() {
 #[tokio::test]
 async fn encoded_parent_segments_are_rejected_for_put() {
     let (app, temp, password) = app_with_temp_root().await;
-    std::fs::create_dir_all(temp.path().join("data/files/nested")).expect("nested dir");
+    std::fs::create_dir_all(temp.path().join("data/users/gono/files/nested")).expect("nested dir");
 
     let response = app
         .oneshot(
@@ -2041,13 +2049,16 @@ async fn encoded_parent_segments_are_rejected_for_put() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(!temp.path().join("data/files/escape.txt").exists());
+    assert!(!temp
+        .path()
+        .join("data/users/gono/files/escape.txt")
+        .exists());
 }
 
 #[tokio::test]
 async fn destination_encoded_parent_and_nul_are_rejected_for_copy() {
     let (app, temp, password) = app_with_temp_root().await;
-    std::fs::create_dir_all(temp.path().join("data/files/nested")).expect("nested dir");
+    std::fs::create_dir_all(temp.path().join("data/users/gono/files/nested")).expect("nested dir");
 
     let encoded_parent = app
         .clone()
@@ -2063,7 +2074,10 @@ async fn destination_encoded_parent_and_nul_are_rejected_for_copy() {
         .await
         .unwrap();
     assert_eq!(encoded_parent.status(), StatusCode::BAD_REQUEST);
-    assert!(!temp.path().join("data/files/copied.txt").exists());
+    assert!(!temp
+        .path()
+        .join("data/users/gono/files/copied.txt")
+        .exists());
 
     let nul = app
         .oneshot(
@@ -2088,7 +2102,11 @@ async fn chunking_destination_under_symlink_parent_is_rejected() {
     let (app, temp, password) = app_with_temp_root().await;
     let outside = temp.path().join("outside-chunks");
     std::fs::create_dir_all(&outside).expect("outside dir");
-    symlink(&outside, temp.path().join("data/files/chunk-link")).expect("create symlink");
+    symlink(
+        &outside,
+        temp.path().join("data/users/gono/files/chunk-link"),
+    )
+    .expect("create symlink");
 
     let response = app
         .oneshot(
