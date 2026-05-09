@@ -24,6 +24,12 @@ The script creates a temporary config and data directory, starts `gono-one` over
 
 Set `KEEP_SMOKE_DIR=1` to keep the temporary data directory for inspection. Set `NC_DAV_SMOKE_PORT=16102` to force a port.
 
+## CI
+
+GitHub Actions runs `cargo fmt --check`, `cargo check --locked`, `cargo test --locked`, and
+`scripts/compat-smoke.sh` on pushes and pull requests. The heavier litmus job runs for tags and
+manual workflow dispatch.
+
 ## Litmus
 
 Install the external `litmus` WebDAV test binary, then run:

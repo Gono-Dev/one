@@ -36,6 +36,8 @@ impl StorageLayout {
             .with_context(|| format!("canonicalize uploads directory {}", uploads_dir.display()))?;
 
         probe_xattr(&files_root, &config.xattr_ns)?;
+        ensure_inode_space(&files_root)?;
+        ensure_inode_space(&uploads_root)?;
         ensure_same_partition(&files_root, &uploads_root)?;
 
         Ok(Self {
@@ -75,6 +77,35 @@ fn probe_xattr(root: &Path, namespace: &str) -> anyhow::Result<()> {
         .with_context(|| format!("remove xattr probe file {}", probe_path.display()));
 
     result.and(cleanup)
+}
+
+#[cfg(unix)]
+fn ensure_inode_space(root: &Path) -> anyhow::Result<()> {
+    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+
+    let path = CString::new(root.as_os_str().as_bytes())
+        .with_context(|| format!("storage path contains NUL: {}", root.display()))?;
+    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("statvfs storage directory {}", root.display()));
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    if stats.f_files != 0 && stats.f_favail == 0 {
+        bail!(
+            "no free inodes available in storage directory {}",
+            root.display()
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_inode_space(_root: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -207,5 +238,16 @@ fn ensure_inside(canonical_root: &Path, path: &Path) -> anyhow::Result<()> {
             canonical_root.display(),
             path.display()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_inode_space;
+
+    #[test]
+    fn inode_probe_accepts_tempdir() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        ensure_inode_space(temp.path()).expect("inode space probe");
     }
 }
