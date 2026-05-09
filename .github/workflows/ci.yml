@@ -48,3 +48,31 @@ jobs:
 
       - name: Litmus smoke
         run: RUN_LITMUS=1 scripts/compat-smoke.sh
+
+  package:
+    name: Package release artifact
+    runs-on: ${{ matrix.os }}
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Package
+        run: scripts/package-release.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gono-one-${{ matrix.os }}
+          path: dist/*

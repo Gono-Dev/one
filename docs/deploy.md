@@ -78,6 +78,34 @@ Each archive must contain an executable named `gono-one`. You can also override 
 GONO_ONE_BIN_URL=https://example.com/gono-one-linux-x86_64.tar.gz bash <(curl -sL https://run.gono.one)
 ```
 
+Build a release archive for the current host with:
+
+```sh
+scripts/package-release.sh
+```
+
+The script writes both latest-style and versioned names to `dist/`, plus `.sha256` sidecars. For
+example:
+
+```text
+dist/gono-one-linux-x86_64.tar.gz
+dist/gono-one-0.1.0-linux-x86_64.tar.gz
+dist/gono-one-linux-x86_64.tar.gz.sha256
+dist/gono-one-0.1.0-linux-x86_64.tar.gz.sha256
+```
+
+Cross-builds can pass Cargo and installer target names explicitly:
+
+```sh
+GONO_ONE_CARGO_TARGET=aarch64-unknown-linux-gnu \
+GONO_ONE_RELEASE_TARGET=linux-aarch64 \
+scripts/package-release.sh
+```
+
+On tag builds or manual GitHub Actions runs, CI also uploads native Linux/macOS package artifacts.
+After verifying them, mirror the latest-style files under `https://run.gono.one/releases/latest/`
+and the versioned files under `https://run.gono.one/releases/<version>/`.
+
 ## Domain And Reverse Proxy
 
 The installer defaults to:
