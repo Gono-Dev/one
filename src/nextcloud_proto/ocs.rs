@@ -36,7 +36,7 @@ fn v2_routes() -> Router<Arc<AppState>> {
         .route("/cloud/users", get(list_users))
         .route("/cloud/users/{user_id}", get(user_metadata))
         .route("/apps/dav/api/v1/direct", post(not_implemented))
-        .route("/apps/terms_of_service/terms", get(empty_list))
+        .route("/apps/terms_of_service/terms", get(not_found))
         .route("/core/navigation/apps", get(empty_list))
         .route("/core/autocomplete/get", get(autocomplete))
         .route(

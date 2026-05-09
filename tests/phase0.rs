@@ -334,8 +334,8 @@ async fn documented_ocs_v2_endpoints_are_covered_or_placeholdered() {
         (
             Method::GET,
             "/ocs/v2.php/apps/terms_of_service/terms?format=json",
-            StatusCode::OK,
-            "\"data\":[]",
+            StatusCode::NOT_FOUND,
+            "\"statuscode\":404",
         ),
         (
             Method::GET,
