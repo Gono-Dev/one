@@ -8,13 +8,14 @@ use axum::{
     routing::get,
     Router,
 };
-use dav_server::{memls::MemLs, DavHandler};
+use dav_server::DavHandler;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 use crate::{
     auth::require_basic_auth,
     dav_handler::{NcDavService, NcLocalFs},
+    locks::SqliteLs,
     nextcloud_proto, notify_push,
     state::AppState,
 };
@@ -30,7 +31,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.instance_id.clone(),
             state.xattr_ns.clone(),
         )))
-        .locksystem(MemLs::new())
+        .locksystem(SqliteLs::new(state.db.clone()))
         .build_handler();
 
     let dav_service = ServiceBuilder::new()

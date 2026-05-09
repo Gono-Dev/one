@@ -82,3 +82,21 @@ CREATE TABLE IF NOT EXISTS dead_props (
 
 CREATE INDEX IF NOT EXISTS idx_dead_props_owner_path
     ON dead_props(owner, rel_path);
+
+CREATE TABLE IF NOT EXISTS webdav_locks (
+    token        TEXT PRIMARY KEY,
+    path         TEXT    NOT NULL,
+    principal    TEXT,
+    owner_xml    TEXT,
+    timeout_at   INTEGER,
+    timeout_secs INTEGER,
+    shared       INTEGER NOT NULL,
+    deep         INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_webdav_locks_path
+    ON webdav_locks(path);
+
+CREATE INDEX IF NOT EXISTS idx_webdav_locks_timeout
+    ON webdav_locks(timeout_at);

@@ -53,7 +53,38 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::migrate!("./migrations")
         .run(pool)
         .await
-        .context("run SQLite migrations")
+        .context("run SQLite migrations")?;
+    ensure_runtime_schema(pool).await
+}
+
+async fn ensure_runtime_schema(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS webdav_locks (
+            token        TEXT PRIMARY KEY,
+            path         TEXT    NOT NULL,
+            principal    TEXT,
+            owner_xml    TEXT,
+            timeout_at   INTEGER,
+            timeout_secs INTEGER,
+            shared       INTEGER NOT NULL,
+            deep         INTEGER NOT NULL,
+            created_at   INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("create webdav_locks table")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_webdav_locks_path ON webdav_locks(path)")
+        .execute(pool)
+        .await
+        .context("create webdav_locks path index")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_webdav_locks_timeout ON webdav_locks(timeout_at)")
+        .execute(pool)
+        .await
+        .context("create webdav_locks timeout index")?;
+    Ok(())
 }
 
 pub async fn ensure_bootstrap_user(pool: &SqlitePool) -> anyhow::Result<BootstrapOutcome> {

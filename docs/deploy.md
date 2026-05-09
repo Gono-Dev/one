@@ -199,6 +199,8 @@ Before calling the deployment complete:
   `DAV:valid-sync-token` and must do a full resync.
 - Keep `data/files` and `data/uploads` on the same partition. Startup rejects split partitions,
   validates the xattr namespace, and probes xattr writes before accepting traffic.
-- Current WebDAV locks are in memory; a restart drops locks. Document this for MVP deployments.
+- WebDAV locks are persisted in SQLite. A normal restart preserves active locks until they expire
+  or the client sends `UNLOCK`; run a single service instance for now so lock conflict checks stay
+  serialized through the process-local lock guard.
 - Linux service status: `systemctl status gono-one`.
 - macOS service status: `launchctl print system/one.gono.gono-one`.

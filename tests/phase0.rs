@@ -908,6 +908,113 @@ async fn initial_migration_does_not_install_sync_token_triggers() {
             .expect("count triggers");
 
     assert_eq!(trigger_count.0, 0);
+
+    let lock_table_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1")
+            .bind("webdav_locks")
+            .fetch_one(&initialized.state.db)
+            .await
+            .expect("count lock table");
+    assert_eq!(lock_table_count.0, 1);
+}
+
+#[tokio::test]
+async fn webdav_locks_survive_app_restart() {
+    let temp = TempDir::new().expect("tempdir");
+    let config = test_config(&temp);
+    let initialized = AppState::initialize(config.clone())
+        .await
+        .expect("initial app state");
+    let password = initialized
+        .bootstrap
+        .generated_password
+        .expect("first bootstrap password");
+    let app = build_router(initialized.state.clone());
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/persistent-lock.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("before lock"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let lock = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"LOCK").unwrap())
+                .uri("/remote.php/dav/persistent-lock.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .header("Depth", "0")
+                .header("Timeout", "Second-300")
+                .body(Body::from(lock_info_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lock.status(), StatusCode::OK);
+    let lock_token = lock
+        .headers()
+        .get("lock-token")
+        .expect("lock token")
+        .to_str()
+        .expect("lock token string")
+        .to_owned();
+
+    let restarted = AppState::initialize(config)
+        .await
+        .expect("restarted app state");
+    assert!(restarted.bootstrap.generated_password.is_none());
+    let restarted_app = build_router(restarted.state);
+
+    let locked_put = restarted_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/persistent-lock.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("blocked"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(locked_put.status(), StatusCode::LOCKED);
+
+    let unlock = restarted_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"UNLOCK").unwrap())
+                .uri("/remote.php/dav/persistent-lock.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Lock-Token", lock_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unlock.status(), StatusCode::NO_CONTENT);
+
+    let unlocked_put = restarted_app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/persistent-lock.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("after unlock"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(unlocked_put.status().is_success());
 }
 
 #[tokio::test]
@@ -2359,6 +2466,15 @@ fn sync_collection_body(sync_token: &str) -> String {
   </d:prop>
 </d:sync-collection>"#
     )
+}
+
+fn lock_info_body() -> &'static str {
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<d:lockinfo xmlns:d="DAV:">
+  <d:lockscope><d:exclusive /></d:lockscope>
+  <d:locktype><d:write /></d:locktype>
+  <d:owner><d:href>gono</d:href></d:owner>
+</d:lockinfo>"#
 }
 
 fn filter_files_favorites_body() -> &'static str {
