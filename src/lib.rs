@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod consistency;
 pub mod dav_handler;
 pub mod db;
 pub mod nextcloud_proto;

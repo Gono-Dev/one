@@ -190,6 +190,9 @@ Before calling the deployment complete:
 ## Operational Notes
 
 - Back up SQLite, `data/files`, and xattrs from the same point in time.
+- Run `NC_DAV_CONFIG=/etc/gono-one/config.toml gono-one consistency-check` after restores or
+  manual filesystem maintenance. It is read-only and reports SQLite/file/xattr mismatches, orphan
+  `file_id` rows, and orphan dead props.
 - Keep `data/files` and `data/uploads` on the same partition.
 - Current WebDAV locks are in memory; a restart drops locks. Document this for MVP deployments.
 - Linux service status: `systemctl status gono-one`.

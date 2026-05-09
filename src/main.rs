@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::{bail, Context};
 use axum_server::{tls_rustls::RustlsConfig, Handle};
-use gono_one::{build_router, dav_handler::chunked_upload, AppState, Config};
+use gono_one::{build_router, consistency, dav_handler::chunked_upload, AppState, Config};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -11,8 +11,22 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
+    let command = Command::parse(std::env::args().skip(1))?;
+    if command == Command::Help {
+        print_help();
+        return Ok(());
+    }
+
     let config_path = std::env::var("NC_DAV_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
     let config = Config::load_or_dev_default(&config_path)?;
+    match command {
+        Command::Serve => run_server(&config_path, config).await,
+        Command::ConsistencyCheck => run_consistency_check(config).await,
+        Command::Help => unreachable!("handled before config load"),
+    }
+}
+
+async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
     let addr: SocketAddr = config.server.bind.parse().context("parse server.bind")?;
     let cert_file = config.server.cert_file.clone();
     let key_file = config.server.key_file.clone();
@@ -73,6 +87,50 @@ async fn main() -> anyhow::Result<()> {
     server_result?;
 
     Ok(())
+}
+
+async fn run_consistency_check(config: Config) -> anyhow::Result<()> {
+    let report = consistency::check(&config).await?;
+    print!("{}", report.render_text());
+    if report.is_clean() {
+        Ok(())
+    } else {
+        std::process::exit(2);
+    }
+}
+
+fn print_help() {
+    println!(concat!(
+        "Usage:\n",
+        "  gono-one [serve]\n",
+        "  gono-one consistency-check\n",
+        "\n",
+        "Environment:\n",
+        "  NC_DAV_CONFIG    Path to config.toml (default: config.toml)\n",
+    ));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Serve,
+    ConsistencyCheck,
+    Help,
+}
+
+impl Command {
+    fn parse(args: impl IntoIterator<Item = String>) -> anyhow::Result<Self> {
+        let args: Vec<_> = args.into_iter().collect();
+        match args.as_slice() {
+            [] => Ok(Self::Serve),
+            [command] if command == "serve" => Ok(Self::Serve),
+            [command] if command == "consistency-check" => Ok(Self::ConsistencyCheck),
+            [command] if command == "--help" || command == "-h" || command == "help" => {
+                Ok(Self::Help)
+            }
+            [unknown] => bail!("unknown command {unknown:?}; run gono-one --help"),
+            _ => bail!("too many arguments; run gono-one --help"),
+        }
+    }
 }
 
 fn init_tracing() {
@@ -170,7 +228,7 @@ async fn stop_upload_cleanup(upload_cleanup: tokio::task::JoinHandle<()>) {
 
 #[cfg(test)]
 mod tests {
-    use super::LogFormat;
+    use super::{Command, LogFormat};
 
     #[test]
     fn log_format_parser_accepts_supported_formats() {
@@ -179,5 +237,23 @@ mod tests {
         assert_eq!(LogFormat::parse("compact"), LogFormat::Compact);
         assert_eq!(LogFormat::parse("text"), LogFormat::Text);
         assert_eq!(LogFormat::parse("unknown"), LogFormat::Text);
+    }
+
+    #[test]
+    fn command_parser_accepts_server_and_check_modes() {
+        assert_eq!(Command::parse([]).unwrap(), Command::Serve);
+        assert_eq!(
+            Command::parse(["serve".to_owned()]).unwrap(),
+            Command::Serve
+        );
+        assert_eq!(
+            Command::parse(["consistency-check".to_owned()]).unwrap(),
+            Command::ConsistencyCheck
+        );
+        assert_eq!(
+            Command::parse(["--help".to_owned()]).unwrap(),
+            Command::Help
+        );
+        assert!(Command::parse(["unknown".to_owned()]).is_err());
     }
 }
