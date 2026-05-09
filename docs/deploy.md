@@ -193,9 +193,11 @@ Before calling the deployment complete:
 - Run `NC_DAV_CONFIG=/etc/gono-one/config.toml gono-one consistency-check` after restores or
   manual filesystem maintenance. It is read-only and reports SQLite/file/xattr mismatches, orphan
   `file_id` rows, and orphan dead props.
+- Configure `[sync] change_log_retention_days` and `change_log_min_entries` for the deployment's
+  sync history window. Rows older than the retention window are pruned only when they fall outside
+  the minimum retained row count; clients with a token older than the retained floor receive
+  `DAV:valid-sync-token` and must do a full resync.
 - Keep `data/files` and `data/uploads` on the same partition.
 - Current WebDAV locks are in memory; a restart drops locks. Document this for MVP deployments.
 - Linux service status: `systemctl status gono-one`.
 - macOS service status: `launchctl print system/one.gono.gono-one`.
-- Plan follow-up consistency tooling for orphan `file_id` records, dead props, missing xattrs, and
-  `change_log` retention.

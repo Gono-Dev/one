@@ -61,6 +61,15 @@ async fn handle_sync_collection(
 ) -> anyhow::Result<Response<Body>> {
     let current_token = db::current_sync_token(&state.db, &state.owner).await?;
     let since_token = report.sync_token.unwrap_or(0);
+    let floor_token = db::change_log_floor_token(&state.db, &state.owner, current_token).await?;
+    if since_token < floor_token {
+        return Ok(stale_sync_token_response(
+            since_token,
+            floor_token,
+            current_token,
+        ));
+    }
+
     let entries =
         db::list_change_log_range(&state.db, &state.owner, since_token, current_token).await?;
     let mut xml = multistatus_start();
@@ -74,6 +83,31 @@ async fn handle_sync_collection(
     xml.push_str("</d:sync-token></d:multistatus>");
 
     Ok(xml_response(xml))
+}
+
+fn stale_sync_token_response(
+    since_token: i64,
+    floor_token: i64,
+    current_token: i64,
+) -> Response<Body> {
+    let xml = format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+            "<d:error xmlns:d=\"DAV:\" xmlns:g=\"https://gono.one/ns\">",
+            "<d:valid-sync-token/>",
+            "<g:sync-token>{}</g:sync-token>",
+            "<g:sync-token-floor>{}</g:sync-token-floor>",
+            "<g:current-sync-token>{}</g:current-sync-token>",
+            "</d:error>"
+        ),
+        since_token, floor_token, current_token
+    );
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+        xml,
+    )
+        .into_response()
 }
 
 async fn handle_filter_files(

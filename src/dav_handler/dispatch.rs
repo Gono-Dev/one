@@ -279,6 +279,7 @@ impl NcDavService {
             metadata_error_response()
         })?;
         self.state.notify_file_changed(Some(file_id));
+        self.state.compact_change_log().await;
         Ok(sync_token)
     }
 }

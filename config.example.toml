@@ -15,6 +15,10 @@ max_connections = 5
 [auth]
 realm = "Nextcloud"
 
+[sync]
+change_log_retention_days = 30
+change_log_min_entries = 10000
+
 [notify_push]
 enabled = true
 path = "/push"

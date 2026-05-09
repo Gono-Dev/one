@@ -430,6 +430,13 @@ pub struct ChangeLogEntry {
     pub sync_token: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeLogPruneOutcome {
+    pub deleted_rows: u64,
+    pub floor_token: i64,
+    pub current_token: i64,
+}
+
 pub async fn record_change(
     pool: &SqlitePool,
     owner: &str,
@@ -488,6 +495,85 @@ pub async fn current_sync_token(pool: &SqlitePool, owner: &str) -> anyhow::Resul
         .transpose()?
         .unwrap_or(0);
     Ok(token)
+}
+
+pub async fn change_log_floor_token(
+    pool: &SqlitePool,
+    owner: &str,
+    current_token: i64,
+) -> anyhow::Result<i64> {
+    let min_retained: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT MIN(sync_token)
+        FROM change_log
+        WHERE owner = ?1 AND sync_token <= ?2
+        "#,
+    )
+    .bind(owner)
+    .bind(current_token)
+    .fetch_one(pool)
+    .await
+    .context("load change_log floor token")?;
+
+    Ok(min_retained
+        .map(|token| token.saturating_sub(1))
+        .unwrap_or(current_token))
+}
+
+pub async fn prune_change_log(
+    pool: &SqlitePool,
+    owner: &str,
+    retention_days: u64,
+    min_entries: usize,
+) -> anyhow::Result<ChangeLogPruneOutcome> {
+    let current_token = current_sync_token(pool, owner).await?;
+    let retention_secs = retention_days
+        .saturating_mul(24 * 60 * 60)
+        .min(i64::MAX as u64) as i64;
+    let cutoff = unix_timestamp().saturating_sub(retention_secs);
+    let min_entries = i64::try_from(min_entries.max(1)).unwrap_or(i64::MAX);
+    let keep_floor: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT MIN(sync_token)
+        FROM (
+            SELECT sync_token
+            FROM change_log
+            WHERE owner = ?1
+            ORDER BY sync_token DESC
+            LIMIT ?2
+        )
+        "#,
+    )
+    .bind(owner)
+    .bind(min_entries)
+    .fetch_one(pool)
+    .await
+    .context("load change_log prune floor")?;
+
+    let deleted_rows = if let Some(keep_floor) = keep_floor {
+        sqlx::query(
+            r#"
+            DELETE FROM change_log
+            WHERE owner = ?1 AND changed_at < ?2 AND sync_token < ?3
+            "#,
+        )
+        .bind(owner)
+        .bind(cutoff)
+        .bind(keep_floor)
+        .execute(pool)
+        .await
+        .context("prune change_log rows")?
+        .rows_affected()
+    } else {
+        0
+    };
+
+    let floor_token = change_log_floor_token(pool, owner, current_token).await?;
+    Ok(ChangeLogPruneOutcome {
+        deleted_rows,
+        floor_token,
+        current_token,
+    })
 }
 
 pub async fn list_change_log(

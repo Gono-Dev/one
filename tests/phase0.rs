@@ -284,6 +284,7 @@ async fn metrics_require_basic_auth_and_are_prometheus_shaped() {
     assert!(body.contains("gono_one_change_log_entries_total 1\n"));
     assert!(body.contains("gono_one_upload_sessions_total 0\n"));
     assert!(body.contains("gono_one_sync_token 1\n"));
+    assert!(body.contains("gono_one_change_log_floor_token 0\n"));
     assert!(body.contains("gono_one_storage_files_available_bytes "));
     assert!(body.contains("gono_one_notify_push_active_connections 0\n"));
     assert!(body.contains("gono_one_notify_push_events_total 1\n"));
@@ -1428,6 +1429,100 @@ async fn report_sync_collection_returns_changes_since_old_token() {
     assert!(!body.contains("/remote.php/dav/sync-a.txt"));
     assert!(body.contains("<oc:fileid>"));
     assert!(body.contains("HTTP/1.1 200 OK"));
+}
+
+#[tokio::test]
+async fn report_sync_collection_rejects_pruned_sync_tokens() {
+    let (app, _temp, password, state) = app_with_config(|config| {
+        config.sync.change_log_retention_days = 0;
+        config.sync.change_log_min_entries = 1;
+    })
+    .await;
+
+    for (name, body) in [("compact-a.txt", "a"), ("compact-b.txt", "b")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/remote.php/dav/{name}"))
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    sqlx::query("UPDATE change_log SET changed_at = ?1 WHERE owner = ?2")
+        .bind(db::unix_timestamp() - 86_400)
+        .bind(BOOTSTRAP_USER)
+        .execute(&state.db)
+        .await
+        .expect("age change log rows");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/compact-c.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("c"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+
+    let changes = db::list_change_log(&state.db, BOOTSTRAP_USER)
+        .await
+        .expect("change log");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].rel_path, "compact-c.txt");
+    assert_eq!(changes[0].sync_token, 3);
+    let floor_token = db::change_log_floor_token(&state.db, BOOTSTRAP_USER, 3)
+        .await
+        .expect("floor token");
+    assert_eq!(floor_token, 2);
+
+    let stale = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(sync_collection_body("1")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::FORBIDDEN);
+    let stale_body = to_bytes(stale.into_body(), usize::MAX).await.unwrap();
+    let stale_body = std::str::from_utf8(&stale_body).unwrap();
+    assert!(stale_body.contains("<d:valid-sync-token/>"));
+    assert!(stale_body.contains("<g:sync-token-floor>2</g:sync-token-floor>"));
+
+    let fresh = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(sync_collection_body("2")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::MULTI_STATUS);
+    let fresh_body = to_bytes(fresh.into_body(), usize::MAX).await.unwrap();
+    let fresh_body = std::str::from_utf8(&fresh_body).unwrap();
+    assert!(fresh_body.contains("<d:sync-token>3</d:sync-token>"));
+    assert!(fresh_body.contains("/remote.php/dav/compact-c.txt"));
 }
 
 #[tokio::test]

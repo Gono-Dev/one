@@ -10,6 +10,8 @@ pub struct Config {
     pub db: DbConfig,
     pub auth: AuthConfig,
     #[serde(default)]
+    pub sync: SyncConfig,
+    #[serde(default)]
     pub notify_push: NotifyPushConfig,
 }
 
@@ -36,6 +38,33 @@ pub struct DbConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
     pub realm: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncConfig {
+    #[serde(default = "SyncConfig::default_change_log_retention_days")]
+    pub change_log_retention_days: u64,
+    #[serde(default = "SyncConfig::default_change_log_min_entries")]
+    pub change_log_min_entries: usize,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            change_log_retention_days: Self::default_change_log_retention_days(),
+            change_log_min_entries: Self::default_change_log_min_entries(),
+        }
+    }
+}
+
+impl SyncConfig {
+    fn default_change_log_retention_days() -> u64 {
+        30
+    }
+
+    fn default_change_log_min_entries() -> usize {
+        10_000
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,6 +187,7 @@ impl Config {
             auth: AuthConfig {
                 realm: "Nextcloud".to_owned(),
             },
+            sync: SyncConfig::default(),
             notify_push: NotifyPushConfig::default(),
         }
     }

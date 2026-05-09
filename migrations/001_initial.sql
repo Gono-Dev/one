@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS change_log (
 CREATE INDEX IF NOT EXISTS idx_changelog_owner_token
     ON change_log(owner, sync_token);
 
+CREATE INDEX IF NOT EXISTS idx_changelog_owner_changed_at
+    ON change_log(owner, changed_at);
+
 CREATE TABLE IF NOT EXISTS sync_tokens (
     owner TEXT PRIMARY KEY,
     token INTEGER NOT NULL DEFAULT 0

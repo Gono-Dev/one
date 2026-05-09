@@ -56,6 +56,9 @@ async fn render_metrics(state: &AppState) -> anyhow::Result<String> {
     let sync_token = db::current_sync_token(&state.db, &state.owner)
         .await
         .context("load sync token")?;
+    let change_log_floor_token = db::change_log_floor_token(&state.db, &state.owner, sync_token)
+        .await
+        .context("load change log floor token")?;
     let files_available = fs2::available_space(&state.files_root)
         .with_context(|| format!("read available space for {}", state.files_root.display()))?;
     let files_total = fs2::total_space(&state.files_root)
@@ -78,6 +81,9 @@ async fn render_metrics(state: &AppState) -> anyhow::Result<String> {
             "# HELP gono_one_sync_token Current WebDAV sync token for the owner.\n",
             "# TYPE gono_one_sync_token gauge\n",
             "gono_one_sync_token {}\n",
+            "# HELP gono_one_change_log_floor_token Oldest previous sync token that can be used without a full resync.\n",
+            "# TYPE gono_one_change_log_floor_token gauge\n",
+            "gono_one_change_log_floor_token {}\n",
             "# HELP gono_one_storage_files_available_bytes Available bytes in the files storage root.\n",
             "# TYPE gono_one_storage_files_available_bytes gauge\n",
             "gono_one_storage_files_available_bytes {}\n",
@@ -90,6 +96,7 @@ async fn render_metrics(state: &AppState) -> anyhow::Result<String> {
         upload_sessions,
         expired_upload_sessions,
         sync_token,
+        change_log_floor_token,
         files_available,
         files_total,
     );

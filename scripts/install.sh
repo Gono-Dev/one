@@ -366,6 +366,10 @@ max_connections = ${MAX_CONNECTIONS}
 [auth]
 realm = "${AUTH_REALM}"
 
+[sync]
+change_log_retention_days = 30
+change_log_min_entries = 10000
+
 [notify_push]
 enabled = true
 path = "/push"
