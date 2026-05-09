@@ -12,6 +12,9 @@ CentOS/RHEL-compatible systems with:
 bash <(curl -sL https://run.gono.cloud)
 ```
 
+Running without arguments starts an interactive menu. Choose `1` to install or upgrade, `2` to
+uninstall, or use the status/log/restart entries for service management.
+
 To make that command work in production, `https://run.gono.cloud` must serve the raw contents of
 `scripts/install.sh` at the origin path `/`. Redirects are fine as long as `curl -sL` reaches the
 script. Release archives are downloaded from the GitHub Release by default, or users can pass
@@ -148,6 +151,12 @@ From a checked-out repository, the installer can be used directly:
 scripts/install.sh
 ```
 
+This also opens the interactive menu. For unattended local installs, pass a command explicitly:
+
+```sh
+scripts/install.sh install
+```
+
 If it needs elevated privileges, it first builds the local binary as the current user and then
 re-runs the same local script through `sudo`. This avoids downloading `https://run.gono.cloud` while
 developing locally.
@@ -155,10 +164,10 @@ developing locally.
 Useful local overrides:
 
 ```sh
-GONO_CLOUD_BUILD_PROFILE=debug scripts/install.sh
-GONO_CLOUD_BIN=/absolute/path/to/gono-cloud scripts/install.sh
-GONO_CLOUD_LOCAL_BUILD=0 GONO_CLOUD_BIN=target/release/gono-cloud scripts/install.sh
-GONO_CLOUD_INSTALL_SOURCE=release scripts/install.sh
+GONO_CLOUD_BUILD_PROFILE=debug scripts/install.sh install
+GONO_CLOUD_BIN=/absolute/path/to/gono-cloud scripts/install.sh install
+GONO_CLOUD_LOCAL_BUILD=0 GONO_CLOUD_BIN=target/release/gono-cloud scripts/install.sh install
+GONO_CLOUD_INSTALL_SOURCE=release scripts/install.sh install
 ```
 
 `GONO_CLOUD_INSTALL_SOURCE=auto` is the default: local repository installs use the local binary, while
@@ -168,10 +177,10 @@ The installer also accepts command-line options for the common environment varia
 
 ```sh
 scripts/install.sh --help
-scripts/install.sh --debug
-scripts/install.sh --bin target/release/gono-cloud
-scripts/install.sh --release --version latest
-scripts/install.sh --domain files.example.com --bind 127.0.0.1:18080
+scripts/install.sh install --debug
+scripts/install.sh install --bin target/release/gono-cloud
+scripts/install.sh install --release --version latest
+scripts/install.sh install --domain files.example.com --bind 127.0.0.1:18080
 ```
 
 It can also be used as a lightweight service management script, in the same style as common

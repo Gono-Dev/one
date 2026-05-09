@@ -7,7 +7,7 @@ INSTALL_SOURCE="${GONO_CLOUD_INSTALL_SOURCE:-auto}"
 LOCAL_BUILD="${GONO_CLOUD_LOCAL_BUILD:-auto}"
 LOCAL_BUILD_PROFILE="${GONO_CLOUD_BUILD_PROFILE:-release}"
 LOCAL_BIN="${GONO_CLOUD_BIN:-${GONO_CLOUD_LOCAL_BIN:-}}"
-COMMAND="${GONO_CLOUD_COMMAND:-install}"
+COMMAND="${GONO_CLOUD_COMMAND:-}"
 ASSUME_YES="${GONO_CLOUD_YES:-0}"
 PURGE="${GONO_CLOUD_PURGE:-0}"
 
@@ -87,15 +87,18 @@ show_usage() {
 Gono Cloud installer
 
 Usage:
-  $(usage_name) [install] [options]
+  $(usage_name)
+  $(usage_name) install [options]
   $(usage_name) status [options]
   $(usage_name) logs [options]
   $(usage_name) restart [options]
   $(usage_name) uninstall [options]
-  bash <(curl -sL ${INSTALL_URL}) [install] [options]
+  bash <(curl -sL ${INSTALL_URL})
+  bash <(curl -sL ${INSTALL_URL}) install [options]
 
 Commands:
-  install                   Install or upgrade Gono Cloud (default)
+  no arguments              Start the interactive menu
+  install                   Install or upgrade Gono Cloud
   status                    Show service status
   logs, show_log            Follow service logs
   restart                   Restart service and run health check
@@ -148,21 +151,125 @@ Other:
   --purge                    With uninstall, also remove config, data, and logs
 
 Examples:
-  scripts/install.sh --debug
+  scripts/install.sh
+  scripts/install.sh install --debug
+  scripts/install.sh install --release --version latest
   scripts/install.sh status
   scripts/install.sh logs
   scripts/install.sh restart
   scripts/install.sh uninstall
   scripts/install.sh uninstall --purge
-  scripts/install.sh --bin target/release/gono-cloud
-  scripts/install.sh --release --version latest
-  scripts/install.sh --domain files.example.com
-  bash <(curl -sL ${INSTALL_URL}) --base-url https://files.example.com
+  scripts/install.sh install --bin target/release/gono-cloud
+  scripts/install.sh install --release --version latest
+  scripts/install.sh install --domain files.example.com
+  bash <(curl -sL ${INSTALL_URL}) install --base-url https://files.example.com
 
 Environment variables are still supported. For example:
-  GONO_CLOUD_BIN=/path/to/gono-cloud scripts/install.sh
-  GONO_CLOUD_INSTALL_SOURCE=release scripts/install.sh
+  GONO_CLOUD_BIN=/path/to/gono-cloud scripts/install.sh install
+  GONO_CLOUD_INSTALL_SOURCE=release scripts/install.sh install
 EOF
+}
+
+set_command() {
+  COMMAND="$1"
+  export GONO_CLOUD_COMMAND="${COMMAND}"
+}
+
+is_enabled() {
+  case "$1" in
+    1|true|yes|y|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prompt_uninstall_purge() {
+  local input
+  if is_enabled "${ASSUME_YES}"; then
+    return
+  fi
+
+  printf "Remove config, data, and logs too? [y/N] "
+  if ! read -r input; then
+    die "failed to read purge selection"
+  fi
+  case "${input}" in
+    [yY]|[yY][eE][sS])
+      PURGE="1"
+      export GONO_CLOUD_PURGE="${PURGE}"
+      ;;
+  esac
+}
+
+show_interactive_menu() {
+  local choice
+
+  if [[ ! -t 0 ]]; then
+    warn "no interactive terminal detected; reading menu selection from stdin"
+  fi
+
+  while true; do
+    cat <<EOF
+Gono Cloud installer
+
+Please select an action:
+  1. Install or upgrade Gono Cloud
+  2. Uninstall Gono Cloud
+  3. Restart service
+  4. Show service status
+  5. Show service logs
+  6. Help
+  0. Exit
+EOF
+    printf "Enter choice [1-6,0]: "
+    if ! read -r choice; then
+      die "failed to read menu selection. For non-interactive use, run '$(usage_name) install' or '$(usage_name) uninstall'."
+    fi
+
+    case "${choice}" in
+      1|install|i|I)
+        set_command "install"
+        return
+        ;;
+      2|uninstall|remove|u|U)
+        set_command "uninstall"
+        prompt_uninstall_purge
+        return
+        ;;
+      3|restart|r|R)
+        set_command "restart"
+        return
+        ;;
+      4|status|s|S)
+        set_command "status"
+        return
+        ;;
+      5|logs|log|l|L)
+        set_command "logs"
+        return
+        ;;
+      6|help|h|H|\?)
+        show_usage
+        ;;
+      0|exit|quit|q|Q)
+        log "cancelled"
+        exit 0
+        ;;
+      *)
+        warn "invalid selection: ${choice:-<empty>}"
+        ;;
+    esac
+    printf '\n'
+  done
+}
+
+default_command_if_missing() {
+  if [[ -z "${COMMAND}" ]]; then
+    set_command "install"
+  fi
 }
 
 need_arg() {
@@ -179,28 +286,23 @@ parse_args() {
         exit 0
         ;;
       install)
-        COMMAND="install"
-        export GONO_CLOUD_COMMAND="${COMMAND}"
+        set_command "install"
         shift
         ;;
       status|show_status)
-        COMMAND="status"
-        export GONO_CLOUD_COMMAND="${COMMAND}"
+        set_command "status"
         shift
         ;;
       logs|log|show_log)
-        COMMAND="logs"
-        export GONO_CLOUD_COMMAND="${COMMAND}"
+        set_command "logs"
         shift
         ;;
       restart|restart_and_update)
-        COMMAND="restart"
-        export GONO_CLOUD_COMMAND="${COMMAND}"
+        set_command "restart"
         shift
         ;;
       uninstall|remove)
-        COMMAND="uninstall"
-        export GONO_CLOUD_COMMAND="${COMMAND}"
+        set_command "uninstall"
         shift
         ;;
       --local)
@@ -534,16 +636,29 @@ set_platform_defaults() {
 }
 
 require_root() {
+  local -a forwarded_args
+  forwarded_args=("$@")
+
   if [[ "${EUID}" -eq 0 ]]; then
     return
+  fi
+
+  if [[ "$#" -eq 0 && -n "${COMMAND}" ]]; then
+    forwarded_args=("${COMMAND}")
+    if is_enabled "${PURGE}"; then
+      forwarded_args+=("--purge")
+    fi
+    if is_enabled "${ASSUME_YES}"; then
+      forwarded_args+=("--yes")
+    fi
   fi
 
   if command -v sudo >/dev/null 2>&1; then
     log "re-running installer with sudo"
     if [[ -n "${SCRIPT_PATH}" && -r "${SCRIPT_PATH}" ]]; then
-      sudo -E bash "${SCRIPT_PATH}" "$@"
+      sudo -E bash "${SCRIPT_PATH}" "${forwarded_args[@]}"
     else
-      curl -fsSL "${INSTALL_URL}" | sudo -E bash -s -- "$@"
+      curl -fsSL "${INSTALL_URL}" | sudo -E bash -s -- "${forwarded_args[@]}"
     fi
     exit $?
   fi
@@ -1415,7 +1530,12 @@ dispatch_command() {
 main() {
   require_cmd uname
   resolve_script_context
-  parse_args "$@"
+  if [[ "$#" -eq 0 && -z "${COMMAND}" ]]; then
+    show_interactive_menu
+  else
+    parse_args "$@"
+    default_command_if_missing
+  fi
   set_platform_defaults
   dispatch_command "$@"
 }
