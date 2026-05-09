@@ -14,7 +14,6 @@ pub async fn handler(
     } else {
         principal.username
     };
-    let storage_location = state.files_root.to_string_lossy().into_owned();
 
     Json(json!({
         "ocs": {
@@ -23,42 +22,48 @@ pub async fn handler(
                 "statuscode": 100,
                 "message": "OK"
             },
-            "data": {
-                "id": user_id.clone(),
-                "enabled": true,
-                "storageLocation": storage_location,
-                "lastLogin": 0,
-                "backend": "Database",
-                "subadmin": [],
-                "quota": {
-                    "free": -3,
-                    "used": 0,
-                    "total": -3,
-                    "relative": 0.0,
-                    "quota": -3
-                },
-                "email": "",
-                "displayname": user_id.clone(),
-                "display-name": user_id,
-                "phone": "",
-                "address": "",
-                "website": "",
-                "twitter": "",
-                "fediverse": "",
-                "organisation": "",
-                "role": "",
-                "headline": "",
-                "biography": "",
-                "profile_enabled": false,
-                "groups": [],
-                "language": "en",
-                "locale": "en",
-                "notify_email": "",
-                "backendCapabilities": {
-                    "setDisplayName": false,
-                    "setPassword": false
-                }
-            }
+            "data": user_data(&state, &user_id)
         }
     }))
+}
+
+pub(crate) fn user_data(state: &AppState, user_id: &str) -> Value {
+    let storage_location = state.files_root.to_string_lossy().into_owned();
+
+    json!({
+        "id": user_id,
+        "enabled": true,
+        "storageLocation": storage_location,
+        "lastLogin": 0,
+        "backend": "Database",
+        "subadmin": [],
+        "quota": {
+            "free": -3,
+            "used": 0,
+            "total": -3,
+            "relative": 0.0,
+            "quota": -3
+        },
+        "email": "",
+        "displayname": user_id,
+        "display-name": user_id,
+        "phone": "",
+        "address": "",
+        "website": "",
+        "twitter": "",
+        "fediverse": "",
+        "organisation": "",
+        "role": "",
+        "headline": "",
+        "biography": "",
+        "profile_enabled": false,
+        "groups": [],
+        "language": "en",
+        "locale": "en",
+        "notify_email": "",
+        "backendCapabilities": {
+            "setDisplayName": false,
+            "setPassword": false
+        }
+    })
 }

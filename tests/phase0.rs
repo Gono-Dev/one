@@ -223,6 +223,273 @@ async fn ocs_user_endpoints_require_auth_and_return_profile() {
 }
 
 #[tokio::test]
+async fn documented_ocs_v2_endpoints_are_covered_or_placeholdered() {
+    let (app, _temp, password) = app_with_temp_root().await;
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ocs/v2.php/apps/files_sharing/api/v1/shares")
+                .header("OCS-APIRequest", "true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let cases = vec![
+        (
+            Method::GET,
+            "/ocs/v2.php/cloud/users",
+            StatusCode::OK,
+            "\"users\":[\"gono\"]",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/cloud/users/gono",
+            StatusCode::OK,
+            "\"id\":\"gono\"",
+        ),
+        (
+            Method::GET,
+            "/index.php/ocs/v2.php/cloud/users/gono",
+            StatusCode::OK,
+            "\"displayname\":\"gono\"",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/core/autocomplete/get?search=gono&shareTypes[]=0",
+            StatusCode::OK,
+            "\"exact\"",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/apps/dav/api/v1/direct",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/files_sharing/api/v1/shares",
+            StatusCode::OK,
+            "\"data\":[]",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/apps/files_sharing/api/v1/shares",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/files_sharing/api/v1/shares/123",
+            StatusCode::NOT_FOUND,
+            "\"statuscode\":404",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/files_sharing/api/v1/sharees?search=gono&itemType=file",
+            StatusCode::OK,
+            "\"users\":[]",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/files_sharing/api/v1/sharees_recommended?itemType=file",
+            StatusCode::OK,
+            "\"lookup\":[]",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/files_sharing/api/v1/remote_shares",
+            StatusCode::OK,
+            "\"data\":[]",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/files_sharing/api/v1/remote_shares/pending",
+            StatusCode::OK,
+            "\"data\":[]",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/apps/files_sharing/api/v1/remote_shares/pending/1",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/notifications/api/v2/notifications",
+            StatusCode::OK,
+            "\"data\":[]",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/apps/notifications/api/v2/notifications/exists",
+            StatusCode::OK,
+            "\"ids\":[]",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/notifications/api/v2/notifications/99",
+            StatusCode::NOT_FOUND,
+            "\"statuscode\":404",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/user_status/api/v1/user_status",
+            StatusCode::OK,
+            "\"status\":\"online\"",
+        ),
+        (
+            Method::PUT,
+            "/ocs/v2.php/apps/user_status/api/v1/user_status/status",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/user_status/api/v1/predefined_statuses",
+            StatusCode::OK,
+            "\"data\":[]",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/user_status/api/v1/statuses/gono",
+            StatusCode::OK,
+            "\"userId\":\"gono\"",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/recommendations/api/v1/recommendations",
+            StatusCode::OK,
+            "\"enabled\":false",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/recommendations/api/v1/recommendations/always",
+            StatusCode::OK,
+            "\"recommendations\":[]",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/apps/provisioning_api/api/v1/config/users/files/favorite",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/translation/languages",
+            StatusCode::OK,
+            "\"languages\":[]",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/translation/translate",
+            StatusCode::PRECONDITION_FAILED,
+            "No translation provider",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/textprocessing/tasktypes",
+            StatusCode::OK,
+            "\"types\":[]",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/textprocessing/schedule",
+            StatusCode::PRECONDITION_FAILED,
+            "No processing provider",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/textprocessing/task/1",
+            StatusCode::NOT_FOUND,
+            "\"statuscode\":404",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/text2image/is_available",
+            StatusCode::OK,
+            "\"isAvailable\":false",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/text2image/schedule",
+            StatusCode::PRECONDITION_FAILED,
+            "No processing provider",
+        ),
+        (
+            Method::DELETE,
+            "/ocs/v2.php/text2image/task/1",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/taskprocessing",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/taskprocessing/provider/test",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/dav/api/v1/outOfOffice/gono",
+            StatusCode::NOT_FOUND,
+            "\"statuscode\":404",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/apps/dav/api/v1/outOfOffice/gono",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/fulltextsearch/collection/test/index",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+        (
+            Method::POST,
+            "/ocs/v2.php/apps/fulltextsearch/collection/test/document/files/1/done",
+            StatusCode::NOT_IMPLEMENTED,
+            "not implemented yet",
+        ),
+    ];
+
+    for (method, uri, expected, needle) in cases {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(uri)
+                    .header("OCS-APIRequest", "true")
+                    .header(header::ACCEPT, "application/json")
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), expected, "{method} {uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("\"ocs\""), "{method} {uri}: {body}");
+        assert!(body.contains(needle), "{method} {uri}: {body}");
+    }
+}
+
+#[tokio::test]
 async fn notify_push_can_be_disabled() {
     let (app, _temp, _password, state) = app_with_config(|config| {
         config.notify_push.enabled = false;

@@ -59,9 +59,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/index.php/ocs/v2.php/cloud/capabilities", capabilities)
         .route("/ocs/v1.php/cloud/user", ocs_user.clone())
-        .route("/ocs/v2.php/cloud/user", ocs_user.clone())
-        .route("/index.php/ocs/v1.php/cloud/user", ocs_user.clone())
-        .route("/index.php/ocs/v2.php/cloud/user", ocs_user)
+        .route("/index.php/ocs/v1.php/cloud/user", ocs_user)
+        .merge(nextcloud_proto::ocs::router(state.clone()))
         .route(
             "/metrics",
             get(nextcloud_proto::metrics::handler).route_layer(middleware::from_fn_with_state(

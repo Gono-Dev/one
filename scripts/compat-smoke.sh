@@ -275,6 +275,15 @@ curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v1.php/cloud/user" | grep -q '"id":"gono
 curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/cloud/user" | grep -q '"displayname":"gono"'
 curl -fsS -u "${AUTH}" "${BASE_URL}/index.php/ocs/v1.php/cloud/user" | grep -q '"id":"gono"'
 curl -fsS -u "${AUTH}" "${BASE_URL}/index.php/ocs/v2.php/cloud/user" | grep -q '"displayname":"gono"'
+curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/cloud/users" | grep -q '"gono"'
+
+echo "checking OCS v2 compatibility placeholders"
+assert_status "401" "GET" "${BASE_URL}/ocs/v2.php/apps/files_sharing/api/v1/shares"
+curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/apps/files_sharing/api/v1/shares" | grep -q '"data":\[\]'
+curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/apps/notifications/api/v2/notifications" | grep -q '"data":\[\]'
+curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/apps/user_status/api/v1/user_status" | grep -q '"status":"online"'
+assert_status "501" "POST" "${BASE_URL}/ocs/v2.php/apps/dav/api/v1/direct" -u "${AUTH}" -H "OCS-APIRequest: true"
+assert_status "412" "POST" "${BASE_URL}/ocs/v2.php/translation/translate" -u "${AUTH}" -H "OCS-APIRequest: true"
 
 echo "checking notify_push websocket"
 websocket_smoke
