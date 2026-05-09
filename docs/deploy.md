@@ -16,6 +16,8 @@ The installer:
 
 - detects macOS or Linux and downloads the matching `x86_64`, `aarch64`, or Linux 32-bit ARM
   release artifact from `https://run.gono.one/releases`;
+- when run from a checked-out repository, defaults to building and installing the local binary
+  instead of downloading a release artifact;
 - installs the binary at `/opt/gono-one/bin/gono-one`;
 - on Linux, creates the `gono-one` system user and installs `gono-one.service` through systemd;
 - on macOS, installs a LaunchDaemon named `one.gono.gono-one`;
@@ -105,6 +107,30 @@ scripts/package-release.sh
 On tag builds or manual GitHub Actions runs, CI also uploads native Linux/macOS package artifacts.
 After verifying them, mirror the latest-style files under `https://run.gono.one/releases/latest/`
 and the versioned files under `https://run.gono.one/releases/<version>/`.
+
+## Local Install
+
+From a checked-out repository, the installer can be used directly:
+
+```sh
+scripts/install.sh
+```
+
+If it needs elevated privileges, it first builds the local binary as the current user and then
+re-runs the same local script through `sudo`. This avoids downloading `https://run.gono.one` while
+developing locally.
+
+Useful local overrides:
+
+```sh
+GONO_ONE_BUILD_PROFILE=debug scripts/install.sh
+GONO_ONE_BIN=/absolute/path/to/gono-one scripts/install.sh
+GONO_ONE_LOCAL_BUILD=0 GONO_ONE_BIN=target/release/gono-one scripts/install.sh
+GONO_ONE_INSTALL_SOURCE=release scripts/install.sh
+```
+
+`GONO_ONE_INSTALL_SOURCE=auto` is the default: local repository installs use the local binary, while
+`bash <(curl -sL https://run.gono.one)` continues to use release artifacts.
 
 ## Domain And Reverse Proxy
 

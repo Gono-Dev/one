@@ -3,6 +3,14 @@ set -euo pipefail
 
 APP_NAME="gono-one"
 INSTALL_URL="${GONO_ONE_INSTALL_URL:-https://run.gono.one}"
+INSTALL_SOURCE="${GONO_ONE_INSTALL_SOURCE:-auto}"
+LOCAL_BUILD="${GONO_ONE_LOCAL_BUILD:-auto}"
+LOCAL_BUILD_PROFILE="${GONO_ONE_BUILD_PROFILE:-release}"
+LOCAL_BIN="${GONO_ONE_BIN:-${GONO_ONE_LOCAL_BIN:-}}"
+
+SCRIPT_PATH=""
+SCRIPT_DIR=""
+REPO_ROOT=""
 
 PLATFORM=""
 PACKAGE_MANAGER=""
@@ -54,6 +62,33 @@ die() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+resolve_script_context() {
+  local source
+  source="${BASH_SOURCE[0]:-$0}"
+
+  case "${source}" in
+    ""|-|bash|/dev/fd/*|/proc/self/fd/*)
+      return
+      ;;
+  esac
+
+  [[ -e "${source}" ]] || return
+
+  case "${source}" in
+    /*)
+      SCRIPT_PATH="${source}"
+      ;;
+    *)
+      SCRIPT_PATH="$(cd "$(dirname "${source}")" && pwd -P)/$(basename "${source}")"
+      ;;
+  esac
+
+  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd -P)"
+  if [[ -f "${SCRIPT_DIR}/../Cargo.toml" && -d "${SCRIPT_DIR}/../src" ]]; then
+    REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+  fi
 }
 
 detect_platform() {
@@ -139,7 +174,11 @@ require_root() {
 
   if command -v sudo >/dev/null 2>&1; then
     log "re-running installer with sudo"
-    curl -fsSL "${INSTALL_URL}" | sudo -E bash
+    if [[ -n "${SCRIPT_PATH}" && -r "${SCRIPT_PATH}" ]]; then
+      sudo -E bash "${SCRIPT_PATH}" "$@"
+    else
+      curl -fsSL "${INSTALL_URL}" | sudo -E bash -s -- "$@"
+    fi
     exit $?
   fi
 
@@ -249,6 +288,146 @@ artifact_url() {
   fi
 }
 
+use_local_source() {
+  case "${INSTALL_SOURCE}" in
+    local)
+      [[ -n "${LOCAL_BIN}" || -n "${REPO_ROOT}" ]] \
+        || die "GONO_ONE_INSTALL_SOURCE=local requires a local repo or GONO_ONE_BIN"
+      return 0
+      ;;
+    release)
+      return 1
+      ;;
+    auto)
+      [[ -z "${BIN_URL}" && -n "${REPO_ROOT}" ]]
+      ;;
+    *)
+      die "unsupported GONO_ONE_INSTALL_SOURCE='${INSTALL_SOURCE}'. Use auto, local, or release."
+      ;;
+  esac
+}
+
+target_dir() {
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    case "${CARGO_TARGET_DIR}" in
+      /*)
+        printf '%s\n' "${CARGO_TARGET_DIR}"
+        ;;
+      *)
+        printf '%s/%s\n' "$(pwd -P)" "${CARGO_TARGET_DIR}"
+        ;;
+    esac
+  else
+    printf '%s\n' "${REPO_ROOT}/target"
+  fi
+}
+
+local_binary_candidate() {
+  local profile_dir
+  case "${LOCAL_BUILD_PROFILE}" in
+    release)
+      profile_dir="release"
+      ;;
+    debug|dev)
+      profile_dir="debug"
+      ;;
+    *)
+      die "unsupported GONO_ONE_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
+      ;;
+  esac
+
+  printf '%s/%s/%s\n' "$(target_dir)" "${profile_dir}" "${APP_NAME}"
+}
+
+should_build_local_binary() {
+  case "${LOCAL_BUILD}" in
+    1|true|yes)
+      return 0
+      ;;
+    0|false|no)
+      return 1
+      ;;
+    auto)
+      command -v cargo >/dev/null 2>&1
+      ;;
+    *)
+      die "unsupported GONO_ONE_LOCAL_BUILD='${LOCAL_BUILD}'. Use auto, 1, or 0."
+      ;;
+  esac
+}
+
+build_local_binary() {
+  [[ -n "${REPO_ROOT}" ]] || die "cannot build local binary: repository root was not detected"
+  require_cmd cargo
+
+  case "${LOCAL_BUILD_PROFILE}" in
+    release)
+      log "building local release binary from ${REPO_ROOT}" >&2
+      cargo build --locked --release --manifest-path "${REPO_ROOT}/Cargo.toml"
+      ;;
+    debug|dev)
+      log "building local debug binary from ${REPO_ROOT}" >&2
+      cargo build --locked --manifest-path "${REPO_ROOT}/Cargo.toml"
+      ;;
+    *)
+      die "unsupported GONO_ONE_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
+      ;;
+  esac
+}
+
+normalize_path() {
+  local path="$1"
+  case "${path}" in
+    /*)
+      printf '%s\n' "${path}"
+      ;;
+    *)
+      printf '%s/%s\n' "$(pwd -P)" "${path}"
+      ;;
+  esac
+}
+
+resolve_local_binary() {
+  local candidate
+  if [[ -n "${LOCAL_BIN}" ]]; then
+    candidate="$(normalize_path "${LOCAL_BIN}")"
+  else
+    candidate="$(local_binary_candidate)"
+    if should_build_local_binary; then
+      build_local_binary
+    fi
+  fi
+
+  [[ -x "${candidate}" ]] || die "local binary is not executable: ${candidate}. Set GONO_ONE_BIN or allow GONO_ONE_LOCAL_BUILD=auto."
+  printf '%s\n' "${candidate}"
+}
+
+prepare_local_binary_before_sudo() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    return
+  fi
+  if ! use_local_source; then
+    return
+  fi
+  if [[ -n "${LOCAL_BIN}" ]]; then
+    LOCAL_BIN="$(normalize_path "${LOCAL_BIN}")"
+  else
+    if should_build_local_binary; then
+      build_local_binary
+      LOCAL_BIN="$(local_binary_candidate)"
+    else
+      LOCAL_BIN="$(local_binary_candidate)"
+    fi
+  fi
+
+  [[ -x "${LOCAL_BIN}" ]] || die "local binary is not executable: ${LOCAL_BIN}"
+  export GONO_ONE_BIN="${LOCAL_BIN}"
+  export GONO_ONE_INSTALL_SOURCE="local"
+  export GONO_ONE_LOCAL_BUILD="0"
+  INSTALL_SOURCE="local"
+  LOCAL_BUILD="0"
+}
+
 verify_sha256() {
   local expected="$1"
   local file="$2"
@@ -291,6 +470,21 @@ download_binary() {
       install -m 0755 "${artifact}" "${BIN_PATH}"
       ;;
   esac
+}
+
+install_local_binary() {
+  local source_binary
+  source_binary="$(resolve_local_binary)"
+  log "installing local binary ${source_binary}"
+  install -m 0755 "${source_binary}" "${BIN_PATH}"
+}
+
+install_binary() {
+  if use_local_source; then
+    install_local_binary
+  else
+    download_binary
+  fi
 }
 
 nologin_shell() {
@@ -625,8 +819,10 @@ service_log_hint() {
 
 main() {
   require_cmd uname
+  resolve_script_context
   set_platform_defaults
-  require_root
+  prepare_local_binary_before_sudo
+  require_root "$@"
 
   local start_time url password
   log "installing for ${PLATFORM}"
@@ -635,7 +831,7 @@ main() {
 
   ensure_run_identity
   prepare_directories
-  download_binary
+  install_binary
   write_config
   write_service_definition
 
