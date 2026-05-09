@@ -13,7 +13,7 @@ use sqlx::{Row, SqlitePool};
 use tokio::sync::Mutex;
 use tracing::error;
 use uuid::Uuid;
-use xmltree::Element;
+use xmltree::{Element, Namespace, XMLNode};
 
 use crate::db;
 
@@ -494,12 +494,7 @@ fn serialize_owner(owner: Option<&Element>) -> anyhow::Result<Option<String>> {
         return Ok(None);
     };
     let mut owner = owner.clone();
-    if owner.prefix.as_deref() == Some("D") && owner.namespace.is_none() {
-        owner.namespace = Some("DAV:".to_owned());
-        let mut namespaces = xmltree::Namespace::empty();
-        namespaces.put("D", "DAV:");
-        owner.namespaces = Some(namespaces);
-    }
+    ensure_dav_namespace(&mut owner);
     let mut buffer = Vec::new();
     owner
         .write(&mut buffer)
@@ -507,6 +502,23 @@ fn serialize_owner(owner: Option<&Element>) -> anyhow::Result<Option<String>> {
     Ok(Some(
         String::from_utf8(buffer).context("owner XML is not UTF-8")?,
     ))
+}
+
+fn ensure_dav_namespace(element: &mut Element) {
+    if element.prefix.as_deref() == Some("D") {
+        if element.namespace.is_none() {
+            element.namespace = Some("DAV:".to_owned());
+        }
+        let mut namespaces = element.namespaces.take().unwrap_or_else(Namespace::empty);
+        namespaces.put("D", "DAV:");
+        element.namespaces = Some(namespaces);
+    }
+
+    for child in &mut element.children {
+        if let XMLNode::Element(child) = child {
+            ensure_dav_namespace(child);
+        }
+    }
 }
 
 fn system_time_to_unix(time: SystemTime) -> i64 {
@@ -584,6 +596,46 @@ mod tests {
             .check(&path, Some("gono"), false, false, &[])
             .await
             .expect("lock removed");
+    }
+
+    #[tokio::test]
+    async fn default_namespace_lock_owner_survives_persistence() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let first = SqliteLs::new(pool.clone());
+        let path = DavPath::new("/lock-owner.txt").expect("lock path");
+        let root = Element::parse(
+            br#"<lockinfo xmlns="DAV:"><owner>litmus test suite</owner></lockinfo>"#.as_slice(),
+        )
+        .expect("parse lockinfo");
+        let mut owner = root.get_child("owner").expect("owner element").clone();
+        owner.prefix = Some("D".to_owned());
+
+        let lock = first
+            .lock(
+                &path,
+                Some("gono"),
+                Some(&owner),
+                Some(Duration::from_secs(300)),
+                false,
+                false,
+            )
+            .await
+            .expect("create lock");
+
+        let second = SqliteLs::new(pool);
+        let locks = second.discover(&path).await;
+        let discovered = locks
+            .iter()
+            .find(|candidate| candidate.token == lock.token)
+            .expect("persisted lock");
+        let owner = discovered.owner.as_deref().expect("persisted owner");
+        assert_eq!(owner.get_text().as_deref(), Some("litmus test suite"));
+
+        let mut rendered = Vec::new();
+        owner.write(&mut rendered).expect("render owner XML");
+        let rendered = String::from_utf8(rendered).expect("owner XML is UTF-8");
+        assert!(rendered.contains("xmlns:D=\"DAV:\""));
     }
 
     #[tokio::test]

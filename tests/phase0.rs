@@ -1843,6 +1843,77 @@ async fn dead_props_are_readable_and_copied() {
 }
 
 #[tokio::test]
+async fn propfind_reports_404_for_removed_dead_props() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/dead-prop-remove.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("dead prop remove"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                .uri("/remote.php/dav/dead-prop-remove.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(proppatch_two_dead_props_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(patch.status().is_success());
+
+    let remove = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                .uri("/remote.php/dav/dead-prop-remove.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(proppatch_remove_dead_prop_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(remove.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/dead-prop-remove.txt")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_two_dead_props_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("HTTP/1.1 404 Not Found"));
+    assert!(body.contains("prop0"));
+    assert!(body.contains("prop1"));
+    assert!(body.contains("value1"));
+    assert!(!body.contains("value0"));
+}
+
+#[tokio::test]
 async fn report_filter_files_lists_favorites_in_scope_recursively() {
     let (app, _temp, password) = app_with_temp_root().await;
 
@@ -2444,11 +2515,44 @@ fn proppatch_dead_prop_body() -> &'static str {
 </d:propertyupdate>"#
 }
 
+fn proppatch_two_dead_props_body() -> &'static str {
+    r#"<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:x="http://example.com/litmus">
+  <d:set>
+    <d:prop>
+      <x:prop0>value0</x:prop0>
+      <x:prop1>value1</x:prop1>
+    </d:prop>
+  </d:set>
+</d:propertyupdate>"#
+}
+
+fn proppatch_remove_dead_prop_body() -> &'static str {
+    r#"<?xml version="1.0"?>
+<d:propertyupdate xmlns:d="DAV:" xmlns:x="http://example.com/litmus">
+  <d:remove>
+    <d:prop>
+      <x:prop0 />
+    </d:prop>
+  </d:remove>
+</d:propertyupdate>"#
+}
+
 fn propfind_dead_prop_body() -> &'static str {
     r#"<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:" xmlns:x="http://example.com/litmus">
   <d:prop>
     <x:litmus-prop />
+  </d:prop>
+</d:propfind>"#
+}
+
+fn propfind_two_dead_props_body() -> &'static str {
+    r#"<?xml version="1.0"?>
+<d:propfind xmlns:d="DAV:" xmlns:x="http://example.com/litmus">
+  <d:prop>
+    <x:prop0 />
+    <x:prop1 />
   </d:prop>
 </d:propfind>"#
 }

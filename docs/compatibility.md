@@ -38,13 +38,26 @@ Install the external `litmus` WebDAV test binary, then run:
 RUN_LITMUS=1 scripts/compat-smoke.sh
 ```
 
+If `litmus` is available outside `PATH`, pass the binary explicitly:
+
+```sh
+LITMUS=/path/to/litmus RUN_LITMUS=1 scripts/compat-smoke.sh
+```
+
 The script runs the built-in smoke first and then invokes:
 
 ```sh
 litmus http://127.0.0.1:<port>/remote.php/dav/ gono <generated-app-password>
 ```
 
-If `litmus` is not installed, the script exits with a clear error.
+If `litmus` is not installed or `LITMUS` points to a non-executable file, the script exits with a clear error.
+
+Current compatibility status with litmus 0.17:
+
+- `basic`, `copymove`, `props`, `locks`, and `http` pass.
+- Dead property removals return explicit `404 Not Found` propstat entries.
+- Persisted lock discovery preserves the client-supplied owner value.
+- The only remaining warning is `delete_fragment`: neon/litmus and the HTTP stack normalize `#fragment` before the request reaches the WebDAV service, so the handler cannot reliably distinguish `/frag/` from `/frag/#ment`. If a lower layer exposes `#` in the request target, `gono-one` rejects it before dispatch.
 
 ## Nextcloud Desktop Smoke
 

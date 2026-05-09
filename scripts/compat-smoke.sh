@@ -27,6 +27,20 @@ require_cmd() {
   fi
 }
 
+litmus_cmd() {
+  if [[ -n "${LITMUS:-}" ]]; then
+    if [[ ! -x "${LITMUS}" ]]; then
+      echo "missing required command: ${LITMUS}" >&2
+      exit 1
+    fi
+    echo "${LITMUS}"
+    return
+  fi
+
+  require_cmd litmus
+  command -v litmus
+}
+
 find_port() {
   if [[ -n "${NC_DAV_SMOKE_PORT:-}" ]]; then
     echo "${NC_DAV_SMOKE_PORT}"
@@ -317,9 +331,9 @@ echo "checking metrics"
 curl -fsS -u "${AUTH}" "${BASE_URL}/metrics" | grep -q 'gono_one_sync_token'
 
 if [[ "${RUN_LITMUS}" == "1" ]]; then
-  require_cmd litmus
+  LITMUS_BIN="$(litmus_cmd)"
   echo "running litmus against ${DAV_URL}/"
-  (cd "${WORK_DIR}" && litmus "${DAV_URL}/" gono "${PASSWORD}")
+  (cd "${WORK_DIR}" && "${LITMUS_BIN}" "${DAV_URL}/" gono "${PASSWORD}")
 fi
 
 echo "compat smoke passed"

@@ -1,20 +1,26 @@
 use std::{
+    collections::HashSet,
     convert::Infallible,
+    io::Cursor,
     path::{Path, PathBuf},
     sync::Arc,
     task::{Context, Poll},
 };
 
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     extract::OriginalUri,
-    http::{header::HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri},
+    http::{
+        header::{HeaderName, CONTENT_LENGTH},
+        HeaderValue, Method, Request, Response, StatusCode, Uri,
+    },
     response::IntoResponse,
 };
 use dav_server::{davpath::DavPath, DavConfig, DavHandler};
 use futures_util::future::BoxFuture;
 use tower::Service;
 use tracing::{error, warn};
+use xmltree::{Element, Namespace, XMLNode};
 
 use crate::{
     auth::Principal,
@@ -28,6 +34,11 @@ const OC_ETAG: HeaderName = HeaderName::from_static("oc-etag");
 const OC_FILEID: HeaderName = HeaderName::from_static("oc-fileid");
 const X_NC_OWNER_ID: HeaderName = HeaderName::from_static("x-nc-ownerid");
 const X_NC_PERMISSIONS: HeaderName = HeaderName::from_static("x-nc-permissions");
+const DAV_NS: &str = "DAV:";
+const OC_NS: &str = "http://owncloud.org/ns";
+const NC_NS: &str = "http://nextcloud.org/ns";
+const PROPFIND_BODY_LIMIT: usize = 1024 * 1024;
+const PROPFIND_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct NcDavService {
@@ -42,6 +53,14 @@ impl NcDavService {
 
     async fn dispatch(self, request: Request<Body>) -> Response<Body> {
         let original_uri = original_request_uri(&request);
+        if request_target_has_fragment(&original_uri) {
+            warn!(uri = %original_uri, "rejecting WebDAV request URI with fragment");
+            return (
+                StatusCode::BAD_REQUEST,
+                "Request URI fragments are not allowed",
+            )
+                .into_response();
+        }
         if let Err(err) = reject_parent_segments(original_uri.path()) {
             warn!(
                 ?err,
@@ -84,6 +103,16 @@ impl NcDavService {
                 }
             }
         }
+        let requested_props = if method.as_str() == "PROPFIND" {
+            let (buffered_request, requested_props) = match buffer_propfind_request(request).await {
+                Ok(result) => result,
+                Err(response) => return response,
+            };
+            request = buffered_request;
+            requested_props
+        } else {
+            None
+        };
         let principal = request
             .extensions()
             .get::<Principal>()
@@ -101,6 +130,13 @@ impl NcDavService {
             )
             .await
             .map(Body::new);
+
+        let response = match requested_props.as_deref() {
+            Some(requested_props) => {
+                complete_propfind_not_found_propstats(response, requested_props).await
+            }
+            None => response,
+        };
 
         self.finalize_webdav_response(response, &method, &request_path, destination, source_record)
             .await
@@ -303,6 +339,210 @@ fn is_chunking_path(path: &str) -> bool {
     path.starts_with("/uploads/")
         || path.starts_with("/remote.php/dav/uploads/")
         || path.starts_with("/remote.php/webdav/uploads/")
+}
+
+fn request_target_has_fragment(uri: &Uri) -> bool {
+    uri.path_and_query()
+        .map(|path_and_query| path_and_query.as_str().contains('#'))
+        .unwrap_or_else(|| uri.to_string().contains('#'))
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RequestedProp {
+    namespace: Option<String>,
+    name: String,
+}
+
+async fn buffer_propfind_request(
+    request: Request<Body>,
+) -> Result<(Request<Body>, Option<Vec<RequestedProp>>), Response<Body>> {
+    let (parts, body) = request.into_parts();
+    let bytes = to_bytes(body, PROPFIND_BODY_LIMIT).await.map_err(|err| {
+        warn!(?err, "failed to buffer PROPFIND request body");
+        (StatusCode::BAD_REQUEST, "Invalid PROPFIND request body").into_response()
+    })?;
+    let requested_props = requested_propfind_props(&bytes);
+    Ok((
+        Request::from_parts(parts, Body::from(bytes)),
+        requested_props,
+    ))
+}
+
+fn requested_propfind_props(body: &[u8]) -> Option<Vec<RequestedProp>> {
+    if body.is_empty() {
+        return None;
+    }
+
+    let root = Element::parse(Cursor::new(body)).ok()?;
+    if root.name != "propfind" || root.namespace.as_deref() != Some(DAV_NS) {
+        return None;
+    }
+
+    let prop = root
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .find(|element| element.name == "prop")?;
+    let mut seen = HashSet::new();
+    let mut props = Vec::new();
+    for element in prop.children.iter().filter_map(XMLNode::as_element) {
+        let requested = RequestedProp {
+            namespace: element.namespace.clone(),
+            name: element.name.clone(),
+        };
+        if seen.insert(requested.clone()) {
+            props.push(requested);
+        }
+    }
+
+    let needs_compat = props.iter().any(needs_missing_propstat_compat);
+    (!props.is_empty() && needs_compat).then_some(props)
+}
+
+fn needs_missing_propstat_compat(prop: &RequestedProp) -> bool {
+    !matches!(
+        prop.namespace.as_deref(),
+        Some(DAV_NS) | Some(OC_NS) | Some(NC_NS)
+    )
+}
+
+async fn complete_propfind_not_found_propstats(
+    response: Response<Body>,
+    requested_props: &[RequestedProp],
+) -> Response<Body> {
+    if response.status() != StatusCode::MULTI_STATUS || requested_props.is_empty() {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, PROPFIND_RESPONSE_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!(?err, "failed to buffer PROPFIND response body");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid PROPFIND response body",
+            )
+                .into_response();
+        }
+    };
+    let patched =
+        append_missing_propstats(&bytes, requested_props).unwrap_or_else(|| bytes.to_vec());
+    parts.headers.remove(CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(patched))
+}
+
+fn append_missing_propstats(body: &[u8], requested_props: &[RequestedProp]) -> Option<Vec<u8>> {
+    let mut root = Element::parse(Cursor::new(body)).ok()?;
+    ensure_namespace(&mut root, "D", DAV_NS);
+    let mut changed = false;
+
+    for response in root
+        .children
+        .iter_mut()
+        .filter_map(XMLNode::as_mut_element)
+        .filter(|element| is_dav_element(element, "response"))
+    {
+        let present = response_present_props(response);
+        let missing = requested_props
+            .iter()
+            .filter(|requested| !present.contains(*requested))
+            .cloned()
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            continue;
+        }
+
+        response
+            .children
+            .push(XMLNode::Element(not_found_propstat(&missing)));
+        changed = true;
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let mut output = Vec::new();
+    root.write(&mut output).ok()?;
+    Some(output)
+}
+
+fn response_present_props(response: &Element) -> HashSet<RequestedProp> {
+    let mut props = HashSet::new();
+    for propstat in response
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .filter(|element| is_dav_element(element, "propstat"))
+    {
+        for prop in propstat
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .filter(|element| is_dav_element(element, "prop"))
+        {
+            for element in prop.children.iter().filter_map(XMLNode::as_element) {
+                props.insert(RequestedProp {
+                    namespace: element.namespace.clone(),
+                    name: element.name.clone(),
+                });
+            }
+        }
+    }
+    props
+}
+
+fn not_found_propstat(missing: &[RequestedProp]) -> Element {
+    let mut propstat = dav_element("propstat");
+    let mut prop = dav_element("prop");
+    for (index, requested) in missing.iter().enumerate() {
+        prop.children
+            .push(XMLNode::Element(requested_prop_element(requested, index)));
+    }
+    propstat.children.push(XMLNode::Element(prop));
+
+    let mut status = dav_element("status");
+    status
+        .children
+        .push(XMLNode::Text("HTTP/1.1 404 Not Found".to_owned()));
+    propstat.children.push(XMLNode::Element(status));
+    propstat
+}
+
+fn dav_element(name: &str) -> Element {
+    let mut element = Element::new(name);
+    element.prefix = Some("D".to_owned());
+    element.namespace = Some(DAV_NS.to_owned());
+    element
+}
+
+fn requested_prop_element(requested: &RequestedProp, index: usize) -> Element {
+    let mut element = Element::new(&requested.name);
+    let Some(namespace) = requested.namespace.as_deref() else {
+        return element;
+    };
+
+    let prefix = match namespace {
+        DAV_NS => "D".to_owned(),
+        OC_NS => "oc".to_owned(),
+        NC_NS => "nc".to_owned(),
+        _ => format!("gono{index}"),
+    };
+    element.prefix = Some(prefix.clone());
+    element.namespace = Some(namespace.to_owned());
+    ensure_namespace(&mut element, &prefix, namespace);
+    element
+}
+
+fn is_dav_element(element: &Element, name: &str) -> bool {
+    element.name == name && element.namespace.as_deref() == Some(DAV_NS)
+}
+
+fn ensure_namespace(element: &mut Element, prefix: &str, namespace: &str) {
+    let mut namespaces = element.namespaces.take().unwrap_or_else(Namespace::empty);
+    namespaces.put(prefix, namespace);
+    element.namespaces = Some(namespaces);
 }
 
 fn write_target_rel_path(
