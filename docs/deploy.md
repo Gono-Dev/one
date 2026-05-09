@@ -5,17 +5,22 @@ This document describes the production-oriented install path. The detailed proje
 
 ## One-Line Install
 
-Publish `scripts/install.sh` at `https://run.gono.one`, then install on macOS, Debian, Ubuntu, or
+Publish `scripts/install.sh` at `https://run.gono.cloud`, then install on macOS, Debian, Ubuntu, or
 CentOS/RHEL-compatible systems with:
 
 ```sh
-bash <(curl -sL https://run.gono.one)
+bash <(curl -sL https://run.gono.cloud)
 ```
+
+To make that command work in production, `https://run.gono.cloud` must serve the raw contents of
+`scripts/install.sh` at the origin path `/`. Redirects are fine as long as `curl -sL` reaches the
+script. The same host should also expose release archives under `/releases/latest/` and
+`/releases/<version>/`, or users must pass `GONO_ONE_BIN_URL`/`--bin-url`.
 
 The installer:
 
 - detects macOS or Linux and downloads the matching `x86_64`, `aarch64`, or Linux 32-bit ARM
-  release artifact from `https://run.gono.one/releases`;
+  release artifact from `https://run.gono.cloud/releases`;
 - when run from a checked-out repository, defaults to building and installing the local binary
   instead of downloading a release artifact;
 - installs the binary at `/opt/gono-one/bin/gono-one`;
@@ -50,12 +55,12 @@ Default macOS layout:
 For the default installer path, publish these files:
 
 ```text
-https://run.gono.one/releases/latest/gono-one-linux-x86_64.tar.gz
-https://run.gono.one/releases/latest/gono-one-linux-aarch64.tar.gz
-https://run.gono.one/releases/latest/gono-one-linux-armv7.tar.gz
-https://run.gono.one/releases/latest/gono-one-linux-armv6.tar.gz
-https://run.gono.one/releases/latest/gono-one-macos-x86_64.tar.gz
-https://run.gono.one/releases/latest/gono-one-macos-aarch64.tar.gz
+https://run.gono.cloud/releases/latest/gono-one-linux-x86_64.tar.gz
+https://run.gono.cloud/releases/latest/gono-one-linux-aarch64.tar.gz
+https://run.gono.cloud/releases/latest/gono-one-linux-armv7.tar.gz
+https://run.gono.cloud/releases/latest/gono-one-linux-armv6.tar.gz
+https://run.gono.cloud/releases/latest/gono-one-macos-x86_64.tar.gz
+https://run.gono.cloud/releases/latest/gono-one-macos-aarch64.tar.gz
 ```
 
 ARM mapping:
@@ -70,14 +75,14 @@ ARM mapping:
 Set `GONO_ONE_ARCH` to override architecture detection on unusual systems:
 
 ```sh
-GONO_ONE_ARCH=aarch64 bash <(curl -sL https://run.gono.one)
-GONO_ONE_ARCH=armv7 bash <(curl -sL https://run.gono.one)
+GONO_ONE_ARCH=aarch64 bash <(curl -sL https://run.gono.cloud)
+GONO_ONE_ARCH=armv7 bash <(curl -sL https://run.gono.cloud)
 ```
 
 Each archive must contain an executable named `gono-one`. You can also override the artifact URL:
 
 ```sh
-GONO_ONE_BIN_URL=https://example.com/gono-one-linux-x86_64.tar.gz bash <(curl -sL https://run.gono.one)
+GONO_ONE_BIN_URL=https://example.com/gono-one-linux-x86_64.tar.gz bash <(curl -sL https://run.gono.cloud)
 ```
 
 Build a release archive for the current host with:
@@ -105,8 +110,8 @@ scripts/package-release.sh
 ```
 
 On tag builds or manual GitHub Actions runs, CI also uploads native Linux/macOS package artifacts.
-After verifying them, mirror the latest-style files under `https://run.gono.one/releases/latest/`
-and the versioned files under `https://run.gono.one/releases/<version>/`.
+After verifying them, mirror the latest-style files under `https://run.gono.cloud/releases/latest/`
+and the versioned files under `https://run.gono.cloud/releases/<version>/`.
 
 ## Local Install
 
@@ -117,7 +122,7 @@ scripts/install.sh
 ```
 
 If it needs elevated privileges, it first builds the local binary as the current user and then
-re-runs the same local script through `sudo`. This avoids downloading `https://run.gono.one` while
+re-runs the same local script through `sudo`. This avoids downloading `https://run.gono.cloud` while
 developing locally.
 
 Useful local overrides:
@@ -130,7 +135,7 @@ GONO_ONE_INSTALL_SOURCE=release scripts/install.sh
 ```
 
 `GONO_ONE_INSTALL_SOURCE=auto` is the default: local repository installs use the local binary, while
-`bash <(curl -sL https://run.gono.one)` continues to use release artifacts.
+`bash <(curl -sL https://run.gono.cloud)` continues to use release artifacts.
 
 The installer also accepts command-line options for the common environment variables:
 
@@ -159,13 +164,13 @@ The installer defaults to:
 
 ```text
 bind = 127.0.0.1:16102
-base_url = https://gono.one
+base_url = https://gono.cloud
 ```
 
 Public HTTPS should terminate at a reverse proxy and forward to the local service:
 
 ```caddyfile
-gono.one {
+gono.cloud {
     reverse_proxy 127.0.0.1:16102
 }
 ```
@@ -195,8 +200,8 @@ location /push/ws {
 Use a custom domain or port with:
 
 ```sh
-GONO_ONE_DOMAIN=files.example.com bash <(curl -sL https://run.gono.one)
-GONO_ONE_BASE_URL=https://files.example.com GONO_ONE_BIND=127.0.0.1:18080 bash <(curl -sL https://run.gono.one)
+GONO_ONE_DOMAIN=files.example.com bash <(curl -sL https://run.gono.cloud)
+GONO_ONE_BASE_URL=https://files.example.com GONO_ONE_BIND=127.0.0.1:18080 bash <(curl -sL https://run.gono.cloud)
 ```
 
 ## First Password
@@ -229,7 +234,7 @@ Before calling the deployment complete:
 
 - run `cargo check`, `cargo test`, and `scripts/compat-smoke.sh`;
 - run `RUN_LITMUS=1 scripts/compat-smoke.sh` before release;
-- connect with Nextcloud Desktop using the service root URL, such as `https://gono.one`;
+- connect with Nextcloud Desktop using the service root URL, such as `https://gono.cloud`;
 - verify upload, download, rename, copy, delete, large chunked upload, and restart behavior;
 - confirm capabilities advertise `notify_push` and `/push/ws` accepts WebSocket login;
 - confirm `/metrics` requires Basic Auth and logs are collected in the expected format.

@@ -96,7 +96,7 @@ fn stale_sync_token_response(
     let xml = format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
-            "<d:error xmlns:d=\"DAV:\" xmlns:g=\"https://gono.one/ns\">",
+            "<d:error xmlns:d=\"DAV:\" xmlns:g=\"https://gono.cloud/ns\">",
             "<d:valid-sync-token/>",
             "<g:sync-token>{}</g:sync-token>",
             "<g:sync-token-floor>{}</g:sync-token-floor>",
