@@ -142,6 +142,17 @@ scripts/install.sh --release --version latest
 scripts/install.sh --domain files.example.com --bind 127.0.0.1:18080
 ```
 
+It can also be used as a lightweight service management script, in the same style as common
+one-file installers:
+
+```sh
+scripts/install.sh status
+scripts/install.sh logs
+scripts/install.sh restart
+scripts/install.sh uninstall
+scripts/install.sh uninstall --purge
+```
+
 ## Domain And Reverse Proxy
 
 The installer defaults to:

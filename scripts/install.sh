@@ -7,6 +7,9 @@ INSTALL_SOURCE="${GONO_ONE_INSTALL_SOURCE:-auto}"
 LOCAL_BUILD="${GONO_ONE_LOCAL_BUILD:-auto}"
 LOCAL_BUILD_PROFILE="${GONO_ONE_BUILD_PROFILE:-release}"
 LOCAL_BIN="${GONO_ONE_BIN:-${GONO_ONE_LOCAL_BIN:-}}"
+COMMAND="${GONO_ONE_COMMAND:-install}"
+ASSUME_YES="${GONO_ONE_YES:-0}"
+PURGE="${GONO_ONE_PURGE:-0}"
 
 SCRIPT_PATH=""
 SCRIPT_DIR=""
@@ -83,8 +86,20 @@ show_usage() {
 Gono One installer
 
 Usage:
-  $(usage_name) [options]
-  bash <(curl -sL ${INSTALL_URL}) [options]
+  $(usage_name) [install] [options]
+  $(usage_name) status [options]
+  $(usage_name) logs [options]
+  $(usage_name) restart [options]
+  $(usage_name) uninstall [options]
+  bash <(curl -sL ${INSTALL_URL}) [install] [options]
+
+Commands:
+  install                   Install or upgrade Gono One (default)
+  status                    Show service status
+  logs, show_log            Follow service logs
+  restart                   Restart service and run health check
+  uninstall                 Stop service and remove service files/binary
+  help                      Show this help
 
 Source options:
   --local                    Use local repository/binary source
@@ -128,9 +143,16 @@ Service options:
 
 Other:
   -h, --help, help           Show this help
+  -y, --yes                  Skip confirmation prompts
+  --purge                    With uninstall, also remove config, data, and logs
 
 Examples:
   scripts/install.sh --debug
+  scripts/install.sh status
+  scripts/install.sh logs
+  scripts/install.sh restart
+  scripts/install.sh uninstall
+  scripts/install.sh uninstall --purge
   scripts/install.sh --bin target/release/gono-one
   scripts/install.sh --release --version latest
   scripts/install.sh --domain files.example.com
@@ -154,6 +176,31 @@ parse_args() {
       -h|--help|help)
         show_usage
         exit 0
+        ;;
+      install)
+        COMMAND="install"
+        export GONO_ONE_COMMAND="${COMMAND}"
+        shift
+        ;;
+      status|show_status)
+        COMMAND="status"
+        export GONO_ONE_COMMAND="${COMMAND}"
+        shift
+        ;;
+      logs|log|show_log)
+        COMMAND="logs"
+        export GONO_ONE_COMMAND="${COMMAND}"
+        shift
+        ;;
+      restart|restart_and_update)
+        COMMAND="restart"
+        export GONO_ONE_COMMAND="${COMMAND}"
+        shift
+        ;;
+      uninstall|remove)
+        COMMAND="uninstall"
+        export GONO_ONE_COMMAND="${COMMAND}"
+        shift
         ;;
       --local)
         INSTALL_SOURCE="local"
@@ -355,6 +402,16 @@ parse_args() {
         need_arg "$1" "${2:-}"
         export GONO_ONE_PLIST_PATH="$2"
         shift 2
+        ;;
+      -y|--yes)
+        ASSUME_YES="1"
+        export GONO_ONE_YES="${ASSUME_YES}"
+        shift
+        ;;
+      --purge)
+        PURGE="1"
+        export GONO_ONE_PURGE="${PURGE}"
+        shift
         ;;
       --)
         shift
@@ -1125,14 +1182,125 @@ service_log_hint() {
   esac
 }
 
-main() {
-  require_cmd uname
-  resolve_script_context
-  parse_args "$@"
-  set_platform_defaults
-  prepare_local_binary_before_sudo
-  require_root "$@"
+show_service_status() {
+  case "${PLATFORM}" in
+    linux)
+      require_cmd systemctl
+      systemctl status "${SERVICE_NAME}" --no-pager
+      ;;
+    macos)
+      require_cmd launchctl
+      launchctl print "system/${SERVICE_NAME}"
+      ;;
+  esac
+}
 
+follow_service_logs() {
+  case "${PLATFORM}" in
+    linux)
+      require_cmd journalctl
+      journalctl -u "${SERVICE_NAME}" -f --no-pager
+      ;;
+    macos)
+      require_cmd tail
+      touch "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
+      tail -f "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
+      ;;
+  esac
+}
+
+restart_existing_service() {
+  local url
+
+  case "${PLATFORM}" in
+    linux)
+      require_cmd systemctl
+      start_linux_service
+      ;;
+    macos)
+      require_cmd launchctl
+      start_macos_service
+      ;;
+  esac
+
+  url="$(health_url)"
+  wait_for_service "${url}"
+  log "restarted ${SERVICE_NAME}"
+  log "local health: ${url}"
+}
+
+stop_existing_service() {
+  case "${PLATFORM}" in
+    linux)
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now "${SERVICE_NAME}" >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+      fi
+      ;;
+    macos)
+      if command -v launchctl >/dev/null 2>&1; then
+        launchctl bootout system "${PLIST_PATH}" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+}
+
+confirm_uninstall() {
+  local input
+  if [[ "${ASSUME_YES}" == "1" || "${ASSUME_YES}" == "true" || "${ASSUME_YES}" == "yes" ]]; then
+    return
+  fi
+
+  warn "uninstall will stop ${SERVICE_NAME} and remove service files plus ${BIN_PATH}"
+  if [[ "${PURGE}" == "1" || "${PURGE}" == "true" || "${PURGE}" == "yes" ]]; then
+    warn "purge is enabled; config, data, and logs will also be removed"
+  else
+    warn "config, data, and logs will be preserved; pass --purge to remove them"
+  fi
+  printf "Continue? [y/N] "
+  read -r input
+  case "${input}" in
+    [yY]|[yY][eE][sS])
+      ;;
+    *)
+      log "uninstall cancelled"
+      exit 0
+      ;;
+  esac
+}
+
+uninstall_service() {
+  confirm_uninstall
+  stop_existing_service
+
+  case "${PLATFORM}" in
+    linux)
+      rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+      fi
+      ;;
+    macos)
+      rm -f "${PLIST_PATH}"
+      ;;
+  esac
+
+  rm -f "${BIN_PATH}"
+  rmdir "${BIN_DIR}" "${INSTALL_DIR}" >/dev/null 2>&1 || true
+
+  if [[ "${PURGE}" == "1" || "${PURGE}" == "true" || "${PURGE}" == "yes" ]]; then
+    rm -rf "${CONFIG_DIR}" "${STATE_DIR}" "${LOG_DIR}"
+  fi
+
+  log "uninstalled ${APP_NAME}"
+  if [[ "${PURGE}" != "1" && "${PURGE}" != "true" && "${PURGE}" != "yes" ]]; then
+    log "preserved config: ${CONFIG_DIR}"
+    log "preserved state: ${STATE_DIR}"
+    log "preserved logs: ${LOG_DIR}"
+  fi
+}
+
+install_service() {
   local start_time url password
   log "installing for ${PLATFORM}"
   install_packages
@@ -1170,6 +1338,42 @@ main() {
     log "no new bootstrap password was printed; existing database/password was preserved"
   fi
   log "configure HTTPS reverse proxy, including WebSocket upgrade for ${BASE_URL}/push/ws, to forward to http://${BIND}"
+}
+
+dispatch_command() {
+  case "${COMMAND}" in
+    install)
+      prepare_local_binary_before_sudo
+      require_root "$@"
+      install_service
+      ;;
+    status)
+      show_service_status
+      ;;
+    logs)
+      follow_service_logs
+      ;;
+    restart)
+      require_root "$@"
+      restart_existing_service
+      ;;
+    uninstall)
+      require_root "$@"
+      uninstall_service
+      ;;
+    *)
+      show_usage >&2
+      die "unknown command: ${COMMAND}"
+      ;;
+  esac
+}
+
+main() {
+  require_cmd uname
+  resolve_script_context
+  parse_args "$@"
+  set_platform_defaults
+  dispatch_command "$@"
 }
 
 TMP_DIR="$(mktemp -d)"
