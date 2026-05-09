@@ -46,7 +46,8 @@ MAX_CONNECTIONS="${GONO_CLOUD_DB_MAX_CONNECTIONS:-5}"
 LOG_FORMAT="${GONO_CLOUD_LOG_FORMAT:-text}"
 RUST_LOG_VALUE="${RUST_LOG:-info}"
 INSECURE_HTTP="${GONO_CLOUD_INSECURE_HTTP:-1}"
-RELEASE_BASE="${GONO_CLOUD_RELEASE_BASE:-https://run.gono.cloud/releases}"
+RELEASE_REPO="${GONO_CLOUD_RELEASE_REPO:-Gono-Dev/cloud.server}"
+RELEASE_BASE="${GONO_CLOUD_RELEASE_BASE:-https://github.com/${RELEASE_REPO}/releases}"
 VERSION="${GONO_CLOUD_VERSION:-latest}"
 BIN_URL="${GONO_CLOUD_BIN_URL:-}"
 HEALTH_URL="${GONO_CLOUD_HEALTH_URL:-}"
@@ -108,7 +109,7 @@ Source options:
   --bin PATH                 Install this local gono-cloud binary
   --bin-url URL              Download this exact binary/archive URL
   --version VERSION          Release version or latest (default: ${VERSION})
-  --release-base URL         Release base URL (default: ${RELEASE_BASE})
+  --release-base URL         GitHub releases base URL (default: ${RELEASE_BASE})
   --sha256 HASH              Verify downloaded artifact sha256
 
 Local build options:
@@ -638,8 +639,25 @@ target_os() {
   esac
 }
 
+release_tag() {
+  local version="$1"
+  case "${version}" in
+    v*)
+      echo "${version}"
+      ;;
+    *)
+      echo "v${version}"
+      ;;
+  esac
+}
+
+release_asset_version() {
+  local version="$1"
+  echo "${version#v}"
+}
+
 artifact_url() {
-  local arch os target
+  local arch os target tag asset_version
   arch="$(target_arch)"
   os="$(target_os)"
   target="${os}-${arch}"
@@ -647,9 +665,11 @@ artifact_url() {
   if [[ -n "${BIN_URL}" ]]; then
     echo "${BIN_URL}"
   elif [[ "${VERSION}" == "latest" ]]; then
-    echo "${RELEASE_BASE}/latest/${APP_NAME}-${target}.tar.gz"
+    echo "${RELEASE_BASE}/latest/download/${APP_NAME}-${target}.tar.gz"
   else
-    echo "${RELEASE_BASE}/${VERSION}/${APP_NAME}-${VERSION}-${target}.tar.gz"
+    tag="$(release_tag "${VERSION}")"
+    asset_version="$(release_asset_version "${VERSION}")"
+    echo "${RELEASE_BASE}/download/${tag}/${APP_NAME}-${asset_version}-${target}.tar.gz"
   fi
 }
 
@@ -808,6 +828,32 @@ verify_sha256() {
   fi
 }
 
+sha256_from_sidecar() {
+  local file="$1"
+  sed -n '1s/^\([0-9a-fA-F]\{64\}\).*/\1/p' "${file}"
+}
+
+verify_downloaded_artifact() {
+  local url="$1"
+  local artifact="$2"
+  local sidecar sidecar_url expected
+
+  if [[ -n "${GONO_CLOUD_SHA256:-}" ]]; then
+    verify_sha256 "${GONO_CLOUD_SHA256}" "${artifact}"
+    return
+  fi
+
+  sidecar="${TMP_DIR}/artifact.sha256"
+  sidecar_url="${url%%\?*}.sha256"
+  if curl -fsL --retry 3 --retry-delay 2 -o "${sidecar}" "${sidecar_url}"; then
+    expected="$(sha256_from_sidecar "${sidecar}")"
+    [[ -n "${expected}" ]] || die "sha256 sidecar does not contain a hash: ${sidecar_url}"
+    verify_sha256 "${expected}" "${artifact}"
+  else
+    warn "sha256 sidecar was not found at ${sidecar_url}; continuing without checksum verification"
+  fi
+}
+
 download_binary() {
   local url artifact extract_dir candidate
   url="$(artifact_url)"
@@ -816,12 +862,10 @@ download_binary() {
 
   log "downloading ${url}"
   if ! curl -fL --retry 3 --retry-delay 2 -o "${artifact}" "${url}"; then
-    die "failed to download release artifact. Publish it under ${RELEASE_BASE} or set GONO_CLOUD_BIN_URL"
+    die "failed to download release artifact from ${url}. Check the GitHub Release assets or set GONO_CLOUD_BIN_URL"
   fi
 
-  if [[ -n "${GONO_CLOUD_SHA256:-}" ]]; then
-    verify_sha256 "${GONO_CLOUD_SHA256}" "${artifact}"
-  fi
+  verify_downloaded_artifact "${url}" "${artifact}"
 
   mkdir -p "${extract_dir}"
   case "${url%%\?*}" in

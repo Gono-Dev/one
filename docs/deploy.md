@@ -14,13 +14,13 @@ bash <(curl -sL https://run.gono.cloud)
 
 To make that command work in production, `https://run.gono.cloud` must serve the raw contents of
 `scripts/install.sh` at the origin path `/`. Redirects are fine as long as `curl -sL` reaches the
-script. The same host should also expose release archives under `/releases/latest/` and
-`/releases/<version>/`, or users must pass `GONO_CLOUD_BIN_URL`/`--bin-url`.
+script. Release archives are downloaded from the GitHub Release by default, or users can pass
+`GONO_CLOUD_BIN_URL`/`--bin-url`.
 
 The installer:
 
 - detects macOS or Linux and downloads the matching `x86_64`, `aarch64`, or Linux 32-bit ARM
-  release artifact from `https://run.gono.cloud/releases`;
+  release artifact from GitHub Releases;
 - when run from a checked-out repository, defaults to building and installing the local binary
   instead of downloading a release artifact;
 - installs the binary at `/opt/gono-cloud/bin/gono-cloud`;
@@ -55,12 +55,12 @@ Default macOS layout:
 For the default installer path, publish these files:
 
 ```text
-https://run.gono.cloud/releases/latest/gono-cloud-linux-x86_64.tar.gz
-https://run.gono.cloud/releases/latest/gono-cloud-linux-aarch64.tar.gz
-https://run.gono.cloud/releases/latest/gono-cloud-linux-armv7.tar.gz
-https://run.gono.cloud/releases/latest/gono-cloud-linux-armv6.tar.gz
-https://run.gono.cloud/releases/latest/gono-cloud-macos-x86_64.tar.gz
-https://run.gono.cloud/releases/latest/gono-cloud-macos-aarch64.tar.gz
+https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-linux-x86_64.tar.gz
+https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-linux-aarch64.tar.gz
+https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-linux-armv7.tar.gz
+https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-linux-armv6.tar.gz
+https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-macos-x86_64.tar.gz
+https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-macos-aarch64.tar.gz
 ```
 
 ARM mapping:
@@ -115,6 +115,20 @@ On `v*` tag builds, GitHub Actions packages native Linux/macOS artifacts for `x8
 separate litmus compatibility job without creating a GitHub Release. Ordinary pushes and pull
 requests do not run the Rust check/smoke job in CI.
 
+The installer uses GitHub Release URLs by default:
+
+```text
+latest:
+https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-linux-x86_64.tar.gz
+
+versioned:
+https://github.com/Gono-Dev/cloud.server/releases/download/v0.1.0/gono-cloud-0.1.0-linux-x86_64.tar.gz
+```
+
+For versioned installs, both `--version 0.1.0` and `--version v0.1.0` resolve to the tag
+`v0.1.0` and the asset name `gono-cloud-0.1.0-<target>.tar.gz`. If a `.sha256` sidecar is present,
+the installer downloads it and verifies the archive automatically.
+
 Create the first GitHub Release from a clean `main` branch with:
 
 ```sh
@@ -123,12 +137,8 @@ git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-After verifying the GitHub Release, mirror the latest-style files under
-`https://run.gono.cloud/releases/latest/` and the versioned files under
-`https://run.gono.cloud/releases/<version>/`.
-
 Linux `armv7` and `armv6` remain installer-supported artifact names, but they require a separate
-self-hosted or cross-build release step before they can be mirrored to `run.gono.cloud`.
+self-hosted or cross-build release step before they are available from GitHub Releases.
 
 ## Local Install
 
