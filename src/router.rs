@@ -48,6 +48,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/status.php", get(nextcloud_proto::status::handler))
         .route("/204", get(no_content))
         .route("/index.php/204", get(no_content))
+        .route("/ocs/v1.php/cloud/capabilities", capabilities.clone())
+        .route(
+            "/index.php/ocs/v1.php/cloud/capabilities",
+            capabilities.clone(),
+        )
         .route("/ocs/v2.php/cloud/capabilities", capabilities.clone())
         .route("/index.php/ocs/v2.php/cloud/capabilities", capabilities)
         .merge(nextcloud_proto::ocs::router(state.clone()))

@@ -15,12 +15,19 @@ use crate::{auth::require_basic_auth, state::AppState};
 use super::user;
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    let inner = v2_routes();
+    let v1 = v1_routes();
+    let v2 = v2_routes();
 
     Router::new()
-        .nest("/ocs/v2.php", inner.clone())
-        .nest("/index.php/ocs/v2.php", inner)
+        .nest("/ocs/v1.php", v1.clone())
+        .nest("/index.php/ocs/v1.php", v1)
+        .nest("/ocs/v2.php", v2.clone())
+        .nest("/index.php/ocs/v2.php", v2)
         .route_layer(middleware::from_fn_with_state(state, require_basic_auth))
+}
+
+fn v1_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/cloud/user", get(super::user::handler))
 }
 
 fn v2_routes() -> Router<Arc<AppState>> {

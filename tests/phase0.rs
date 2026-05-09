@@ -173,6 +173,8 @@ async fn desktop_connectivity_probe_is_public_no_content() {
 async fn capabilities_are_public() {
     let (app, _temp, _password) = app_with_temp_root().await;
     for uri in [
+        "/ocs/v1.php/cloud/capabilities",
+        "/index.php/ocs/v1.php/cloud/capabilities",
         "/ocs/v2.php/cloud/capabilities",
         "/index.php/ocs/v2.php/cloud/capabilities",
     ] {
@@ -241,15 +243,23 @@ async fn ocs_user_endpoints_require_auth_and_return_profile() {
 }
 
 #[tokio::test]
-async fn ocs_v1_endpoints_are_not_supported() {
+async fn minimal_ocs_v1_user_aliases_match_desktop_client_probes() {
     let (app, _temp, password) = app_with_temp_root().await;
 
-    for uri in [
-        "/ocs/v1.php/cloud/capabilities",
-        "/index.php/ocs/v1.php/cloud/capabilities",
-        "/ocs/v1.php/cloud/user",
-        "/index.php/ocs/v1.php/cloud/user",
-    ] {
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ocs/v1.php/cloud/user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    for uri in ["/ocs/v1.php/cloud/user", "/index.php/ocs/v1.php/cloud/user"] {
         let response = app
             .clone()
             .oneshot(
@@ -263,7 +273,12 @@ async fn ocs_v1_endpoints_are_not_supported() {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("\"status\":\"ok\""));
+        assert!(body.contains("\"id\":\"gono\""));
+        assert!(body.contains("\"quota\""));
     }
 }
 
