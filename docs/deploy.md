@@ -109,10 +109,11 @@ GONO_ONE_RELEASE_TARGET=linux-aarch64 \
 scripts/package-release.sh
 ```
 
-On tag builds, CI runs checks, packages native Linux/macOS artifacts for `x86_64` and `aarch64`,
-then creates or updates the matching GitHub Release with the `.tar.gz` files and `.sha256`
-sidecars. Manual GitHub Actions runs package the same artifacts and can also run the separate
-litmus compatibility job without creating a GitHub Release.
+On `v*` tag builds, GitHub Actions packages native Linux/macOS artifacts for `x86_64` and
+`aarch64`, then creates or updates the matching GitHub Release with the `.tar.gz` files and
+`.sha256` sidecars. Manual GitHub Actions runs package the same artifacts and can also run the
+separate litmus compatibility job without creating a GitHub Release. Ordinary pushes and pull
+requests do not run the Rust check/smoke job in CI.
 
 Create the first GitHub Release from a clean `main` branch with:
 

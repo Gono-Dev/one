@@ -26,10 +26,9 @@ Set `KEEP_SMOKE_DIR=1` to keep the temporary data directory for inspection. Set 
 
 ## CI
 
-GitHub Actions runs `cargo fmt --check`, `cargo check --locked`, `cargo test --locked`, and
-`scripts/compat-smoke.sh` on pushes, pull requests, and tag builds. The heavier litmus job is kept
-as a manual workflow dispatch check so it can report WebDAV edge-case warnings without blocking
-GitHub Release creation.
+GitHub Actions no longer runs the Rust smoke checks on ordinary pushes or pull requests. Tag builds
+create release artifacts, while the heavier litmus job is kept as a manual workflow dispatch check
+so it can report WebDAV edge-case warnings without blocking GitHub Release creation.
 
 ## Litmus
 
