@@ -1302,22 +1302,73 @@ latest_generated_password() {
 start_linux_service() {
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}" >/dev/null
-  systemctl restart "${SERVICE_NAME}"
+  if ! systemctl restart "${SERVICE_NAME}"; then
+    show_service_logs
+    die "failed to start systemd service ${SERVICE_NAME}"
+  fi
 }
 
-start_macos_service() {
+prepare_macos_log_files() {
   touch "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
   chown "${RUN_USER}:${RUN_GROUP}" "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
   capture_macos_log_offsets
+}
 
-  launchctl bootout system "${PLIST_PATH}" >/dev/null 2>&1 || true
+start_macos_service() {
+  local target="system/${SERVICE_NAME}"
+  prepare_macos_log_files
+
+  [[ -f "${PLIST_PATH}" ]] || die "launchd plist is not installed at ${PLIST_PATH}"
+  launchctl bootout "${target}" >/dev/null 2>&1 \
+    || launchctl bootout system "${PLIST_PATH}" >/dev/null 2>&1 \
+    || true
   if ! launchctl bootstrap system "${PLIST_PATH}"; then
-    warn "launchctl bootstrap failed; trying legacy launchctl load"
-    launchctl unload "${PLIST_PATH}" >/dev/null 2>&1 || true
-    launchctl load -w "${PLIST_PATH}"
+    if launchctl print "${target}" >/dev/null 2>&1; then
+      warn "launchctl bootstrap failed because ${target} is already loaded; using kickstart"
+    else
+      show_service_logs
+      die "failed to bootstrap launchd service from ${PLIST_PATH}"
+    fi
   fi
-  launchctl enable "system/${SERVICE_NAME}" >/dev/null 2>&1 || true
-  launchctl kickstart -k "system/${SERVICE_NAME}" >/dev/null 2>&1 || true
+  launchctl enable "${target}" >/dev/null 2>&1 || true
+  if ! launchctl kickstart -k "${target}"; then
+    show_service_logs
+    die "failed to kickstart launchd service ${target}"
+  fi
+}
+
+restart_linux_service() {
+  local unit="/etc/systemd/system/${SERVICE_NAME}.service"
+  [[ -f "${unit}" ]] || die "systemd unit is not installed at ${unit}"
+  systemctl daemon-reload
+  systemctl reset-failed "${SERVICE_NAME}" >/dev/null 2>&1 || true
+  if ! systemctl restart "${SERVICE_NAME}"; then
+    show_service_logs
+    die "failed to restart systemd service ${SERVICE_NAME}"
+  fi
+}
+
+restart_macos_service() {
+  local target="system/${SERVICE_NAME}"
+  prepare_macos_log_files
+
+  [[ -f "${PLIST_PATH}" ]] || die "launchd plist is not installed at ${PLIST_PATH}"
+  if launchctl print "${target}" >/dev/null 2>&1; then
+    if ! launchctl kickstart -k "${target}"; then
+      show_service_logs
+      die "failed to restart launchd service ${target}"
+    fi
+  else
+    if ! launchctl bootstrap system "${PLIST_PATH}"; then
+      show_service_logs
+      die "failed to bootstrap launchd service from ${PLIST_PATH}"
+    fi
+    launchctl enable "${target}" >/dev/null 2>&1 || true
+    if ! launchctl kickstart -k "${target}"; then
+      show_service_logs
+      die "failed to start launchd service ${target}"
+    fi
+  fi
 }
 
 start_service() {
@@ -1552,14 +1603,15 @@ EOF
 restart_existing_service() {
   local url
 
+  require_cmd curl
   case "${PLATFORM}" in
     linux)
       require_cmd systemctl
-      start_linux_service
+      restart_linux_service
       ;;
     macos)
       require_cmd launchctl
-      start_macos_service
+      restart_macos_service
       ;;
   esac
 
