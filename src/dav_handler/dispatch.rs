@@ -25,8 +25,13 @@ use xmltree::{Element, Namespace, XMLNode};
 
 use crate::{
     auth::Principal,
-    dav_handler::{chunked_upload, fs::permissions_string, report, search},
+    dav_handler::{
+        chunked_upload,
+        fs::{permissions_string, NcLocalFs},
+        report, search,
+    },
     db,
+    locks::SqliteLs,
     state::AppState,
     storage,
 };
@@ -46,13 +51,12 @@ const PROPFIND_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct NcDavService {
-    handler: DavHandler,
     state: Arc<AppState>,
 }
 
 impl NcDavService {
-    pub fn new(handler: DavHandler, state: Arc<AppState>) -> Self {
-        Self { handler, state }
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
     }
 
     async fn dispatch(self, request: Request<Body>) -> Response<Body> {
@@ -74,25 +78,45 @@ impl NcDavService {
             return (StatusCode::FORBIDDEN, "Invalid WebDAV path").into_response();
         }
 
+        let owner = match authenticated_owner(&request) {
+            Ok(owner) => owner,
+            Err(response) => return response,
+        };
+        if let Err(response) = ensure_request_owner_path_matches(original_uri.path(), &owner) {
+            return response;
+        }
+        let files_root = match self.state.ensure_files_root_for_owner(&owner).await {
+            Ok(files_root) => files_root,
+            Err(err) => {
+                error!(?err, owner, "failed to prepare owner files root");
+                return metadata_error_response();
+            }
+        };
+
         if request.method() == Method::HEAD {
-            return self.handle_head(request).await;
+            return self.handle_head(&owner, &files_root, request).await;
         }
 
         match request.method().as_str() {
-            "REPORT" => report::handle(self.state.clone(), request).await,
-            "SEARCH" => search::handle(self.state.clone(), request).await,
+            "REPORT" => report::handle(self.state.clone(), owner, files_root, request).await,
+            "SEARCH" => search::handle(self.state.clone(), owner, files_root, request).await,
             "MKCOL" | "PUT" | "MOVE" | "DELETE" if is_chunking_path(request.uri().path()) => {
-                chunked_upload::handle(self.state.clone(), request).await
+                chunked_upload::handle(self.state.clone(), owner, files_root, request).await
             }
-            _ => self.forward_to_dav_server(request).await,
+            _ => self.forward_to_dav_server(owner, files_root, request).await,
         }
     }
 
-    async fn forward_to_dav_server(self, mut request: Request<Body>) -> Response<Body> {
+    async fn forward_to_dav_server(
+        self,
+        owner: String,
+        files_root: PathBuf,
+        mut request: Request<Body>,
+    ) -> Response<Body> {
         let method = request.method().clone();
         let original_uri = original_request_uri(&request);
         let request_path = original_uri.path().to_owned();
-        let mount_prefix = mount_prefix_for_path(&request_path, &self.state.owner);
+        let mount_prefix = mount_prefix_for_path(&request_path, &owner);
         let destination = request
             .headers()
             .get("destination")
@@ -107,20 +131,25 @@ impl NcDavService {
             None
         };
         let source_record = if matches!(method.as_str(), "DELETE" | "MOVE") {
-            self.record_for_request_path(&request_path).await.ok()
+            self.record_for_request_path(&owner, &files_root, &request_path)
+                .await
+                .ok()
         } else {
             None
         };
         if matches!(method.as_str(), "COPY" | "MOVE") {
             if let Some(destination) = destination.as_deref() {
-                if let Err(err) = parse_rel_path_for_owner(destination, &self.state.owner) {
+                if let Err(err) = parse_rel_path_for_owner(destination, &owner) {
                     error!(?err, "failed to validate Destination header");
                     return (StatusCode::BAD_REQUEST, "Invalid Destination header").into_response();
                 }
             }
         }
         if method == Method::PUT && auto_mkcol_enabled(request.headers()) {
-            if let Err(response) = self.ensure_auto_mkcol_parents(&request_path).await {
+            if let Err(response) = self
+                .ensure_auto_mkcol_parents(&owner, &files_root, &request_path)
+                .await
+            {
                 return response;
             }
         }
@@ -134,19 +163,26 @@ impl NcDavService {
         } else {
             None
         };
-        let principal = request
-            .extensions()
-            .get::<Principal>()
-            .map(|principal| principal.username.clone())
-            .unwrap_or_else(|| "gono".to_owned());
         *request.uri_mut() = original_uri;
+        let handler = DavHandler::builder()
+            .filesystem(Box::new(NcLocalFs::new(
+                &files_root,
+                self.state.db.clone(),
+                owner.clone(),
+                self.state.instance_id.clone(),
+                self.state.xattr_ns.clone(),
+            )))
+            .locksystem(SqliteLs::for_principal(
+                self.state.db.clone(),
+                owner.clone(),
+            ))
+            .build_handler();
 
-        let response = self
-            .handler
+        let response = handler
             .handle_with(
                 DavConfig::new()
                     .strip_prefix(mount_prefix.as_str())
-                    .principal(principal),
+                    .principal(owner.clone()),
                 request,
             )
             .await
@@ -160,6 +196,8 @@ impl NcDavService {
         };
 
         self.finalize_webdav_response(
+            &owner,
+            &files_root,
             response,
             &method,
             &request_path,
@@ -172,6 +210,8 @@ impl NcDavService {
 
     async fn finalize_webdav_response(
         &self,
+        owner: &str,
+        files_root: &Path,
         mut response: Response<Body>,
         method: &Method,
         request_path: &str,
@@ -185,7 +225,7 @@ impl NcDavService {
         let status = response.status();
 
         if method == Method::DELETE {
-            let source_rel = match parse_rel_path_for_owner(request_path, &self.state.owner) {
+            let source_rel = match parse_rel_path_for_owner(request_path, owner) {
                 Ok(path) => path,
                 Err(err) => {
                     error!(?err, "failed to resolve DELETE source path");
@@ -197,7 +237,7 @@ impl NcDavService {
                 return metadata_error_response();
             };
             return match self
-                .record_change(source_record.id, &source_rel, "delete")
+                .record_change(owner, source_record.id, &source_rel, "delete")
                 .await
             {
                 Ok(_) => response,
@@ -205,26 +245,24 @@ impl NcDavService {
             };
         }
 
-        let target_rel = match write_target_rel_path(
-            method,
-            request_path,
-            destination.as_deref(),
-            &self.state.owner,
-        ) {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                if method.as_str() == "PROPPATCH" {
-                    return self.record_proppatch(response, request_path).await;
+        let target_rel =
+            match write_target_rel_path(method, request_path, destination.as_deref(), owner) {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    if method.as_str() == "PROPPATCH" {
+                        return self
+                            .record_proppatch(owner, files_root, response, request_path)
+                            .await;
+                    }
+                    return response;
                 }
-                return response;
-            }
-            Err(err) => {
-                error!(?err, "failed to resolve WebDAV write target");
-                return metadata_error_response();
-            }
-        };
+                Err(err) => {
+                    error!(?err, "failed to resolve WebDAV write target");
+                    return metadata_error_response();
+                }
+            };
 
-        let abs_path = match storage::safe_existing_path(&self.state.files_root, &target_rel) {
+        let abs_path = match storage::safe_existing_path(files_root, &target_rel) {
             Ok(path) => path,
             Err(err) => {
                 error!(?err, "write target escaped storage root");
@@ -245,7 +283,7 @@ impl NcDavService {
         let record = match db::ensure_file_record(
             &self.state.db,
             db::FileRecordInput {
-                owner: &self.state.owner,
+                owner,
                 rel_path: &target_rel,
                 abs_path: &abs_path,
                 instance_id: &self.state.instance_id,
@@ -262,7 +300,7 @@ impl NcDavService {
         };
 
         if method.as_str() == "MOVE" {
-            let source_rel = match parse_rel_path_for_owner(request_path, &self.state.owner) {
+            let source_rel = match parse_rel_path_for_owner(request_path, owner) {
                 Ok(path) => path,
                 Err(err) => {
                     error!(?err, "failed to resolve MOVE source path");
@@ -274,7 +312,7 @@ impl NcDavService {
                 return metadata_error_response();
             };
             if let Err(response) = self
-                .record_change(source_record.id, &source_rel, "delete")
+                .record_change(owner, source_record.id, &source_rel, "delete")
                 .await
             {
                 return response;
@@ -287,7 +325,10 @@ impl NcDavService {
             "MKCOL" | "COPY" | "MOVE" => "create",
             _ => "modify",
         };
-        if let Err(response) = self.record_change(record.id, &target_rel, operation).await {
+        if let Err(response) = self
+            .record_change(owner, record.id, &target_rel, operation)
+            .await
+        {
             return response;
         }
 
@@ -296,7 +337,7 @@ impl NcDavService {
         insert_header(headers, ETAG, &quoted_etag);
         insert_header(headers, OC_ETAG, &record.etag);
         insert_header(headers, OC_FILEID, &record.oc_file_id);
-        insert_header(headers, X_NC_OWNER_ID, &self.state.owner);
+        insert_header(headers, X_NC_OWNER_ID, owner);
         insert_header(
             headers,
             X_NC_PERMISSIONS,
@@ -308,12 +349,16 @@ impl NcDavService {
         response
     }
 
-    async fn ensure_auto_mkcol_parents(&self, request_path: &str) -> Result<(), Response<Body>> {
-        let target_rel =
-            parse_rel_path_for_owner(request_path, &self.state.owner).map_err(|err| {
-                warn!(?err, "failed to resolve auto-mkcol upload target");
-                (StatusCode::BAD_REQUEST, "Invalid upload path").into_response()
-            })?;
+    async fn ensure_auto_mkcol_parents(
+        &self,
+        owner: &str,
+        files_root: &Path,
+        request_path: &str,
+    ) -> Result<(), Response<Body>> {
+        let target_rel = parse_rel_path_for_owner(request_path, owner).map_err(|err| {
+            warn!(?err, "failed to resolve auto-mkcol upload target");
+            (StatusCode::BAD_REQUEST, "Invalid upload path").into_response()
+        })?;
         let Some(parent) = target_rel.parent() else {
             return Ok(());
         };
@@ -328,7 +373,7 @@ impl NcDavService {
         let mut current = PathBuf::new();
         for component in normalized_parent.components() {
             current.push(component.as_os_str());
-            match storage::safe_existing_path(&self.state.files_root, &current) {
+            match storage::safe_existing_path(files_root, &current) {
                 Ok(path) => {
                     let metadata = std::fs::metadata(&path).map_err(|err| {
                         error!(?err, path = %path.display(), "failed to inspect auto-mkcol parent");
@@ -340,11 +385,10 @@ impl NcDavService {
                     }
                 }
                 Err(_) => {
-                    let path = storage::safe_create_path(&self.state.files_root, &current)
-                        .map_err(|err| {
-                            warn!(?err, rel_path = %current.display(), "invalid auto-mkcol parent");
-                            (StatusCode::CONFLICT, "Invalid upload parent").into_response()
-                        })?;
+                    let path = storage::safe_create_path(files_root, &current).map_err(|err| {
+                        warn!(?err, rel_path = %current.display(), "invalid auto-mkcol parent");
+                        (StatusCode::CONFLICT, "Invalid upload parent").into_response()
+                    })?;
                     std::fs::create_dir(&path).map_err(|err| {
                         error!(?err, path = %path.display(), "failed to create auto-mkcol parent");
                         metadata_error_response()
@@ -352,7 +396,7 @@ impl NcDavService {
                     let record = db::ensure_file_record(
                         &self.state.db,
                         db::FileRecordInput {
-                            owner: &self.state.owner,
+                            owner,
                             rel_path: &current,
                             abs_path: &path,
                             instance_id: &self.state.instance_id,
@@ -364,7 +408,8 @@ impl NcDavService {
                         error!(?err, rel_path = %current.display(), "failed to persist auto-mkcol parent metadata");
                         metadata_error_response()
                     })?;
-                    self.record_change(record.id, &current, "create").await?;
+                    self.record_change(owner, record.id, &current, "create")
+                        .await?;
                 }
             }
         }
@@ -372,9 +417,14 @@ impl NcDavService {
         Ok(())
     }
 
-    async fn handle_head(&self, request: Request<Body>) -> Response<Body> {
+    async fn handle_head(
+        &self,
+        owner: &str,
+        files_root: &Path,
+        request: Request<Body>,
+    ) -> Response<Body> {
         let original_uri = original_request_uri(&request);
-        let rel_path = match parse_rel_path_for_owner(original_uri.path(), &self.state.owner) {
+        let rel_path = match parse_rel_path_for_owner(original_uri.path(), owner) {
             Ok(path) => path,
             Err(err) => {
                 warn!(
@@ -385,7 +435,7 @@ impl NcDavService {
                 return empty_response(StatusCode::FORBIDDEN);
             }
         };
-        let abs_path = match storage::safe_existing_path(&self.state.files_root, &rel_path) {
+        let abs_path = match storage::safe_existing_path(files_root, &rel_path) {
             Ok(path) => path,
             Err(_) => return empty_response(StatusCode::NOT_FOUND),
         };
@@ -402,7 +452,7 @@ impl NcDavService {
         let record = match db::ensure_file_record(
             &self.state.db,
             db::FileRecordInput {
-                owner: &self.state.owner,
+                owner,
                 rel_path: &rel_path,
                 abs_path: &abs_path,
                 instance_id: &self.state.instance_id,
@@ -424,7 +474,7 @@ impl NcDavService {
         insert_header(headers, ETAG, &quoted_etag);
         insert_header(headers, OC_ETAG, &record.etag);
         insert_header(headers, OC_FILEID, &record.oc_file_id);
-        insert_header(headers, X_NC_OWNER_ID, &self.state.owner);
+        insert_header(headers, X_NC_OWNER_ID, owner);
         insert_header(
             headers,
             X_NC_PERMISSIONS,
@@ -441,36 +491,49 @@ impl NcDavService {
 
     async fn record_proppatch(
         &self,
+        owner: &str,
+        files_root: &Path,
         response: Response<Body>,
         request_path: &str,
     ) -> Response<Body> {
-        let record = match self.record_for_request_path(request_path).await {
+        let record = match self
+            .record_for_request_path(owner, files_root, request_path)
+            .await
+        {
             Ok(record) => record,
             Err(err) => {
                 error!(?err, "failed to resolve PROPPATCH target metadata");
                 return metadata_error_response();
             }
         };
-        let rel_path = match parse_rel_path_for_owner(request_path, &self.state.owner) {
+        let rel_path = match parse_rel_path_for_owner(request_path, owner) {
             Ok(path) => path,
             Err(err) => {
                 error!(?err, "failed to resolve PROPPATCH target path");
                 return metadata_error_response();
             }
         };
-        match self.record_change(record.id, &rel_path, "modify").await {
+        match self
+            .record_change(owner, record.id, &rel_path, "modify")
+            .await
+        {
             Ok(_) => response,
             Err(response) => response,
         }
     }
 
-    async fn record_for_request_path(&self, request_path: &str) -> anyhow::Result<db::FileRecord> {
-        let rel_path = parse_rel_path_for_owner(request_path, &self.state.owner)?;
-        let abs_path = storage::safe_existing_path(&self.state.files_root, &rel_path)?;
+    async fn record_for_request_path(
+        &self,
+        owner: &str,
+        files_root: &Path,
+        request_path: &str,
+    ) -> anyhow::Result<db::FileRecord> {
+        let rel_path = parse_rel_path_for_owner(request_path, owner)?;
+        let abs_path = storage::safe_existing_path(files_root, &rel_path)?;
         db::ensure_file_record(
             &self.state.db,
             db::FileRecordInput {
-                owner: &self.state.owner,
+                owner,
                 rel_path: &rel_path,
                 abs_path: &abs_path,
                 instance_id: &self.state.instance_id,
@@ -482,24 +545,20 @@ impl NcDavService {
 
     async fn record_change(
         &self,
+        owner: &str,
         file_id: i64,
         rel_path: &Path,
         operation: &str,
     ) -> Result<i64, Response<Body>> {
-        let sync_token = db::record_change(
-            &self.state.db,
-            &self.state.owner,
-            file_id,
-            rel_path,
-            operation,
-        )
-        .await
-        .map_err(|err| {
-            error!(?err, "failed to record WebDAV change");
-            metadata_error_response()
-        })?;
-        self.state.notify_file_changed(Some(file_id));
-        self.state.compact_change_log().await;
+        let sync_token = db::record_change(&self.state.db, owner, file_id, rel_path, operation)
+            .await
+            .map_err(|err| {
+                error!(?err, "failed to record WebDAV change");
+                metadata_error_response()
+            })?;
+        self.state
+            .notify_file_changed_for_owner(owner, Some(file_id));
+        self.state.compact_change_log_for_owner(owner).await;
         Ok(sync_token)
     }
 }
@@ -523,6 +582,39 @@ fn is_chunking_path(path: &str) -> bool {
     path.starts_with("/uploads/")
         || path.starts_with("/remote.php/dav/uploads/")
         || path.starts_with("/remote.php/webdav/uploads/")
+}
+
+fn authenticated_owner(request: &Request<Body>) -> Result<String, Response<Body>> {
+    let Some(principal) = request.extensions().get::<Principal>() else {
+        return Err((StatusCode::UNAUTHORIZED, "Authentication required").into_response());
+    };
+    if principal.username.is_empty() {
+        return Err((StatusCode::UNAUTHORIZED, "Authentication required").into_response());
+    }
+    Ok(principal.username.clone())
+}
+
+fn ensure_request_owner_path_matches(path: &str, owner: &str) -> Result<(), Response<Body>> {
+    let Some(rest) = path.strip_prefix("/remote.php/dav/files") else {
+        return Ok(());
+    };
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return Ok(());
+    }
+    let requested_owner = rest
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .filter(|segment| !segment.is_empty());
+    if requested_owner == Some(owner) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "WebDAV owner does not match authenticated user",
+        )
+            .into_response())
+    }
 }
 
 fn request_target_has_fragment(uri: &Uri) -> bool {
@@ -788,10 +880,22 @@ pub(crate) fn parse_rel_path_for_owner(path_or_uri: &str, owner: &str) -> anyhow
             (path.as_str(), false)
         };
     let owner_prefix = format!("/files/{owner}");
-    let path = if supports_owner_files_mount && path == owner_prefix {
+    let path = if supports_owner_files_mount && (path == "/files" || path == "/files/") {
+        anyhow::bail!("WebDAV files mount requires the authenticated owner segment");
+    } else if supports_owner_files_mount && path == owner_prefix {
         "/"
     } else if supports_owner_files_mount {
-        path.strip_prefix(&(owner_prefix + "/")).unwrap_or(path)
+        let owner_child_prefix = owner_prefix + "/";
+        if let Some(rest) = path.strip_prefix(&owner_child_prefix) {
+            rest
+        } else if path
+            .strip_prefix("/files/")
+            .is_some_and(|rest| !rest.is_empty())
+        {
+            anyhow::bail!("WebDAV owner does not match authenticated user");
+        } else {
+            path
+        }
     } else {
         path
     };

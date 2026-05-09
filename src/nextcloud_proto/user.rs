@@ -28,7 +28,11 @@ pub async fn handler(
 }
 
 pub(crate) fn user_data(state: &AppState, user_id: &str) -> Value {
-    let storage_location = state.files_root.to_string_lossy().into_owned();
+    let storage_location = state
+        .files_root_for_owner(user_id)
+        .unwrap_or_else(|_| state.files_root.clone())
+        .to_string_lossy()
+        .into_owned();
 
     json!({
         "id": user_id,

@@ -21,6 +21,7 @@ use crate::db;
 pub struct SqliteLs {
     pool: SqlitePool,
     gate: Arc<Mutex<()>>,
+    principal_scope: Option<String>,
 }
 
 impl SqliteLs {
@@ -28,6 +29,15 @@ impl SqliteLs {
         Box::new(Self {
             pool,
             gate: Arc::new(Mutex::new(())),
+            principal_scope: None,
+        })
+    }
+
+    pub fn for_principal(pool: SqlitePool, principal: impl Into<String>) -> Box<Self> {
+        Box::new(Self {
+            pool,
+            gate: Arc::new(Mutex::new(())),
+            principal_scope: Some(principal.into()),
         })
     }
 
@@ -213,18 +223,34 @@ impl SqliteLs {
 
     async fn load_locks(&self) -> anyhow::Result<Vec<DavLock>> {
         let now = db::unix_timestamp();
-        let rows = sqlx::query(
-            r#"
-            SELECT token, path, principal, owner_xml, timeout_at, timeout_secs, shared, deep
-            FROM webdav_locks
-            WHERE timeout_at IS NULL OR timeout_at > ?1
-            ORDER BY path ASC
-            "#,
-        )
-        .bind(now)
-        .fetch_all(&self.pool)
-        .await
-        .context("load WebDAV locks")?;
+        let rows = if let Some(principal_scope) = self.principal_scope.as_deref() {
+            sqlx::query(
+                r#"
+                SELECT token, path, principal, owner_xml, timeout_at, timeout_secs, shared, deep
+                FROM webdav_locks
+                WHERE (timeout_at IS NULL OR timeout_at > ?1) AND principal = ?2
+                ORDER BY path ASC
+                "#,
+            )
+            .bind(now)
+            .bind(principal_scope)
+            .fetch_all(&self.pool)
+            .await
+            .context("load scoped WebDAV locks")?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT token, path, principal, owner_xml, timeout_at, timeout_secs, shared, deep
+                FROM webdav_locks
+                WHERE timeout_at IS NULL OR timeout_at > ?1
+                ORDER BY path ASC
+                "#,
+            )
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .context("load WebDAV locks")?
+        };
 
         rows.into_iter()
             .map(|row| {
@@ -636,6 +662,42 @@ mod tests {
         owner.write(&mut rendered).expect("render owner XML");
         let rendered = String::from_utf8(rendered).expect("owner XML is UTF-8");
         assert!(rendered.contains("xmlns:D=\"DAV:\""));
+    }
+
+    #[tokio::test]
+    async fn principal_scoped_locks_do_not_conflict_between_local_users() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let alice = SqliteLs::for_principal(pool.clone(), "alice");
+        let bob = SqliteLs::for_principal(pool, "bob");
+        let path = DavPath::new("/same-name.txt").expect("lock path");
+
+        let lock = alice
+            .lock(
+                &path,
+                Some("alice"),
+                None,
+                Some(Duration::from_secs(300)),
+                false,
+                false,
+            )
+            .await
+            .expect("create alice lock");
+
+        bob.check(&path, Some("bob"), false, false, &[])
+            .await
+            .expect("bob should not see alice lock");
+        alice
+            .check(&path, Some("alice"), false, false, &[])
+            .await
+            .expect_err("alice should see alice lock");
+        bob.unlock(&path, &lock.token)
+            .await
+            .expect_err("bob cannot unlock alice lock");
+        alice
+            .unlock(&path, &lock.token)
+            .await
+            .expect("alice unlocks own lock");
     }
 
     #[tokio::test]

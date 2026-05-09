@@ -19,7 +19,14 @@ use tower::ServiceExt;
 type TestWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn auth_header(password: &str) -> String {
-    format!("Basic {}", STANDARD.encode(format!("gono:{password}")))
+    auth_header_for(BOOTSTRAP_USER, password)
+}
+
+fn auth_header_for(username: &str, password: &str) -> String {
+    format!(
+        "Basic {}",
+        STANDARD.encode(format!("{username}:{password}"))
+    )
 }
 
 async fn spawn_app_server(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -1270,6 +1277,108 @@ async fn standard_nextcloud_files_webdav_path_shares_storage_with_remote_php_dav
         .await
         .unwrap();
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn local_users_are_confined_to_their_own_nextcloud_files_root() {
+    let (app, temp, gono_password, state) = app_with_state().await;
+    let alice = db::create_local_user(&state.db, "alice", Some("Alice"))
+        .await
+        .expect("create alice");
+
+    let alice_on_gono = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/files/gono/")
+                .header("Depth", "0")
+                .header(
+                    header::AUTHORIZATION,
+                    auth_header_for("alice", &alice.app_password),
+                )
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_on_gono.status(), StatusCode::FORBIDDEN);
+
+    let alice_root = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/files/alice/")
+                .header("Depth", "0")
+                .header(
+                    header::AUTHORIZATION,
+                    auth_header_for("alice", &alice.app_password),
+                )
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_root.status(), StatusCode::MULTI_STATUS);
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/alice/alice.txt")
+                .header(
+                    header::AUTHORIZATION,
+                    auth_header_for("alice", &alice.app_password),
+                )
+                .body(Body::from("alice only"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+    assert_eq!(put.headers().get("x-nc-ownerid").unwrap(), "alice");
+    assert!(temp
+        .path()
+        .join("data/users/alice/files/alice.txt")
+        .exists());
+    assert!(!state.files_root.join("alice.txt").exists());
+
+    let alice_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM file_ids WHERE owner = ?1 AND rel_path = 'alice.txt'",
+    )
+    .bind("alice")
+    .fetch_one(&state.db)
+    .await
+    .expect("count alice file rows");
+    assert_eq!(alice_rows, 1);
+
+    let gono_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM file_ids WHERE owner = ?1 AND rel_path = 'alice.txt'",
+    )
+    .bind(BOOTSTRAP_USER)
+    .fetch_one(&state.db)
+    .await
+    .expect("count gono file rows");
+    assert_eq!(gono_rows, 0);
+
+    let gono_on_alice = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/files/alice/")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&gono_password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gono_on_alice.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

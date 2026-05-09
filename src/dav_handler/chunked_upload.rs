@@ -36,12 +36,17 @@ const CLEANUP_INTERVAL_SECS: u64 = 60 * 60;
 
 type ChunkResult<T> = Result<T, Response<Body>>;
 
-pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Body> {
+pub async fn handle(
+    state: Arc<AppState>,
+    owner: String,
+    files_root: PathBuf,
+    request: Request<Body>,
+) -> Response<Body> {
     if let Err(err) = cleanup_expired_sessions(&state).await {
         return internal_error(err, "cleanup expired upload sessions");
     }
 
-    match handle_inner(state, request).await {
+    match handle_inner(state, owner, files_root, request).await {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -67,11 +72,16 @@ pub fn spawn_cleanup_task(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     })
 }
 
-async fn handle_inner(state: Arc<AppState>, request: Request<Body>) -> ChunkResult<Response<Body>> {
+async fn handle_inner(
+    state: Arc<AppState>,
+    owner: String,
+    files_root: PathBuf,
+    request: Request<Body>,
+) -> ChunkResult<Response<Body>> {
     let method = request.method().clone();
     let upload_path = UploadPath::parse(request.uri().path())?;
 
-    if upload_path.owner != state.owner {
+    if upload_path.owner != owner {
         return Err(text_response(
             StatusCode::FORBIDDEN,
             "Upload owner does not match authenticated user",
@@ -79,10 +89,10 @@ async fn handle_inner(state: Arc<AppState>, request: Request<Body>) -> ChunkResu
     }
 
     match method.as_str() {
-        "MKCOL" => mkcol_session(state, request, upload_path).await,
-        "PUT" => put_chunk(state, request, upload_path).await,
+        "MKCOL" => mkcol_session(state, &owner, &files_root, request, upload_path).await,
+        "PUT" => put_chunk(state, &owner, &files_root, request, upload_path).await,
         "DELETE" => delete_session(state, upload_path).await,
-        "MOVE" => move_file(state, request, upload_path).await,
+        "MOVE" => move_file(state, &owner, &files_root, request, upload_path).await,
         _ => Err(text_response(
             StatusCode::METHOD_NOT_ALLOWED,
             "Unsupported chunking method",
@@ -92,6 +102,8 @@ async fn handle_inner(state: Arc<AppState>, request: Request<Body>) -> ChunkResu
 
 async fn mkcol_session(
     state: Arc<AppState>,
+    owner: &str,
+    files_root: &Path,
     request: Request<Body>,
     upload_path: UploadPath,
 ) -> ChunkResult<Response<Body>> {
@@ -102,10 +114,10 @@ async fn mkcol_session(
         ));
     }
 
-    let target_rel = destination_rel_path(request.headers(), &state.owner)?;
-    validate_target_path(&state, &target_rel)?;
+    let target_rel = destination_rel_path(request.headers(), owner)?;
+    validate_target_path(files_root, &target_rel)?;
     let total_size = parse_total_length(request.headers())?.unwrap_or(0);
-    check_available_space(&state, total_size)?;
+    check_available_space(files_root, total_size)?;
 
     let owner_dir = safe_upload_create_path(&state, Path::new(&upload_path.owner))?;
     tokio::fs::create_dir_all(&owner_dir)
@@ -119,7 +131,7 @@ async fn mkcol_session(
     db::upsert_upload_session(
         &state.db,
         &upload_path.upload_id,
-        &state.owner,
+        owner,
         &target_rel,
         total_size,
     )
@@ -131,6 +143,8 @@ async fn mkcol_session(
 
 async fn put_chunk(
     state: Arc<AppState>,
+    owner: &str,
+    files_root: &Path,
     request: Request<Body>,
     upload_path: UploadPath,
 ) -> ChunkResult<Response<Body>> {
@@ -144,9 +158,9 @@ async fn put_chunk(
 
     let total_size = parse_total_length(request.headers())?;
     if let Some(total_size) = total_size {
-        check_available_space(&state, total_size)?;
+        check_available_space(files_root, total_size)?;
     }
-    let destination = destination_rel_path(request.headers(), &state.owner)?;
+    let destination = destination_rel_path(request.headers(), owner)?;
     let session = require_session(&state, &upload_path).await?;
     ensure_destination_matches(&destination, &session.target_path)?;
 
@@ -165,7 +179,7 @@ async fn put_chunk(
     }
 
     write_body_to_file(request.into_body(), &chunk_path).await?;
-    db::touch_upload_session(&state.db, &state.owner, &upload_path.upload_id, total_size)
+    db::touch_upload_session(&state.db, owner, &upload_path.upload_id, total_size)
         .await
         .map_err(|err| internal_error(err, "touch upload session"))?;
 
@@ -174,6 +188,8 @@ async fn put_chunk(
 
 async fn move_file(
     state: Arc<AppState>,
+    owner: &str,
+    files_root: &Path,
     request: Request<Body>,
     upload_path: UploadPath,
 ) -> ChunkResult<Response<Body>> {
@@ -184,12 +200,12 @@ async fn move_file(
         ));
     }
 
-    let destination = destination_rel_path(request.headers(), &state.owner)?;
+    let destination = destination_rel_path(request.headers(), owner)?;
     let session = require_session(&state, &upload_path).await?;
     ensure_destination_matches(&destination, &session.target_path)?;
-    validate_target_path(&state, &destination)?;
+    validate_target_path(files_root, &destination)?;
 
-    let target_abs = safe_write_path(&state.files_root, &destination).map_err(|err| {
+    let target_abs = safe_write_path(files_root, &destination).map_err(|err| {
         warn!(?err, "invalid chunked upload destination");
         text_response(StatusCode::CONFLICT, "Invalid upload destination")
     })?;
@@ -209,7 +225,7 @@ async fn move_file(
     let record = db::ensure_file_record(
         &state.db,
         db::FileRecordInput {
-            owner: &state.owner,
+            owner,
             rel_path: &destination,
             abs_path: &target_abs,
             instance_id: &state.instance_id,
@@ -221,18 +237,18 @@ async fn move_file(
 
     let _sync_token = db::record_change(
         &state.db,
-        &state.owner,
+        owner,
         record.id,
         &destination,
         if target_existed { "modify" } else { "create" },
     )
     .await
     .map_err(|err| internal_error(err, "record uploaded file change"))?;
-    state.notify_file_changed(Some(record.id));
-    state.compact_change_log().await;
+    state.notify_file_changed_for_owner(owner, Some(record.id));
+    state.compact_change_log_for_owner(owner).await;
 
     remove_session_dir(&state, &upload_path).await?;
-    db::delete_upload_session(&state.db, &state.owner, &upload_path.upload_id)
+    db::delete_upload_session(&state.db, owner, &upload_path.upload_id)
         .await
         .map_err(|err| internal_error(err, "delete upload session"))?;
 
@@ -244,7 +260,7 @@ async fn move_file(
     let headers = response.headers_mut();
     insert_header(headers, OC_ETAG, &record.etag);
     insert_header(headers, OC_FILEID, &record.oc_file_id);
-    insert_header(headers, X_NC_OWNER_ID, &state.owner);
+    insert_header(headers, X_NC_OWNER_ID, owner);
     insert_header(
         headers,
         X_NC_PERMISSIONS,
@@ -268,7 +284,7 @@ async fn delete_session(
     }
 
     remove_session_dir(&state, &upload_path).await?;
-    db::delete_upload_session(&state.db, &state.owner, &upload_path.upload_id)
+    db::delete_upload_session(&state.db, &upload_path.owner, &upload_path.upload_id)
         .await
         .map_err(|err| internal_error(err, "delete upload session"))?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -278,7 +294,7 @@ async fn require_session(
     state: &AppState,
     upload_path: &UploadPath,
 ) -> ChunkResult<db::UploadSession> {
-    db::load_upload_session(&state.db, &state.owner, &upload_path.upload_id)
+    db::load_upload_session(&state.db, &upload_path.owner, &upload_path.upload_id)
         .await
         .map_err(|err| internal_error(err, "load upload session"))?
         .ok_or_else(|| text_response(StatusCode::NOT_FOUND, "Upload session does not exist"))
@@ -413,8 +429,8 @@ fn destination_rel_path(headers: &HeaderMap, owner: &str) -> ChunkResult<PathBuf
     })
 }
 
-fn validate_target_path(state: &AppState, target_rel: &Path) -> ChunkResult<()> {
-    safe_write_path(&state.files_root, target_rel)
+fn validate_target_path(files_root: &Path, target_rel: &Path) -> ChunkResult<()> {
+    safe_write_path(files_root, target_rel)
         .map(|_| ())
         .map_err(|err| {
             warn!(?err, "invalid chunked upload target path");
@@ -456,11 +472,11 @@ fn parse_total_length(headers: &HeaderMap) -> ChunkResult<Option<i64>> {
     Ok(Some(total))
 }
 
-fn check_available_space(state: &AppState, total_size: i64) -> ChunkResult<()> {
+fn check_available_space(files_root: &Path, total_size: i64) -> ChunkResult<()> {
     if total_size == 0 {
         return Ok(());
     }
-    let available = fs2::available_space(&state.files_root)
+    let available = fs2::available_space(files_root)
         .map_err(|err| internal_error(err, "check available storage"))?;
     if total_size as u64 > available {
         Err(text_response(

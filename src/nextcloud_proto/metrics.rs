@@ -5,14 +5,18 @@ use axum::{
     extract::State,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
+    Extension,
 };
 use sqlx::SqlitePool;
 use tracing::error;
 
-use crate::{db, state::AppState};
+use crate::{auth::Principal, db, state::AppState};
 
-pub async fn handler(State(state): State<Arc<AppState>>) -> Response {
-    match render_metrics(&state).await {
+pub async fn handler(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+) -> Response {
+    match render_metrics(&state, &principal.username).await {
         Ok(body) => ([(header::CONTENT_TYPE, prometheus_content_type())], body).into_response(),
         Err(err) => {
             error!(?err, "collect metrics");
@@ -25,25 +29,25 @@ pub async fn handler(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-async fn render_metrics(state: &AppState) -> anyhow::Result<String> {
+async fn render_metrics(state: &AppState, owner: &str) -> anyhow::Result<String> {
     let file_records = count_owner_rows(
         &state.db,
         "SELECT COUNT(*) FROM file_ids WHERE owner = ?1",
-        &state.owner,
+        owner,
     )
     .await
     .context("count file records")?;
     let change_log_entries = count_owner_rows(
         &state.db,
         "SELECT COUNT(*) FROM change_log WHERE owner = ?1",
-        &state.owner,
+        owner,
     )
     .await
     .context("count change log entries")?;
     let upload_sessions = count_owner_rows(
         &state.db,
         "SELECT COUNT(*) FROM upload_sessions WHERE owner = ?1",
-        &state.owner,
+        owner,
     )
     .await
     .context("count upload sessions")?;
@@ -53,16 +57,22 @@ async fn render_metrics(state: &AppState) -> anyhow::Result<String> {
             .fetch_one(&state.db)
             .await
             .context("count expired upload sessions")?;
-    let sync_token = db::current_sync_token(&state.db, &state.owner)
+    let sync_token = db::current_sync_token(&state.db, owner)
         .await
         .context("load sync token")?;
-    let change_log_floor_token = db::change_log_floor_token(&state.db, &state.owner, sync_token)
+    let change_log_floor_token = db::change_log_floor_token(&state.db, owner, sync_token)
         .await
         .context("load change log floor token")?;
-    let files_available = fs2::available_space(&state.files_root)
-        .with_context(|| format!("read available space for {}", state.files_root.display()))?;
-    let files_total = fs2::total_space(&state.files_root)
-        .with_context(|| format!("read total space for {}", state.files_root.display()))?;
+    let files_root = state.files_root_for_owner(owner)?;
+    let space_root = if files_root.exists() {
+        files_root
+    } else {
+        state.data_root.clone()
+    };
+    let files_available = fs2::available_space(&space_root)
+        .with_context(|| format!("read available space for {}", space_root.display()))?;
+    let files_total = fs2::total_space(&space_root)
+        .with_context(|| format!("read total space for {}", space_root.display()))?;
 
     let mut body = format!(
         concat!(

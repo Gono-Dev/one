@@ -219,6 +219,24 @@ pub async fn list_local_users(pool: &SqlitePool) -> anyhow::Result<Vec<LocalUser
         .collect()
 }
 
+pub async fn local_user_exists(pool: &SqlitePool, username: &str) -> anyhow::Result<bool> {
+    validate_username(username)?;
+    let exists: i64 = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM users
+            WHERE username = ?1 AND enabled = 1
+        )
+        "#,
+    )
+    .bind(username)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("lookup local user {username}"))?;
+    Ok(exists != 0)
+}
+
 pub async fn create_local_user(
     pool: &SqlitePool,
     username: &str,

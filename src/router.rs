@@ -8,32 +8,17 @@ use axum::{
     routing::get,
     Router,
 };
-use dav_server::DavHandler;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 use crate::{
-    auth::require_basic_auth,
-    dav_handler::{NcDavService, NcLocalFs},
-    locks::SqliteLs,
-    nextcloud_proto, notify_push,
+    auth::require_basic_auth, dav_handler::NcDavService, nextcloud_proto, notify_push,
     state::AppState,
 };
 
 const DEPTH: HeaderName = HeaderName::from_static("depth");
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let dav_handler = DavHandler::builder()
-        .filesystem(Box::new(NcLocalFs::new(
-            &state.files_root,
-            state.db.clone(),
-            state.owner.clone(),
-            state.instance_id.clone(),
-            state.xattr_ns.clone(),
-        )))
-        .locksystem(SqliteLs::new(state.db.clone()))
-        .build_handler();
-
     let dav_service = ServiceBuilder::new()
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(depth_guard))
@@ -41,7 +26,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_basic_auth,
         ))
-        .service(NcDavService::new(dav_handler, state.clone()));
+        .service(NcDavService::new(state.clone()));
 
     let capabilities = get(nextcloud_proto::capabilities::handler);
     let mut app = Router::new()

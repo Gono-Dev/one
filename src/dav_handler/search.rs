@@ -23,8 +23,13 @@ use crate::{
 
 const SEARCH_BODY_LIMIT: usize = 1024 * 1024;
 
-pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Body> {
-    match handle_inner(state, request).await {
+pub async fn handle(
+    state: Arc<AppState>,
+    owner: String,
+    files_root: PathBuf,
+    request: Request<Body>,
+) -> Response<Body> {
+    match handle_inner(state, owner, files_root, request).await {
         Ok(response) => response,
         Err(err) => {
             error!(?err, "failed to handle SEARCH");
@@ -35,10 +40,12 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
 
 async fn handle_inner(
     state: Arc<AppState>,
+    owner: String,
+    files_root: PathBuf,
     request: Request<Body>,
 ) -> anyhow::Result<Response<Body>> {
     let request_path = original_request_uri(&request).path().to_owned();
-    let href_prefix = mount_prefix_for_path(&request_path, &state.owner);
+    let href_prefix = mount_prefix_for_path(&request_path, &owner);
     let body = to_bytes(request.into_body(), SEARCH_BODY_LIMIT)
         .await
         .context("read SEARCH body")?;
@@ -50,12 +57,14 @@ async fn handle_inner(
         bail!("unsupported SEARCH where operator {operator}");
     }
 
-    let scope_rel = scope_rel_path(search.scope_href.as_deref(), &state.owner)?;
-    let scope_abs = storage::safe_existing_path(&state.files_root, &scope_rel)?;
+    let scope_rel = scope_rel_path(search.scope_href.as_deref(), &owner)?;
+    let scope_abs = storage::safe_existing_path(&files_root, &scope_rel)?;
     let mut xml = multistatus_start();
     append_search_matches(
         &mut xml,
         &state,
+        &owner,
+        &files_root,
         &href_prefix,
         scope_rel,
         scope_abs,
@@ -71,6 +80,8 @@ async fn handle_inner(
 async fn append_search_matches(
     xml: &mut String,
     state: &AppState,
+    owner: &str,
+    files_root: &Path,
     href_prefix: &str,
     scope_rel: PathBuf,
     scope_abs: PathBuf,
@@ -85,7 +96,7 @@ async fn append_search_matches(
         let record = db::ensure_file_record(
             &state.db,
             db::FileRecordInput {
-                owner: &state.owner,
+                owner,
                 rel_path: &rel_path,
                 abs_path: &abs_path,
                 instance_id: &state.instance_id,
@@ -108,7 +119,7 @@ async fn append_search_matches(
 
             for child in children.into_iter().rev() {
                 let child_rel = rel_path.join(child.file_name());
-                let child_abs = storage::safe_existing_path(&state.files_root, &child_rel)?;
+                let child_abs = storage::safe_existing_path(files_root, &child_rel)?;
                 stack.push((child_rel, child_abs, level + 1));
             }
         }

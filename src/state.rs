@@ -82,16 +82,39 @@ impl AppState {
         })
     }
 
+    pub fn files_root_for_owner(&self, owner: &str) -> anyhow::Result<PathBuf> {
+        db::validate_username(owner)?;
+        if owner == self.owner {
+            Ok(self.files_root.clone())
+        } else {
+            Ok(self.data_root.join("users").join(owner).join("files"))
+        }
+    }
+
+    pub async fn ensure_files_root_for_owner(&self, owner: &str) -> anyhow::Result<PathBuf> {
+        let files_root = self.files_root_for_owner(owner)?;
+        tokio::fs::create_dir_all(&files_root).await?;
+        Ok(files_root)
+    }
+
     pub fn notify_file_changed(&self, file_id: Option<i64>) {
+        self.notify_file_changed_for_owner(&self.owner, file_id);
+    }
+
+    pub fn notify_file_changed_for_owner(&self, owner: &str, file_id: Option<i64>) {
         if let Some(notify_push) = &self.notify_push {
-            notify_push.notify_file(&self.owner, file_id);
+            notify_push.notify_file(owner, file_id);
         }
     }
 
     pub async fn compact_change_log(&self) {
+        self.compact_change_log_for_owner(&self.owner).await;
+    }
+
+    pub async fn compact_change_log_for_owner(&self, owner: &str) {
         match db::prune_change_log(
             &self.db,
-            &self.owner,
+            owner,
             self.sync_config.change_log_retention_days,
             self.sync_config.change_log_min_entries,
         )

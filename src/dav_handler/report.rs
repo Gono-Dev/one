@@ -1,4 +1,8 @@
-use std::{io::ErrorKind, path::Path, sync::Arc};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{bail, Context};
 use axum::{
@@ -21,8 +25,13 @@ use crate::{
 
 const REPORT_BODY_LIMIT: usize = 1024 * 1024;
 
-pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Body> {
-    match handle_inner(state, request).await {
+pub async fn handle(
+    state: Arc<AppState>,
+    owner: String,
+    files_root: PathBuf,
+    request: Request<Body>,
+) -> Response<Body> {
+    match handle_inner(state, owner, files_root, request).await {
         Ok(response) => response,
         Err(err) => {
             error!(?err, "failed to handle REPORT");
@@ -33,21 +42,31 @@ pub async fn handle(state: Arc<AppState>, request: Request<Body>) -> Response<Bo
 
 async fn handle_inner(
     state: Arc<AppState>,
+    owner: String,
+    files_root: PathBuf,
     request: Request<Body>,
 ) -> anyhow::Result<Response<Body>> {
     let request_path = original_request_uri(&request).path().to_owned();
-    let href_prefix = mount_prefix_for_path(&request_path, &state.owner);
+    let href_prefix = mount_prefix_for_path(&request_path, &owner);
     let body = to_bytes(request.into_body(), REPORT_BODY_LIMIT)
         .await
         .context("read REPORT body")?;
     let report = parse_report_body(&body)?;
 
     if report.filter_files {
-        return handle_filter_files(state, &request_path, &href_prefix, &report).await;
+        return handle_filter_files(
+            state,
+            &owner,
+            &files_root,
+            &request_path,
+            &href_prefix,
+            &report,
+        )
+        .await;
     }
 
     if report.sync_collection {
-        return handle_sync_collection(state, &href_prefix, &report).await;
+        return handle_sync_collection(state, &owner, &files_root, &href_prefix, &report).await;
     }
 
     Ok((
@@ -59,12 +78,14 @@ async fn handle_inner(
 
 async fn handle_sync_collection(
     state: Arc<AppState>,
+    owner: &str,
+    files_root: &Path,
     href_prefix: &str,
     report: &ParsedReport,
 ) -> anyhow::Result<Response<Body>> {
-    let current_token = db::current_sync_token(&state.db, &state.owner).await?;
+    let current_token = db::current_sync_token(&state.db, owner).await?;
     let since_token = report.sync_token.unwrap_or(0);
-    let floor_token = db::change_log_floor_token(&state.db, &state.owner, current_token).await?;
+    let floor_token = db::change_log_floor_token(&state.db, owner, current_token).await?;
     if since_token < floor_token {
         return Ok(stale_sync_token_response(
             since_token,
@@ -73,12 +94,11 @@ async fn handle_sync_collection(
         ));
     }
 
-    let entries =
-        db::list_change_log_range(&state.db, &state.owner, since_token, current_token).await?;
+    let entries = db::list_change_log_range(&state.db, owner, since_token, current_token).await?;
     let mut xml = multistatus_start();
 
     for entry in entries {
-        append_change_response(&mut xml, &state, href_prefix, &entry).await?;
+        append_change_response(&mut xml, &state, owner, files_root, href_prefix, &entry).await?;
     }
 
     xml.push_str("<d:sync-token>");
@@ -115,6 +135,8 @@ fn stale_sync_token_response(
 
 async fn handle_filter_files(
     state: Arc<AppState>,
+    owner: &str,
+    files_root: &Path,
     request_path: &str,
     href_prefix: &str,
     report: &ParsedReport,
@@ -127,12 +149,14 @@ async fn handle_filter_files(
             .into_response());
     };
 
-    let scope_rel = parse_rel_path_for_owner(request_path, &state.owner)?;
-    let scope_abs = storage::safe_existing_path(&state.files_root, &scope_rel)?;
+    let scope_rel = parse_rel_path_for_owner(request_path, owner)?;
+    let scope_abs = storage::safe_existing_path(files_root, &scope_rel)?;
     let mut xml = multistatus_start();
     append_filter_matches(
         &mut xml,
         &state,
+        owner,
+        files_root,
         href_prefix,
         scope_rel,
         scope_abs,
@@ -147,6 +171,8 @@ async fn handle_filter_files(
 async fn append_change_response(
     xml: &mut String,
     state: &AppState,
+    owner: &str,
+    files_root: &Path,
     href_prefix: &str,
     entry: &db::ChangeLogEntry,
 ) -> anyhow::Result<()> {
@@ -157,7 +183,9 @@ async fn append_change_response(
     if entry.operation == "delete" {
         append_not_found_propstat(xml);
     } else {
-        match current_record_for_rel_path(state, Path::new(&entry.rel_path)).await {
+        match current_record_for_rel_path(state, owner, files_root, Path::new(&entry.rel_path))
+            .await
+        {
             Ok((record, is_collection)) => append_ok_propstat(xml, &record, is_collection),
             Err(err) if is_not_found_error(&err) => {
                 debug!(
@@ -181,6 +209,8 @@ async fn append_change_response(
 async fn append_filter_matches(
     xml: &mut String,
     state: &AppState,
+    owner: &str,
+    files_root: &Path,
     href_prefix: &str,
     scope_rel: std::path::PathBuf,
     scope_abs: std::path::PathBuf,
@@ -194,7 +224,7 @@ async fn append_filter_matches(
         let record = db::ensure_file_record(
             &state.db,
             db::FileRecordInput {
-                owner: &state.owner,
+                owner,
                 rel_path: &rel_path,
                 abs_path: &abs_path,
                 instance_id: &state.instance_id,
@@ -217,7 +247,7 @@ async fn append_filter_matches(
 
             for child in children.into_iter().rev() {
                 let child_rel = rel_path.join(child.file_name());
-                let child_abs = storage::safe_existing_path(&state.files_root, &child_rel)?;
+                let child_abs = storage::safe_existing_path(files_root, &child_rel)?;
                 stack.push((child_rel, child_abs));
             }
         }
@@ -228,15 +258,17 @@ async fn append_filter_matches(
 
 async fn current_record_for_rel_path(
     state: &AppState,
+    owner: &str,
+    files_root: &Path,
     rel_path: &Path,
 ) -> anyhow::Result<(db::FileRecord, bool)> {
-    let abs_path = storage::safe_existing_path(&state.files_root, rel_path)?;
+    let abs_path = storage::safe_existing_path(files_root, rel_path)?;
     let metadata = std::fs::metadata(&abs_path)
         .with_context(|| format!("read metadata for changed path {}", abs_path.display()))?;
     let record = db::ensure_file_record(
         &state.db,
         db::FileRecordInput {
-            owner: &state.owner,
+            owner,
             rel_path,
             abs_path: &abs_path,
             instance_id: &state.instance_id,

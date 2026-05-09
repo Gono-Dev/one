@@ -6,11 +6,15 @@ use axum::{
     middleware,
     response::{IntoResponse, Response},
     routing::{any, delete, get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use serde_json::{json, Value};
 
-use crate::{auth::require_basic_auth, state::AppState};
+use crate::{
+    auth::{require_basic_auth, Principal},
+    db,
+    state::AppState,
+};
 
 use super::user;
 
@@ -167,10 +171,16 @@ fn v2_routes() -> Router<Arc<AppState>> {
 }
 
 async fn list_users(State(state): State<Arc<AppState>>) -> Response {
+    let users = match db::list_local_users(&state.db).await {
+        Ok(users) => users
+            .into_iter()
+            .filter(|user| user.enabled)
+            .map(|user| user.username)
+            .collect::<Vec<_>>(),
+        Err(_) => return ocs_error(StatusCode::INTERNAL_SERVER_ERROR, 500, "List users failed"),
+    };
     ocs_ok(json!({
-        "users": [
-            state.owner
-        ]
+        "users": users
     }))
 }
 
@@ -178,10 +188,10 @@ async fn user_metadata(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
 ) -> Response {
-    if user_id == state.owner {
-        ocs_ok(user::user_data(&state, &user_id))
-    } else {
-        ocs_error(StatusCode::NOT_FOUND, 404, "User not found")
+    match db::local_user_exists(&state.db, &user_id).await {
+        Ok(true) => ocs_ok(user::user_data(&state, &user_id)),
+        Ok(false) => ocs_error(StatusCode::NOT_FOUND, 404, "User not found"),
+        Err(_) => ocs_error(StatusCode::BAD_REQUEST, 400, "Invalid user id"),
     }
 }
 
@@ -207,8 +217,8 @@ async fn notification_exists() -> Response {
     }))
 }
 
-async fn own_status(State(state): State<Arc<AppState>>) -> Response {
-    ocs_ok(user_status_payload(&state.owner))
+async fn own_status(Extension(principal): Extension<Principal>) -> Response {
+    ocs_ok(user_status_payload(&principal.username))
 }
 
 async fn user_status_by_id(
@@ -216,10 +226,10 @@ async fn user_status_by_id(
     Path(user_id): Path<String>,
 ) -> Response {
     let user_id = user_id.strip_prefix('_').unwrap_or(&user_id);
-    if user_id == state.owner {
-        ocs_ok(user_status_payload(user_id))
-    } else {
-        ocs_error(StatusCode::NOT_FOUND, 404, "User status not found")
+    match db::local_user_exists(&state.db, user_id).await {
+        Ok(true) => ocs_ok(user_status_payload(user_id)),
+        Ok(false) => ocs_error(StatusCode::NOT_FOUND, 404, "User status not found"),
+        Err(_) => ocs_error(StatusCode::BAD_REQUEST, 400, "Invalid user id"),
     }
 }
 
