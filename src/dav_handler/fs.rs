@@ -60,6 +60,8 @@ impl NcLocalFs {
         do_content: bool,
     ) -> anyhow::Result<Vec<DavProp>> {
         let record = self.ensure_record(path).await?;
+        let abs_path = storage::safe_existing_path(&self.root, path.as_rel_ospath())?;
+        let is_collection = std::fs::metadata(&abs_path)?.is_dir();
         let mut props = vec![
             nc_prop("has-preview", "false", do_content),
             oc_prop("fileid", &record.oc_file_id, do_content),
@@ -70,7 +72,7 @@ impl NcLocalFs {
             ),
             oc_prop(
                 "permissions",
-                permissions_string(record.permissions),
+                permissions_string(record.permissions, is_collection),
                 do_content,
             ),
             oc_prop(
@@ -504,8 +506,12 @@ fn prop_is_truthy(prop: &DavProp) -> bool {
         .unwrap_or(false)
 }
 
-fn permissions_string(_permissions: i64) -> &'static str {
-    "RGDNVW"
+pub(crate) fn permissions_string(_permissions: i64, is_collection: bool) -> &'static str {
+    if is_collection {
+        "RGDNVCK"
+    } else {
+        "RGDNVW"
+    }
 }
 
 fn map_fs_error(err: anyhow::Error) -> FsError {

@@ -1276,6 +1276,10 @@ async fn head_on_nextcloud_files_path_returns_metadata_without_body() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().contains_key("oc-etag"));
     assert!(response.headers().contains_key("oc-fileid"));
+    assert_eq!(
+        response.headers().get("x-nc-permissions").unwrap(),
+        "RGDNVCK"
+    );
     assert_eq!(response.headers().get(header::CONTENT_LENGTH).unwrap(), "0");
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert!(body.is_empty());
@@ -1303,6 +1307,7 @@ async fn propfind_depth_0_injects_nextcloud_props() {
     let body = std::str::from_utf8(&body).unwrap();
     assert!(body.contains("oc:fileid"));
     assert!(body.contains("oc:permissions"));
+    assert!(body.contains("RGDNVCK"));
     assert!(body.contains("nc:has-preview"));
 }
 

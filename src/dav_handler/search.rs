@@ -15,6 +15,7 @@ use tracing::{error, warn};
 
 use crate::{
     dav_handler::dispatch::{mount_prefix_for_path, original_request_uri},
+    dav_handler::fs::permissions_string,
     db,
     state::AppState,
     storage,
@@ -147,7 +148,9 @@ fn append_resource_response(
     xml.push_str(&escape(&record.etag));
     xml.push_str("</d:getetag><oc:fileid>");
     xml.push_str(&escape(&record.oc_file_id));
-    xml.push_str("</oc:fileid><oc:permissions>RGDNVW</oc:permissions><oc:favorite>");
+    xml.push_str("</oc:fileid><oc:permissions>");
+    xml.push_str(permissions_string(record.permissions, is_collection));
+    xml.push_str("</oc:permissions><oc:favorite>");
     xml.push_str(if record.favorite { "1" } else { "0" });
     xml.push_str("</oc:favorite><nc:has-preview>false</nc:has-preview>");
     xml.push_str("</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>");

@@ -25,7 +25,7 @@ use xmltree::{Element, Namespace, XMLNode};
 
 use crate::{
     auth::Principal,
-    dav_handler::{chunked_upload, report, search},
+    dav_handler::{chunked_upload, fs::permissions_string, report, search},
     db,
     state::AppState,
     storage,
@@ -297,7 +297,11 @@ impl NcDavService {
         insert_header(headers, OC_ETAG, &record.etag);
         insert_header(headers, OC_FILEID, &record.oc_file_id);
         insert_header(headers, X_NC_OWNER_ID, &self.state.owner);
-        insert_header(headers, X_NC_PERMISSIONS, "RGDNVW");
+        insert_header(
+            headers,
+            X_NC_PERMISSIONS,
+            permissions_string(record.permissions, abs_path.is_dir()),
+        );
         if method == Method::PUT && accepted_upload_mtime {
             insert_header(headers, X_OC_MTIME, "accepted");
         }
@@ -421,7 +425,11 @@ impl NcDavService {
         insert_header(headers, OC_ETAG, &record.etag);
         insert_header(headers, OC_FILEID, &record.oc_file_id);
         insert_header(headers, X_NC_OWNER_ID, &self.state.owner);
-        insert_header(headers, X_NC_PERMISSIONS, "RGDNVW");
+        insert_header(
+            headers,
+            X_NC_PERMISSIONS,
+            permissions_string(record.permissions, metadata.is_dir()),
+        );
         let content_length = if metadata.is_file() {
             metadata.len().to_string()
         } else {

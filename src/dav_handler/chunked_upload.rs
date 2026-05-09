@@ -16,7 +16,10 @@ use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 
 use crate::{
-    dav_handler::dispatch::{parse_rel_path, parse_rel_path_for_owner},
+    dav_handler::{
+        dispatch::{parse_rel_path, parse_rel_path_for_owner},
+        fs::permissions_string,
+    },
     db,
     state::AppState,
     storage::{self, safe_create_path, safe_existing_path, safe_write_path},
@@ -242,7 +245,11 @@ async fn move_file(
     insert_header(headers, OC_ETAG, &record.etag);
     insert_header(headers, OC_FILEID, &record.oc_file_id);
     insert_header(headers, X_NC_OWNER_ID, &state.owner);
-    insert_header(headers, X_NC_PERMISSIONS, "RGDNVW");
+    insert_header(
+        headers,
+        X_NC_PERMISSIONS,
+        permissions_string(record.permissions, false),
+    );
     if request.headers().contains_key(X_OC_MTIME) {
         insert_header(headers, X_OC_MTIME, "accepted");
     }
