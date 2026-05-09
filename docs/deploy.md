@@ -13,7 +13,7 @@ bash <(curl -sL https://run.gono.cloud)
 ```
 
 Running without arguments starts an interactive menu. Choose `1` to install or upgrade, `2` to
-uninstall, or use the status/log/restart entries for service management.
+uninstall, or use the status/log/restart/user-management entries for service management.
 
 To make that command work in production, `https://run.gono.cloud` must serve the raw contents of
 `scripts/install.sh` at the origin path `/`. Redirects are fine as long as `curl -sL` reaches the
@@ -190,9 +190,14 @@ one-file installers:
 scripts/install.sh status
 scripts/install.sh logs
 scripts/install.sh restart
+scripts/install.sh users
 scripts/install.sh uninstall
 scripts/install.sh uninstall --purge
 ```
+
+The user-management menu wraps the installed `gono-cloud` binary and the configured SQLite database.
+It can list local application users, create a user with a newly generated app password, or delete a
+local user. App passwords are printed once when a user is created.
 
 ## Domain And Reverse Proxy
 

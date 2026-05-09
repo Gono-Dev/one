@@ -19,10 +19,28 @@ use crate::{config::DbConfig, storage};
 
 pub const BOOTSTRAP_USER: &str = "gono";
 const BOOTSTRAP_LABEL: &str = "bootstrap";
+pub const DEFAULT_APP_PASSWORD_LABEL: &str = "default";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapOutcome {
     pub generated_password: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalUser {
+    pub username: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub app_password_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedLocalUser {
+    pub username: String,
+    pub display_name: String,
+    pub password_label: String,
+    pub app_password: String,
 }
 
 pub async fn connect(config: &DbConfig) -> anyhow::Result<SqlitePool> {
@@ -149,6 +167,140 @@ pub async fn ensure_bootstrap_user(pool: &SqlitePool) -> anyhow::Result<Bootstra
         .await
         .context("commit bootstrap user transaction")?;
     Ok(BootstrapOutcome { generated_password })
+}
+
+pub async fn list_local_users(pool: &SqlitePool) -> anyhow::Result<Vec<LocalUser>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            users.username,
+            COALESCE(users.display_name, users.username) AS display_name,
+            users.enabled,
+            users.created_at,
+            COUNT(app_passwords.id) AS app_password_count
+        FROM users
+        LEFT JOIN app_passwords ON app_passwords.username = users.username
+        GROUP BY users.username, users.display_name, users.enabled, users.created_at
+        ORDER BY users.username
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("list local users")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(LocalUser {
+                username: row.try_get("username")?,
+                display_name: row.try_get("display_name")?,
+                enabled: row.try_get::<i64, _>("enabled")? != 0,
+                created_at: row.try_get("created_at")?,
+                app_password_count: row.try_get("app_password_count")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn create_local_user(
+    pool: &SqlitePool,
+    username: &str,
+    display_name: Option<&str>,
+) -> anyhow::Result<CreatedLocalUser> {
+    validate_username(username)?;
+    let display_name = display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(username);
+    let now = unix_timestamp();
+    let password = generate_app_password();
+    let password_hash = hash_password(&password).context("hash app password")?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin create local user transaction")?;
+
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT username FROM users WHERE username = ?1")
+            .bind(username)
+            .fetch_optional(&mut *tx)
+            .await
+            .with_context(|| format!("lookup local user {username}"))?;
+    if existing.is_some() {
+        anyhow::bail!("local user {username:?} already exists");
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO users(username, display_name, enabled, created_at)
+        VALUES(?1, ?2, 1, ?3)
+        "#,
+    )
+    .bind(username)
+    .bind(display_name)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .with_context(|| format!("insert local user {username}"))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO app_passwords(username, label, password_hash, created_at)
+        VALUES(?1, ?2, ?3, ?4)
+        "#,
+    )
+    .bind(username)
+    .bind(DEFAULT_APP_PASSWORD_LABEL)
+    .bind(password_hash)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .with_context(|| format!("insert app password for {username}"))?;
+
+    tx.commit()
+        .await
+        .context("commit create local user transaction")?;
+
+    Ok(CreatedLocalUser {
+        username: username.to_owned(),
+        display_name: display_name.to_owned(),
+        password_label: DEFAULT_APP_PASSWORD_LABEL.to_owned(),
+        app_password: password,
+    })
+}
+
+pub async fn delete_local_user(pool: &SqlitePool, username: &str) -> anyhow::Result<bool> {
+    validate_username(username)?;
+    if username == BOOTSTRAP_USER {
+        anyhow::bail!("refusing to delete bootstrap user {BOOTSTRAP_USER:?}");
+    }
+
+    let result = sqlx::query("DELETE FROM users WHERE username = ?1")
+        .bind(username)
+        .execute(pool)
+        .await
+        .with_context(|| format!("delete local user {username}"))?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub fn validate_username(username: &str) -> anyhow::Result<()> {
+    if username.is_empty() {
+        anyhow::bail!("username cannot be empty");
+    }
+    if username.len() > 64 {
+        anyhow::bail!("username is too long");
+    }
+    if username == "." || username == ".." {
+        anyhow::bail!("username cannot be {username:?}");
+    }
+    if !username
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'@'))
+    {
+        anyhow::bail!(
+            "username may only contain ASCII letters, numbers, dot, underscore, dash, or @"
+        );
+    }
+    Ok(())
 }
 
 fn generate_app_password() -> String {
@@ -1143,6 +1295,8 @@ fn write_xattr(path: &Path, namespace: &str, name: &str, value: &str) -> anyhow:
 mod tests {
     use std::path::Path;
 
+    use crate::auth::SqliteUserStore;
+
     use super::*;
 
     async fn temp_pool(temp: &tempfile::TempDir) -> SqlitePool {
@@ -1157,6 +1311,58 @@ mod tests {
         let pool = connect(&config).await.expect("connect sqlite");
         migrate(&pool).await.expect("migrate sqlite");
         pool
+    }
+
+    #[tokio::test]
+    async fn local_user_admin_creates_lists_and_deletes_users() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+
+        let created = create_local_user(&pool, "alice", Some("Alice Example"))
+            .await
+            .expect("create local user");
+        assert_eq!(created.username, "alice");
+        assert_eq!(created.display_name, "Alice Example");
+        assert_eq!(created.password_label, DEFAULT_APP_PASSWORD_LABEL);
+        assert!(created.app_password.len() >= 40);
+
+        let users = list_local_users(&pool).await.expect("list local users");
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[0].display_name, "Alice Example");
+        assert_eq!(users[0].app_password_count, 1);
+
+        let store = SqliteUserStore::new(pool.clone());
+        assert!(store
+            .verify("alice", &created.app_password)
+            .await
+            .expect("verify local user")
+            .is_some());
+
+        assert!(delete_local_user(&pool, "alice")
+            .await
+            .expect("delete local user"));
+        assert!(store
+            .verify("alice", &created.app_password)
+            .await
+            .expect("verify deleted local user")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn local_user_admin_rejects_unsafe_and_bootstrap_deletes() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        ensure_bootstrap_user(&pool)
+            .await
+            .expect("ensure bootstrap user");
+
+        assert!(validate_username("alice").is_ok());
+        assert!(validate_username("alice@example").is_ok());
+        assert!(validate_username("").is_err());
+        assert!(validate_username("../alice").is_err());
+        assert!(validate_username("alice/bob").is_err());
+        assert!(delete_local_user(&pool, BOOTSTRAP_USER).await.is_err());
     }
 
     #[tokio::test]

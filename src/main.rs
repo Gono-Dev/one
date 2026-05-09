@@ -6,8 +6,9 @@ use gono_cloud::{
     build_router,
     consistency::{self, RepairMode},
     dav_handler::chunked_upload,
-    AppState, Config,
+    db, AppState, Config,
 };
+use sqlx::SqlitePool;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -28,6 +29,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => run_server(&config_path, config).await,
         Command::ConsistencyCheck => run_consistency_check(config).await,
         Command::ConsistencyRepair(mode) => run_consistency_repair(config, mode).await,
+        Command::UserList => run_user_list(config).await,
+        Command::UserAdd {
+            username,
+            display_name,
+        } => run_user_add(config, &username, display_name.as_deref()).await,
+        Command::UserDelete { username } => run_user_delete(config, &username).await,
         Command::Help => unreachable!("handled before config load"),
     }
 }
@@ -126,23 +133,89 @@ async fn run_consistency_repair(config: Config, mode: RepairMode) -> anyhow::Res
     }
 }
 
+async fn user_admin_pool(config: &Config) -> anyhow::Result<SqlitePool> {
+    let pool = db::connect(&config.db).await?;
+    db::migrate(&pool).await?;
+    Ok(pool)
+}
+
+async fn run_user_list(config: Config) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    let users = db::list_local_users(&pool).await?;
+    if users.is_empty() {
+        println!("No local users found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<24} {:<8} {:<14} DISPLAY_NAME",
+        "USERNAME", "ENABLED", "APP_PASSWORDS"
+    );
+    for user in users {
+        println!(
+            "{:<24} {:<8} {:<14} {}",
+            user.username,
+            if user.enabled { "yes" } else { "no" },
+            user.app_password_count,
+            user.display_name
+        );
+    }
+    Ok(())
+}
+
+async fn run_user_add(
+    config: Config,
+    username: &str,
+    display_name: Option<&str>,
+) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    let created = db::create_local_user(&pool, username, display_name).await?;
+    println!("Created local user: {}", created.username);
+    println!("Display name: {}", created.display_name);
+    println!("App password label: {}", created.password_label);
+    println!("App password: {}", created.app_password);
+    println!("Save this password now; it cannot be shown again.");
+    Ok(())
+}
+
+async fn run_user_delete(config: Config, username: &str) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    if db::delete_local_user(&pool, username).await? {
+        println!("Deleted local user: {username}");
+    } else {
+        println!("Local user not found: {username}");
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(concat!(
         "Usage:\n",
         "  gono-cloud [serve]\n",
         "  gono-cloud consistency-check\n",
         "  gono-cloud consistency-repair [--dry-run|--apply]\n",
+        "  gono-cloud user-list\n",
+        "  gono-cloud user-add <username> [display-name]\n",
+        "  gono-cloud user-delete <username>\n",
         "\n",
         "Environment:\n",
         "  NC_DAV_CONFIG    Path to config.toml (default: config.toml)\n",
     ));
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Serve,
     ConsistencyCheck,
     ConsistencyRepair(RepairMode),
+    UserList,
+    UserAdd {
+        username: String,
+        display_name: Option<String>,
+    },
+    UserDelete {
+        username: String,
+    },
     Help,
 }
 
@@ -162,6 +235,18 @@ impl Command {
             [command, mode] if command == "consistency-repair" && mode == "--apply" => {
                 Ok(Self::ConsistencyRepair(RepairMode::Apply))
             }
+            [command] if command == "user-list" => Ok(Self::UserList),
+            [command, username] if command == "user-add" => Ok(Self::UserAdd {
+                username: username.to_owned(),
+                display_name: None,
+            }),
+            [command, username, display_name] if command == "user-add" => Ok(Self::UserAdd {
+                username: username.to_owned(),
+                display_name: Some(display_name.to_owned()),
+            }),
+            [command, username] if command == "user-delete" => Ok(Self::UserDelete {
+                username: username.to_owned(),
+            }),
             [command] if command == "--help" || command == "-h" || command == "help" => {
                 Ok(Self::Help)
             }
@@ -295,6 +380,35 @@ mod tests {
         assert_eq!(
             Command::parse(["consistency-repair".to_owned(), "--apply".to_owned()]).unwrap(),
             Command::ConsistencyRepair(RepairMode::Apply)
+        );
+        assert_eq!(
+            Command::parse(["user-list".to_owned()]).unwrap(),
+            Command::UserList
+        );
+        assert_eq!(
+            Command::parse(["user-add".to_owned(), "alice".to_owned()]).unwrap(),
+            Command::UserAdd {
+                username: "alice".to_owned(),
+                display_name: None
+            }
+        );
+        assert_eq!(
+            Command::parse([
+                "user-add".to_owned(),
+                "alice".to_owned(),
+                "Alice Example".to_owned()
+            ])
+            .unwrap(),
+            Command::UserAdd {
+                username: "alice".to_owned(),
+                display_name: Some("Alice Example".to_owned())
+            }
+        );
+        assert_eq!(
+            Command::parse(["user-delete".to_owned(), "alice".to_owned()]).unwrap(),
+            Command::UserDelete {
+                username: "alice".to_owned()
+            }
         );
         assert_eq!(
             Command::parse(["--help".to_owned()]).unwrap(),

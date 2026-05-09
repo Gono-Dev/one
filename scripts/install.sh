@@ -92,6 +92,7 @@ Usage:
   $(usage_name) status [options]
   $(usage_name) logs [options]
   $(usage_name) restart [options]
+  $(usage_name) users [options]
   $(usage_name) uninstall [options]
   bash <(curl -sL ${INSTALL_URL})
   bash <(curl -sL ${INSTALL_URL}) install [options]
@@ -102,6 +103,7 @@ Commands:
   status                    Show service status
   logs, show_log            Follow service logs
   restart                   Restart service and run health check
+  users                     Manage local application users
   uninstall                 Stop service and remove service files/binary
   help                      Show this help
 
@@ -157,6 +159,7 @@ Examples:
   scripts/install.sh status
   scripts/install.sh logs
   scripts/install.sh restart
+  scripts/install.sh users
   scripts/install.sh uninstall
   scripts/install.sh uninstall --purge
   scripts/install.sh install --bin target/release/gono-cloud
@@ -221,10 +224,11 @@ Please select an action:
   3. Restart service
   4. Show service status
   5. Show service logs
-  6. Help
+  6. User management
+  7. Help
   0. Exit
 EOF
-    printf "Enter choice [1-6,0]: "
+    printf "Enter choice [1-7,0]: "
     if ! read -r choice; then
       die "failed to read menu selection. For non-interactive use, run '$(usage_name) install' or '$(usage_name) uninstall'."
     fi
@@ -251,7 +255,11 @@ EOF
         set_command "logs"
         return
         ;;
-      6|help|h|H|\?)
+      6|users|user|u|U)
+        set_command "users"
+        return
+        ;;
+      7|help|h|H|\?)
         show_usage
         ;;
       0|exit|quit|q|Q)
@@ -299,6 +307,10 @@ parse_args() {
         ;;
       restart|restart_and_update)
         set_command "restart"
+        shift
+        ;;
+      users|user|user-management|manage-users)
+        set_command "users"
         shift
         ;;
       uninstall|remove)
@@ -1386,6 +1398,108 @@ follow_service_logs() {
   esac
 }
 
+ensure_admin_binary() {
+  [[ -x "${BIN_PATH}" ]] || die "Gono Cloud binary is not installed at ${BIN_PATH}. Install first, or set GONO_CLOUD_INSTALL_DIR/GONO_CLOUD_BIN_PATH."
+}
+
+run_user_cli() {
+  ensure_admin_binary
+  NC_DAV_CONFIG="${CONFIG_FILE}" "${BIN_PATH}" "$@"
+}
+
+prompt_local_user_name() {
+  local prompt="$1"
+  local username
+
+  printf "%s" "${prompt}" >&2
+  if ! read -r username; then
+    die "failed to read username"
+  fi
+  username="${username//[[:space:]]/}"
+  [[ -n "${username}" ]] || die "username cannot be empty"
+  printf '%s\n' "${username}"
+}
+
+prompt_display_name() {
+  local display_name
+  printf "Display name (optional): " >&2
+  if ! read -r display_name; then
+    die "failed to read display name"
+  fi
+  printf '%s\n' "${display_name}"
+}
+
+confirm_delete_local_user() {
+  local username="$1"
+  local input
+
+  if is_enabled "${ASSUME_YES}"; then
+    return
+  fi
+
+  warn "this deletes login credentials for local user '${username}'. Stored files are not removed."
+  printf "Delete user '${username}'? [y/N] "
+  if ! read -r input; then
+    die "failed to read delete confirmation"
+  fi
+  case "${input}" in
+    [yY]|[yY][eE][sS])
+      ;;
+    *)
+      log "user delete cancelled"
+      return 1
+      ;;
+  esac
+}
+
+show_user_management_menu() {
+  local choice username display_name
+
+  while true; do
+    cat <<EOF
+Gono Cloud user management
+
+Please select an action:
+  1. List local users
+  2. Add local user
+  3. Delete local user
+  0. Back
+EOF
+    printf "Enter choice [1-3,0]: "
+    if ! read -r choice; then
+      die "failed to read user management selection"
+    fi
+
+    case "${choice}" in
+      1|list|l|L)
+        run_user_cli user-list
+        ;;
+      2|add|a|A)
+        username="$(prompt_local_user_name "Username: ")"
+        display_name="$(prompt_display_name)"
+        if [[ -n "${display_name}" ]]; then
+          run_user_cli user-add "${username}" "${display_name}"
+        else
+          run_user_cli user-add "${username}"
+        fi
+        ;;
+      3|delete|remove|d|D)
+        username="$(prompt_local_user_name "Username to delete: ")"
+        if confirm_delete_local_user "${username}"; then
+          run_user_cli user-delete "${username}"
+        fi
+        ;;
+      0|back|b|B|exit|quit|q|Q)
+        return
+        ;;
+      *)
+        warn "invalid selection: ${choice:-<empty>}"
+        ;;
+    esac
+    printf '\n'
+  done
+}
+
 restart_existing_service() {
   local url
 
@@ -1533,6 +1647,10 @@ dispatch_command() {
     restart)
       require_root "$@"
       restart_existing_service
+      ;;
+    users)
+      require_root "$@"
+      show_user_management_menu
       ;;
     uninstall)
       require_root "$@"
