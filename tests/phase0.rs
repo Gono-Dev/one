@@ -2357,6 +2357,61 @@ async fn report_sync_collection_marks_deleted_paths_not_found() {
 }
 
 #[tokio::test]
+async fn report_sync_collection_marks_superseded_create_as_not_found() {
+    let (app, _temp, password, _state) = app_with_state().await;
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/sync-create-then-delete.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("short lived"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/remote.php/dav/sync-create-then-delete.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete.status().is_success());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(sync_collection_body("0")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert_eq!(
+        body.matches("/remote.php/dav/sync-create-then-delete.txt")
+            .count(),
+        2
+    );
+    assert!(body.matches("HTTP/1.1 404 Not Found").count() >= 2);
+}
+
+#[tokio::test]
 async fn proppatch_favorite_is_readable_from_propfind() {
     let (app, _temp, password) = app_with_temp_root().await;
     let put = app

@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{io::ErrorKind, path::Path, sync::Arc};
 
 use anyhow::{bail, Context};
 use axum::{
@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
 };
 use quick_xml::{escape::escape, events::Event, Reader};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::{
     dav_handler::dispatch::{
@@ -159,6 +159,14 @@ async fn append_change_response(
     } else {
         match current_record_for_rel_path(state, Path::new(&entry.rel_path)).await {
             Ok((record, is_collection)) => append_ok_propstat(xml, &record, is_collection),
+            Err(err) if is_not_found_error(&err) => {
+                debug!(
+                    rel_path = %entry.rel_path,
+                    operation = %entry.operation,
+                    "change log entry is no longer readable; reporting sync tombstone"
+                );
+                append_not_found_propstat(xml);
+            }
             Err(err) => {
                 error!(?err, rel_path = %entry.rel_path, "changed path is no longer readable");
                 append_not_found_propstat(xml);
@@ -237,6 +245,14 @@ async fn current_record_for_rel_path(
     )
     .await?;
     Ok((record, metadata.is_dir()))
+}
+
+fn is_not_found_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == ErrorKind::NotFound)
+    })
 }
 
 fn append_resource_response(
