@@ -12,11 +12,12 @@ use axum::{
     extract::OriginalUri,
     http::{
         header::{HeaderName, CONTENT_LENGTH},
-        HeaderValue, Method, Request, Response, StatusCode, Uri,
+        HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri,
     },
     response::IntoResponse,
 };
 use dav_server::{davpath::DavPath, DavConfig, DavHandler};
+use filetime::FileTime;
 use futures_util::future::BoxFuture;
 use tower::Service;
 use tracing::{error, warn};
@@ -32,6 +33,9 @@ use crate::{
 
 const OC_ETAG: HeaderName = HeaderName::from_static("oc-etag");
 const OC_FILEID: HeaderName = HeaderName::from_static("oc-fileid");
+const ETAG: HeaderName = HeaderName::from_static("etag");
+const X_OC_MTIME: HeaderName = HeaderName::from_static("x-oc-mtime");
+const X_NC_WEBDAV_AUTOMKCOL: HeaderName = HeaderName::from_static("x-nc-webdav-automkcol");
 const X_NC_OWNER_ID: HeaderName = HeaderName::from_static("x-nc-ownerid");
 const X_NC_PERMISSIONS: HeaderName = HeaderName::from_static("x-nc-permissions");
 const DAV_NS: &str = "DAV:";
@@ -70,6 +74,10 @@ impl NcDavService {
             return (StatusCode::FORBIDDEN, "Invalid WebDAV path").into_response();
         }
 
+        if request.method() == Method::HEAD {
+            return self.handle_head(request).await;
+        }
+
         match request.method().as_str() {
             "REPORT" => report::handle(self.state.clone(), request).await,
             "SEARCH" => search::handle(self.state.clone(), request).await,
@@ -90,6 +98,14 @@ impl NcDavService {
             .get("destination")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let upload_mtime = if method == Method::PUT {
+            match parse_x_oc_mtime(request.headers()) {
+                Ok(mtime) => mtime,
+                Err(response) => return response,
+            }
+        } else {
+            None
+        };
         let source_record = if matches!(method.as_str(), "DELETE" | "MOVE") {
             self.record_for_request_path(&request_path).await.ok()
         } else {
@@ -101,6 +117,11 @@ impl NcDavService {
                     error!(?err, "failed to validate Destination header");
                     return (StatusCode::BAD_REQUEST, "Invalid Destination header").into_response();
                 }
+            }
+        }
+        if method == Method::PUT && auto_mkcol_enabled(request.headers()) {
+            if let Err(response) = self.ensure_auto_mkcol_parents(&request_path).await {
+                return response;
             }
         }
         let requested_props = if method.as_str() == "PROPFIND" {
@@ -138,8 +159,15 @@ impl NcDavService {
             None => response,
         };
 
-        self.finalize_webdav_response(response, &method, &request_path, destination, source_record)
-            .await
+        self.finalize_webdav_response(
+            response,
+            &method,
+            &request_path,
+            destination,
+            source_record,
+            upload_mtime,
+        )
+        .await
     }
 
     async fn finalize_webdav_response(
@@ -149,6 +177,7 @@ impl NcDavService {
         request_path: &str,
         destination: Option<String>,
         source_record: Option<db::FileRecord>,
+        upload_mtime: Option<FileTime>,
     ) -> Response<Body> {
         if !response.status().is_success() {
             return response;
@@ -203,6 +232,16 @@ impl NcDavService {
             }
         };
 
+        let accepted_upload_mtime = upload_mtime.is_some();
+        if method == Method::PUT {
+            if let Some(mtime) = upload_mtime {
+                if let Err(err) = filetime::set_file_mtime(&abs_path, mtime) {
+                    error!(?err, path = %abs_path.display(), "failed to set uploaded file mtime");
+                    return metadata_error_response();
+                }
+            }
+        }
+
         let record = match db::ensure_file_record(
             &self.state.db,
             db::FileRecordInput {
@@ -253,10 +292,142 @@ impl NcDavService {
         }
 
         let headers = response.headers_mut();
+        let quoted_etag = format!("\"{}\"", record.etag);
+        insert_header(headers, ETAG, &quoted_etag);
         insert_header(headers, OC_ETAG, &record.etag);
         insert_header(headers, OC_FILEID, &record.oc_file_id);
         insert_header(headers, X_NC_OWNER_ID, &self.state.owner);
         insert_header(headers, X_NC_PERMISSIONS, "RGDNVW");
+        if method == Method::PUT && accepted_upload_mtime {
+            insert_header(headers, X_OC_MTIME, "accepted");
+        }
+        response
+    }
+
+    async fn ensure_auto_mkcol_parents(&self, request_path: &str) -> Result<(), Response<Body>> {
+        let target_rel =
+            parse_rel_path_for_owner(request_path, &self.state.owner).map_err(|err| {
+                warn!(?err, "failed to resolve auto-mkcol upload target");
+                (StatusCode::BAD_REQUEST, "Invalid upload path").into_response()
+            })?;
+        let Some(parent) = target_rel.parent() else {
+            return Ok(());
+        };
+        if parent.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        let normalized_parent = storage::normalize_rel_path(parent).map_err(|err| {
+            warn!(?err, "invalid auto-mkcol parent path");
+            (StatusCode::FORBIDDEN, "Invalid upload path").into_response()
+        })?;
+        let mut current = PathBuf::new();
+        for component in normalized_parent.components() {
+            current.push(component.as_os_str());
+            match storage::safe_existing_path(&self.state.files_root, &current) {
+                Ok(path) => {
+                    let metadata = std::fs::metadata(&path).map_err(|err| {
+                        error!(?err, path = %path.display(), "failed to inspect auto-mkcol parent");
+                        metadata_error_response()
+                    })?;
+                    if !metadata.is_dir() {
+                        return Err((StatusCode::CONFLICT, "Upload parent is not a directory")
+                            .into_response());
+                    }
+                }
+                Err(_) => {
+                    let path = storage::safe_create_path(&self.state.files_root, &current)
+                        .map_err(|err| {
+                            warn!(?err, rel_path = %current.display(), "invalid auto-mkcol parent");
+                            (StatusCode::CONFLICT, "Invalid upload parent").into_response()
+                        })?;
+                    std::fs::create_dir(&path).map_err(|err| {
+                        error!(?err, path = %path.display(), "failed to create auto-mkcol parent");
+                        metadata_error_response()
+                    })?;
+                    let record = db::ensure_file_record(
+                        &self.state.db,
+                        db::FileRecordInput {
+                            owner: &self.state.owner,
+                            rel_path: &current,
+                            abs_path: &path,
+                            instance_id: &self.state.instance_id,
+                            xattr_ns: &self.state.xattr_ns,
+                        },
+                    )
+                    .await
+                    .map_err(|err| {
+                        error!(?err, rel_path = %current.display(), "failed to persist auto-mkcol parent metadata");
+                        metadata_error_response()
+                    })?;
+                    self.record_change(record.id, &current, "create").await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_head(&self, request: Request<Body>) -> Response<Body> {
+        let original_uri = original_request_uri(&request);
+        let rel_path = match parse_rel_path_for_owner(original_uri.path(), &self.state.owner) {
+            Ok(path) => path,
+            Err(err) => {
+                warn!(
+                    ?err,
+                    path = original_uri.path(),
+                    "failed to resolve HEAD target"
+                );
+                return empty_response(StatusCode::FORBIDDEN);
+            }
+        };
+        let abs_path = match storage::safe_existing_path(&self.state.files_root, &rel_path) {
+            Ok(path) => path,
+            Err(_) => return empty_response(StatusCode::NOT_FOUND),
+        };
+        let metadata = match std::fs::metadata(&abs_path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return empty_response(StatusCode::NOT_FOUND);
+            }
+            Err(err) => {
+                error!(?err, path = %abs_path.display(), "failed to inspect HEAD target");
+                return metadata_error_response();
+            }
+        };
+        let record = match db::ensure_file_record(
+            &self.state.db,
+            db::FileRecordInput {
+                owner: &self.state.owner,
+                rel_path: &rel_path,
+                abs_path: &abs_path,
+                instance_id: &self.state.instance_id,
+                xattr_ns: &self.state.xattr_ns,
+            },
+        )
+        .await
+        {
+            Ok(record) => record,
+            Err(err) => {
+                error!(?err, "failed to persist HEAD target metadata");
+                return metadata_error_response();
+            }
+        };
+
+        let mut response = empty_response(StatusCode::OK);
+        let headers = response.headers_mut();
+        let quoted_etag = format!("\"{}\"", record.etag);
+        insert_header(headers, ETAG, &quoted_etag);
+        insert_header(headers, OC_ETAG, &record.etag);
+        insert_header(headers, OC_FILEID, &record.oc_file_id);
+        insert_header(headers, X_NC_OWNER_ID, &self.state.owner);
+        insert_header(headers, X_NC_PERMISSIONS, "RGDNVW");
+        let content_length = if metadata.is_file() {
+            metadata.len().to_string()
+        } else {
+            "0".to_owned()
+        };
+        insert_header(headers, CONTENT_LENGTH, &content_length);
         response
     }
 
@@ -625,6 +796,38 @@ pub(crate) fn parse_rel_path_for_owner(path_or_uri: &str, owner: &str) -> anyhow
     Ok(Path::new(dav_path.as_rel_ospath()).to_path_buf())
 }
 
+fn parse_x_oc_mtime(headers: &HeaderMap) -> Result<Option<FileTime>, Response<Body>> {
+    let Some(value) = headers.get(X_OC_MTIME) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|err| {
+        warn!(?err, "invalid X-OC-MTime header encoding");
+        (StatusCode::BAD_REQUEST, "Invalid X-OC-MTime header").into_response()
+    })?;
+    let seconds = value.trim().parse::<i64>().map_err(|err| {
+        warn!(?err, value, "invalid X-OC-MTime header value");
+        (StatusCode::BAD_REQUEST, "Invalid X-OC-MTime header").into_response()
+    })?;
+    if seconds < 0 {
+        warn!(seconds, "negative X-OC-MTime header value");
+        return Err((StatusCode::BAD_REQUEST, "Invalid X-OC-MTime header").into_response());
+    }
+    Ok(Some(FileTime::from_unix_time(seconds, 0)))
+}
+
+fn auto_mkcol_enabled(headers: &HeaderMap) -> bool {
+    headers
+        .get(X_NC_WEBDAV_AUTOMKCOL)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn has_path_prefix(path: &str, prefix: &str) -> bool {
     path == prefix
         || path
@@ -686,6 +889,13 @@ fn insert_header(headers: &mut axum::http::HeaderMap, name: HeaderName, value: &
     if let Ok(value) = HeaderValue::from_str(value) {
         headers.insert(name, value);
     }
+}
+
+fn empty_response(status: StatusCode) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .body(Body::empty())
+        .expect("empty response builder")
 }
 
 fn metadata_error_response() -> Response<Body> {

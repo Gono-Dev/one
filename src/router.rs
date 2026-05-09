@@ -46,6 +46,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let capabilities = get(nextcloud_proto::capabilities::handler);
     let mut app = Router::new()
         .route("/status.php", get(nextcloud_proto::status::handler))
+        .route("/204", get(no_content))
+        .route("/index.php/204", get(no_content))
         .route("/ocs/v2.php/cloud/capabilities", capabilities.clone())
         .route("/index.php/ocs/v2.php/cloud/capabilities", capabilities)
         .merge(nextcloud_proto::ocs::router(state.clone()))
@@ -73,6 +75,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .nest_service("/remote.php/webdav", dav_service.clone())
         .fallback_service(dav_service)
         .with_state(state)
+}
+
+async fn no_content() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 async fn depth_guard(request: Request<Body>, next: Next) -> Response {

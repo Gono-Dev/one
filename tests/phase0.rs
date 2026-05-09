@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use axum::{
     body::{to_bytes, Body},
@@ -142,6 +145,28 @@ async fn status_php_is_public_and_nextcloud_shaped() {
     let body = std::str::from_utf8(&body).unwrap();
     assert!(body.contains("\"installed\":true"));
     assert!(body.contains("\"productname\":\"Nextcloud\""));
+}
+
+#[tokio::test]
+async fn desktop_connectivity_probe_is_public_no_content() {
+    let (app, _temp, _password) = app_with_temp_root().await;
+    for uri in ["/204", "/index.php/204"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.is_empty(), "{uri}");
+    }
 }
 
 #[tokio::test]
@@ -290,6 +315,18 @@ async fn documented_ocs_v2_endpoints_are_covered_or_placeholdered() {
             "/ocs/v2.php/apps/dav/api/v1/direct",
             StatusCode::NOT_IMPLEMENTED,
             "not implemented yet",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/apps/terms_of_service/terms?format=json",
+            StatusCode::OK,
+            "\"data\":[]",
+        ),
+        (
+            Method::GET,
+            "/ocs/v2.php/core/navigation/apps?absolute=true&format=json",
+            StatusCode::OK,
+            "\"data\":[]",
         ),
         (
             Method::GET,
@@ -1221,6 +1258,30 @@ async fn standard_nextcloud_files_webdav_path_shares_storage_with_remote_php_dav
 }
 
 #[tokio::test]
+async fn head_on_nextcloud_files_path_returns_metadata_without_body() {
+    let (app, _temp, password) = app_with_temp_root().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/remote.php/dav/files/gono/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key("oc-etag"));
+    assert!(response.headers().contains_key("oc-fileid"));
+    assert_eq!(response.headers().get(header::CONTENT_LENGTH).unwrap(), "0");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
 async fn propfind_depth_0_injects_nextcloud_props() {
     let (app, _temp, password) = app_with_temp_root().await;
     let response = app
@@ -1481,6 +1542,16 @@ async fn put_returns_nextcloud_metadata_headers() {
     assert_eq!(response.status(), StatusCode::CREATED);
     assert!(response.headers().contains_key("oc-etag"));
     assert!(response.headers().contains_key("oc-fileid"));
+    let oc_etag = response.headers().get("oc-etag").unwrap().to_str().unwrap();
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("\"{oc_etag}\"")
+    );
     assert_eq!(
         response.headers().get("x-nc-ownerid").unwrap(),
         BOOTSTRAP_USER
@@ -1489,6 +1560,102 @@ async fn put_returns_nextcloud_metadata_headers() {
         response.headers().get("x-nc-permissions").unwrap(),
         "RGDNVW"
     );
+}
+
+#[tokio::test]
+async fn put_accepts_nextcloud_mtime_header() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/mtime-upload.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("X-OC-MTime", "1700000000")
+                .body(Body::from("mtime"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers().get("x-oc-mtime").unwrap(), "accepted");
+    let oc_etag = response.headers().get("oc-etag").unwrap().to_str().unwrap();
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("\"{oc_etag}\"")
+    );
+
+    let modified = std::fs::metadata(state.files_root.join("mtime-upload.txt"))
+        .expect("uploaded metadata")
+        .modified()
+        .expect("uploaded modified time");
+    assert_eq!(
+        modified
+            .duration_since(UNIX_EPOCH)
+            .expect("mtime after epoch")
+            .as_secs(),
+        1_700_000_000
+    );
+}
+
+#[tokio::test]
+async fn put_with_nextcloud_auto_mkcol_creates_missing_parents() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/auto/a/b/file.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("X-NC-WebDAV-AutoMkcol", "1")
+                .body(Body::from("auto parent"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(state.files_root.join("auto/a/b").is_dir());
+
+    let get = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/remote.php/dav/auto/a/b/file.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"auto parent");
+}
+
+#[tokio::test]
+async fn put_without_auto_mkcol_still_rejects_missing_parents() {
+    let (app, _temp, password) = app_with_temp_root().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/missing/parent/file.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("missing parent"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
