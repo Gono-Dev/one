@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gono_one::{
+use gono_cloud::{
     consistency::{self, ConsistencyIssueKind, RepairActionKind, RepairMode},
     db, AppState, Config,
 };
@@ -11,7 +11,7 @@ fn test_config(temp: &TempDir) -> Config {
     config.storage.data_dir = temp.path().join("data").to_string_lossy().into_owned();
     config.db.path = temp
         .path()
-        .join("gono-one.db")
+        .join("gono-cloud.db")
         .to_string_lossy()
         .into_owned();
     config.server.cert_file = temp.path().join("cert.pem").to_string_lossy().into_owned();

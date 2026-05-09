@@ -55,13 +55,13 @@ jobs:
 
       - name: Package
         env:
-          GONO_ONE_RELEASE_TARGET: ${{ matrix.release_target }}
+          GONO_CLOUD_RELEASE_TARGET: ${{ matrix.release_target }}
         run: scripts/package-release.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: gono-one-${{ matrix.release_target }}
+          name: gono-cloud-${{ matrix.release_target }}
           path: dist/*
 
   github-release:
@@ -76,7 +76,7 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: gono-one-*
+          pattern: gono-cloud-*
           path: release-assets
           merge-multiple: true
 
@@ -91,7 +91,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           notes_file="$(mktemp)"
           cat >"${notes_file}" <<EOF
-          Gono One ${tag}
+          Gono Cloud ${tag}
 
           Install:
 
@@ -111,11 +111,11 @@ jobs:
           printf '%s\n' "${assets[@]}" | sort
 
           if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release edit "${tag}" --title "Gono One ${tag}" --notes-file "${notes_file}"
+            gh release edit "${tag}" --title "Gono Cloud ${tag}" --notes-file "${notes_file}"
             gh release upload "${tag}" "${assets[@]}" --clobber
           else
             gh release create "${tag}" "${assets[@]}" \
-              --title "Gono One ${tag}" \
+              --title "Gono Cloud ${tag}" \
               --notes-file "${notes_file}" \
               --verify-tag
           fi

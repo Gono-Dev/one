@@ -91,7 +91,7 @@ impl ConsistencyReport {
     pub fn render_text(&self) -> String {
         let mut output = format!(
             concat!(
-                "gono-one consistency check\n",
+                "gono-cloud consistency check\n",
                 "file_records: {}\n",
                 "filesystem_entries: {}\n",
                 "dead_props: {}\n",
@@ -121,7 +121,7 @@ impl RepairReport {
     pub fn render_text(&self) -> String {
         let mut output = format!(
             concat!(
-                "gono-one consistency repair ({})\n",
+                "gono-cloud consistency repair ({})\n",
                 "before_issues: {}\n",
                 "actions: {}\n",
             ),

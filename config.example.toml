@@ -9,7 +9,7 @@ data_dir = "data"
 xattr_ns = "user.nc"
 
 [db]
-path = "data/gono-one.db"
+path = "data/gono-cloud.db"
 max_connections = 5
 
 [auth]

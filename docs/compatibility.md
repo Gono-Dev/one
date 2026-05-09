@@ -10,7 +10,7 @@ Run:
 scripts/compat-smoke.sh
 ```
 
-The script creates a temporary config and data directory, starts `gono-one` over local plain HTTP with `NC_DAV_INSECURE_HTTP=1`, reads the one-time `gono` app password from startup logs, and checks:
+The script creates a temporary config and data directory, starts `gono-cloud` over local plain HTTP with `NC_DAV_INSECURE_HTTP=1`, reads the one-time `gono` app password from startup logs, and checks:
 
 - `/status.php`
 - capabilities
@@ -57,7 +57,7 @@ Current compatibility status with litmus 0.17:
 - `basic`, `copymove`, `props`, `locks`, and `http` pass.
 - Dead property removals return explicit `404 Not Found` propstat entries.
 - Persisted lock discovery preserves the client-supplied owner value.
-- The only remaining warning is `delete_fragment`: neon/litmus and the HTTP stack normalize `#fragment` before the request reaches the WebDAV service, so the handler cannot reliably distinguish `/frag/` from `/frag/#ment`. If a lower layer exposes `#` in the request target, `gono-one` rejects it before dispatch.
+- The only remaining warning is `delete_fragment`: neon/litmus and the HTTP stack normalize `#fragment` before the request reaches the WebDAV service, so the handler cannot reliably distinguish `/frag/` from `/frag/#ment`. If a lower layer exposes `#` in the request target, `gono-cloud` rejects it before dispatch.
 
 ## Nextcloud Desktop Smoke
 

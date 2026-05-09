@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="gono-one"
-INSTALL_URL="${GONO_ONE_INSTALL_URL:-https://run.gono.cloud}"
-INSTALL_SOURCE="${GONO_ONE_INSTALL_SOURCE:-auto}"
-LOCAL_BUILD="${GONO_ONE_LOCAL_BUILD:-auto}"
-LOCAL_BUILD_PROFILE="${GONO_ONE_BUILD_PROFILE:-release}"
-LOCAL_BIN="${GONO_ONE_BIN:-${GONO_ONE_LOCAL_BIN:-}}"
-COMMAND="${GONO_ONE_COMMAND:-install}"
-ASSUME_YES="${GONO_ONE_YES:-0}"
-PURGE="${GONO_ONE_PURGE:-0}"
+APP_NAME="gono-cloud"
+INSTALL_URL="${GONO_CLOUD_INSTALL_URL:-https://run.gono.cloud}"
+INSTALL_SOURCE="${GONO_CLOUD_INSTALL_SOURCE:-auto}"
+LOCAL_BUILD="${GONO_CLOUD_LOCAL_BUILD:-auto}"
+LOCAL_BUILD_PROFILE="${GONO_CLOUD_BUILD_PROFILE:-release}"
+LOCAL_BIN="${GONO_CLOUD_BIN:-${GONO_CLOUD_LOCAL_BIN:-}}"
+COMMAND="${GONO_CLOUD_COMMAND:-install}"
+ASSUME_YES="${GONO_CLOUD_YES:-0}"
+PURGE="${GONO_CLOUD_PURGE:-0}"
 
 SCRIPT_PATH=""
 SCRIPT_DIR=""
@@ -33,37 +33,37 @@ PLIST_PATH=""
 
 RUN_USER=""
 RUN_GROUP=""
-DOMAIN="${GONO_ONE_DOMAIN:-gono.cloud}"
-BASE_URL="${GONO_ONE_BASE_URL:-https://${DOMAIN}}"
+DOMAIN="${GONO_CLOUD_DOMAIN:-gono.cloud}"
+BASE_URL="${GONO_CLOUD_BASE_URL:-https://${DOMAIN}}"
 BASE_URL_EXPLICIT=0
-if [[ -n "${GONO_ONE_BASE_URL+x}" ]]; then
+if [[ -n "${GONO_CLOUD_BASE_URL+x}" ]]; then
   BASE_URL_EXPLICIT=1
 fi
-BIND="${GONO_ONE_BIND:-127.0.0.1:16102}"
-XATTR_NS="${GONO_ONE_XATTR_NS:-user.nc}"
-AUTH_REALM="${GONO_ONE_AUTH_REALM:-Nextcloud}"
-MAX_CONNECTIONS="${GONO_ONE_DB_MAX_CONNECTIONS:-5}"
-LOG_FORMAT="${GONO_ONE_LOG_FORMAT:-text}"
+BIND="${GONO_CLOUD_BIND:-127.0.0.1:16102}"
+XATTR_NS="${GONO_CLOUD_XATTR_NS:-user.nc}"
+AUTH_REALM="${GONO_CLOUD_AUTH_REALM:-Nextcloud}"
+MAX_CONNECTIONS="${GONO_CLOUD_DB_MAX_CONNECTIONS:-5}"
+LOG_FORMAT="${GONO_CLOUD_LOG_FORMAT:-text}"
 RUST_LOG_VALUE="${RUST_LOG:-info}"
-INSECURE_HTTP="${GONO_ONE_INSECURE_HTTP:-1}"
-RELEASE_BASE="${GONO_ONE_RELEASE_BASE:-https://run.gono.cloud/releases}"
-VERSION="${GONO_ONE_VERSION:-latest}"
-BIN_URL="${GONO_ONE_BIN_URL:-}"
-HEALTH_URL="${GONO_ONE_HEALTH_URL:-}"
+INSECURE_HTTP="${GONO_CLOUD_INSECURE_HTTP:-1}"
+RELEASE_BASE="${GONO_CLOUD_RELEASE_BASE:-https://run.gono.cloud/releases}"
+VERSION="${GONO_CLOUD_VERSION:-latest}"
+BIN_URL="${GONO_CLOUD_BIN_URL:-}"
+HEALTH_URL="${GONO_CLOUD_HEALTH_URL:-}"
 
 LOG_STDOUT_OFFSET=0
 LOG_STDERR_OFFSET=0
 
 log() {
-  printf '[gono-one] %s\n' "$*"
+  printf '[gono-cloud] %s\n' "$*"
 }
 
 warn() {
-  printf '[gono-one] warning: %s\n' "$*" >&2
+  printf '[gono-cloud] warning: %s\n' "$*" >&2
 }
 
 die() {
-  printf '[gono-one] error: %s\n' "$*" >&2
+  printf '[gono-cloud] error: %s\n' "$*" >&2
   exit 1
 }
 
@@ -83,7 +83,7 @@ usage_name() {
 
 show_usage() {
   cat <<EOF
-Gono One installer
+Gono Cloud installer
 
 Usage:
   $(usage_name) [install] [options]
@@ -94,7 +94,7 @@ Usage:
   bash <(curl -sL ${INSTALL_URL}) [install] [options]
 
 Commands:
-  install                   Install or upgrade Gono One (default)
+  install                   Install or upgrade Gono Cloud (default)
   status                    Show service status
   logs, show_log            Follow service logs
   restart                   Restart service and run health check
@@ -105,7 +105,7 @@ Source options:
   --local                    Use local repository/binary source
   --release                  Download a release artifact
   --install-source VALUE     auto, local, or release (default: ${INSTALL_SOURCE})
-  --bin PATH                 Install this local gono-one binary
+  --bin PATH                 Install this local gono-cloud binary
   --bin-url URL              Download this exact binary/archive URL
   --version VERSION          Release version or latest (default: ${VERSION})
   --release-base URL         Release base URL (default: ${RELEASE_BASE})
@@ -153,14 +153,14 @@ Examples:
   scripts/install.sh restart
   scripts/install.sh uninstall
   scripts/install.sh uninstall --purge
-  scripts/install.sh --bin target/release/gono-one
+  scripts/install.sh --bin target/release/gono-cloud
   scripts/install.sh --release --version latest
   scripts/install.sh --domain files.example.com
   bash <(curl -sL ${INSTALL_URL}) --base-url https://files.example.com
 
 Environment variables are still supported. For example:
-  GONO_ONE_BIN=/path/to/gono-one scripts/install.sh
-  GONO_ONE_INSTALL_SOURCE=release scripts/install.sh
+  GONO_CLOUD_BIN=/path/to/gono-cloud scripts/install.sh
+  GONO_CLOUD_INSTALL_SOURCE=release scripts/install.sh
 EOF
 }
 
@@ -179,107 +179,107 @@ parse_args() {
         ;;
       install)
         COMMAND="install"
-        export GONO_ONE_COMMAND="${COMMAND}"
+        export GONO_CLOUD_COMMAND="${COMMAND}"
         shift
         ;;
       status|show_status)
         COMMAND="status"
-        export GONO_ONE_COMMAND="${COMMAND}"
+        export GONO_CLOUD_COMMAND="${COMMAND}"
         shift
         ;;
       logs|log|show_log)
         COMMAND="logs"
-        export GONO_ONE_COMMAND="${COMMAND}"
+        export GONO_CLOUD_COMMAND="${COMMAND}"
         shift
         ;;
       restart|restart_and_update)
         COMMAND="restart"
-        export GONO_ONE_COMMAND="${COMMAND}"
+        export GONO_CLOUD_COMMAND="${COMMAND}"
         shift
         ;;
       uninstall|remove)
         COMMAND="uninstall"
-        export GONO_ONE_COMMAND="${COMMAND}"
+        export GONO_CLOUD_COMMAND="${COMMAND}"
         shift
         ;;
       --local)
         INSTALL_SOURCE="local"
-        export GONO_ONE_INSTALL_SOURCE="${INSTALL_SOURCE}"
+        export GONO_CLOUD_INSTALL_SOURCE="${INSTALL_SOURCE}"
         shift
         ;;
       --release)
         INSTALL_SOURCE="release"
-        export GONO_ONE_INSTALL_SOURCE="${INSTALL_SOURCE}"
+        export GONO_CLOUD_INSTALL_SOURCE="${INSTALL_SOURCE}"
         shift
         ;;
       --install-source)
         need_arg "$1" "${2:-}"
         INSTALL_SOURCE="$2"
-        export GONO_ONE_INSTALL_SOURCE="${INSTALL_SOURCE}"
+        export GONO_CLOUD_INSTALL_SOURCE="${INSTALL_SOURCE}"
         shift 2
         ;;
       --bin)
         need_arg "$1" "${2:-}"
         LOCAL_BIN="$2"
-        export GONO_ONE_BIN="${LOCAL_BIN}"
+        export GONO_CLOUD_BIN="${LOCAL_BIN}"
         shift 2
         ;;
       --bin-url)
         need_arg "$1" "${2:-}"
         BIN_URL="$2"
-        export GONO_ONE_BIN_URL="${BIN_URL}"
+        export GONO_CLOUD_BIN_URL="${BIN_URL}"
         shift 2
         ;;
       --version)
         need_arg "$1" "${2:-}"
         VERSION="$2"
-        export GONO_ONE_VERSION="${VERSION}"
+        export GONO_CLOUD_VERSION="${VERSION}"
         shift 2
         ;;
       --release-base)
         need_arg "$1" "${2:-}"
         RELEASE_BASE="$2"
-        export GONO_ONE_RELEASE_BASE="${RELEASE_BASE}"
+        export GONO_CLOUD_RELEASE_BASE="${RELEASE_BASE}"
         shift 2
         ;;
       --sha256)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_SHA256="$2"
+        export GONO_CLOUD_SHA256="$2"
         shift 2
         ;;
       --build-profile)
         need_arg "$1" "${2:-}"
         LOCAL_BUILD_PROFILE="$2"
-        export GONO_ONE_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
+        export GONO_CLOUD_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
         shift 2
         ;;
       --debug)
         LOCAL_BUILD_PROFILE="debug"
-        export GONO_ONE_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
+        export GONO_CLOUD_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
         shift
         ;;
       --local-build)
         LOCAL_BUILD="1"
-        export GONO_ONE_LOCAL_BUILD="${LOCAL_BUILD}"
+        export GONO_CLOUD_LOCAL_BUILD="${LOCAL_BUILD}"
         shift
         ;;
       --no-local-build)
         LOCAL_BUILD="0"
-        export GONO_ONE_LOCAL_BUILD="${LOCAL_BUILD}"
+        export GONO_CLOUD_LOCAL_BUILD="${LOCAL_BUILD}"
         shift
         ;;
       --arch)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_ARCH="$2"
+        export GONO_CLOUD_ARCH="$2"
         shift 2
         ;;
       --domain)
         need_arg "$1" "${2:-}"
         DOMAIN="$2"
-        export GONO_ONE_DOMAIN="${DOMAIN}"
+        export GONO_CLOUD_DOMAIN="${DOMAIN}"
         if [[ "${BASE_URL_EXPLICIT}" == "0" ]]; then
           BASE_URL="https://${DOMAIN}"
-          export GONO_ONE_BASE_URL="${BASE_URL}"
+          export GONO_CLOUD_BASE_URL="${BASE_URL}"
         fi
         shift 2
         ;;
@@ -287,91 +287,91 @@ parse_args() {
         need_arg "$1" "${2:-}"
         BASE_URL="$2"
         BASE_URL_EXPLICIT=1
-        export GONO_ONE_BASE_URL="${BASE_URL}"
+        export GONO_CLOUD_BASE_URL="${BASE_URL}"
         shift 2
         ;;
       --bind)
         need_arg "$1" "${2:-}"
         BIND="$2"
-        export GONO_ONE_BIND="${BIND}"
+        export GONO_CLOUD_BIND="${BIND}"
         shift 2
         ;;
       --install-dir)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_INSTALL_DIR="$2"
+        export GONO_CLOUD_INSTALL_DIR="$2"
         shift 2
         ;;
       --config)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_CONFIG="$2"
+        export GONO_CLOUD_CONFIG="$2"
         shift 2
         ;;
       --config-dir)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_CONFIG_DIR="$2"
+        export GONO_CLOUD_CONFIG_DIR="$2"
         shift 2
         ;;
       --state-dir)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_STATE_DIR="$2"
+        export GONO_CLOUD_STATE_DIR="$2"
         shift 2
         ;;
       --data-dir)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_DATA_DIR="$2"
+        export GONO_CLOUD_DATA_DIR="$2"
         shift 2
         ;;
       --db-path)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_DB_PATH="$2"
+        export GONO_CLOUD_DB_PATH="$2"
         shift 2
         ;;
       --log-dir)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_LOG_DIR="$2"
+        export GONO_CLOUD_LOG_DIR="$2"
         shift 2
         ;;
       --tls-dir)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_TLS_DIR="$2"
+        export GONO_CLOUD_TLS_DIR="$2"
         shift 2
         ;;
       --service-name)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_SERVICE_NAME="$2"
+        export GONO_CLOUD_SERVICE_NAME="$2"
         shift 2
         ;;
       --user)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_USER="$2"
+        export GONO_CLOUD_USER="$2"
         shift 2
         ;;
       --group)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_GROUP="$2"
+        export GONO_CLOUD_GROUP="$2"
         shift 2
         ;;
       --health-url)
         need_arg "$1" "${2:-}"
         HEALTH_URL="$2"
-        export GONO_ONE_HEALTH_URL="${HEALTH_URL}"
+        export GONO_CLOUD_HEALTH_URL="${HEALTH_URL}"
         shift 2
         ;;
       --insecure-http)
         need_arg "$1" "${2:-}"
         INSECURE_HTTP="$2"
-        export GONO_ONE_INSECURE_HTTP="${INSECURE_HTTP}"
+        export GONO_CLOUD_INSECURE_HTTP="${INSECURE_HTTP}"
         shift 2
         ;;
       --no-insecure-http)
         INSECURE_HTTP="0"
-        export GONO_ONE_INSECURE_HTTP="${INSECURE_HTTP}"
+        export GONO_CLOUD_INSECURE_HTTP="${INSECURE_HTTP}"
         shift
         ;;
       --log-format)
         need_arg "$1" "${2:-}"
         LOG_FORMAT="$2"
-        export GONO_ONE_LOG_FORMAT="${LOG_FORMAT}"
+        export GONO_CLOUD_LOG_FORMAT="${LOG_FORMAT}"
         shift 2
         ;;
       --rust-log)
@@ -383,34 +383,34 @@ parse_args() {
       --xattr-ns)
         need_arg "$1" "${2:-}"
         XATTR_NS="$2"
-        export GONO_ONE_XATTR_NS="${XATTR_NS}"
+        export GONO_CLOUD_XATTR_NS="${XATTR_NS}"
         shift 2
         ;;
       --auth-realm)
         need_arg "$1" "${2:-}"
         AUTH_REALM="$2"
-        export GONO_ONE_AUTH_REALM="${AUTH_REALM}"
+        export GONO_CLOUD_AUTH_REALM="${AUTH_REALM}"
         shift 2
         ;;
       --max-connections)
         need_arg "$1" "${2:-}"
         MAX_CONNECTIONS="$2"
-        export GONO_ONE_DB_MAX_CONNECTIONS="${MAX_CONNECTIONS}"
+        export GONO_CLOUD_DB_MAX_CONNECTIONS="${MAX_CONNECTIONS}"
         shift 2
         ;;
       --plist-path)
         need_arg "$1" "${2:-}"
-        export GONO_ONE_PLIST_PATH="$2"
+        export GONO_CLOUD_PLIST_PATH="$2"
         shift 2
         ;;
       -y|--yes)
         ASSUME_YES="1"
-        export GONO_ONE_YES="${ASSUME_YES}"
+        export GONO_CLOUD_YES="${ASSUME_YES}"
         shift
         ;;
       --purge)
         PURGE="1"
-        export GONO_ONE_PURGE="${PURGE}"
+        export GONO_CLOUD_PURGE="${PURGE}"
         shift
         ;;
       --)
@@ -500,23 +500,23 @@ set_platform_defaults() {
   case "${PLATFORM}" in
     linux)
       PACKAGE_MANAGER="$(detect_linux_package_manager)"
-      SERVICE_NAME="${GONO_ONE_SERVICE_NAME:-gono-one}"
-      INSTALL_DIR="${GONO_ONE_INSTALL_DIR:-/opt/gono-one}"
-      CONFIG_DIR="${GONO_ONE_CONFIG_DIR:-/etc/gono-one}"
-      STATE_DIR="${GONO_ONE_STATE_DIR:-/var/lib/gono-one}"
-      LOG_DIR="${GONO_ONE_LOG_DIR:-/var/log/gono-one}"
-      RUN_USER="${GONO_ONE_USER:-gono-one}"
-      RUN_GROUP="${GONO_ONE_GROUP:-gono-one}"
+      SERVICE_NAME="${GONO_CLOUD_SERVICE_NAME:-gono-cloud}"
+      INSTALL_DIR="${GONO_CLOUD_INSTALL_DIR:-/opt/gono-cloud}"
+      CONFIG_DIR="${GONO_CLOUD_CONFIG_DIR:-/etc/gono-cloud}"
+      STATE_DIR="${GONO_CLOUD_STATE_DIR:-/var/lib/gono-cloud}"
+      LOG_DIR="${GONO_CLOUD_LOG_DIR:-/var/log/gono-cloud}"
+      RUN_USER="${GONO_CLOUD_USER:-gono-cloud}"
+      RUN_GROUP="${GONO_CLOUD_GROUP:-gono-cloud}"
       ;;
     macos)
       PACKAGE_MANAGER="none"
-      SERVICE_NAME="${GONO_ONE_SERVICE_NAME:-one.gono.gono-one}"
-      INSTALL_DIR="${GONO_ONE_INSTALL_DIR:-/opt/gono-one}"
-      CONFIG_DIR="${GONO_ONE_CONFIG_DIR:-/Library/Application Support/Gono One}"
-      STATE_DIR="${GONO_ONE_STATE_DIR:-/Library/Application Support/Gono One}"
-      LOG_DIR="${GONO_ONE_LOG_DIR:-/Library/Logs/Gono One}"
-      RUN_USER="${GONO_ONE_USER:-root}"
-      RUN_GROUP="${GONO_ONE_GROUP:-wheel}"
+      SERVICE_NAME="${GONO_CLOUD_SERVICE_NAME:-cloud.gono.gono-cloud}"
+      INSTALL_DIR="${GONO_CLOUD_INSTALL_DIR:-/opt/gono-cloud}"
+      CONFIG_DIR="${GONO_CLOUD_CONFIG_DIR:-/Library/Application Support/Gono Cloud}"
+      STATE_DIR="${GONO_CLOUD_STATE_DIR:-/Library/Application Support/Gono Cloud}"
+      LOG_DIR="${GONO_CLOUD_LOG_DIR:-/Library/Logs/Gono Cloud}"
+      RUN_USER="${GONO_CLOUD_USER:-root}"
+      RUN_GROUP="${GONO_CLOUD_GROUP:-wheel}"
       ;;
     *)
       die "unsupported platform: ${PLATFORM}"
@@ -524,12 +524,12 @@ set_platform_defaults() {
   esac
 
   BIN_DIR="${INSTALL_DIR}/bin"
-  BIN_PATH="${GONO_ONE_BIN_PATH:-${BIN_DIR}/${APP_NAME}}"
-  CONFIG_FILE="${GONO_ONE_CONFIG:-${CONFIG_DIR}/config.toml}"
-  DATA_DIR="${GONO_ONE_DATA_DIR:-${STATE_DIR}/data}"
-  DB_PATH="${GONO_ONE_DB_PATH:-${STATE_DIR}/gono-one.db}"
-  TLS_DIR="${GONO_ONE_TLS_DIR:-${CONFIG_DIR}/tls}"
-  PLIST_PATH="${GONO_ONE_PLIST_PATH:-/Library/LaunchDaemons/${SERVICE_NAME}.plist}"
+  BIN_PATH="${GONO_CLOUD_BIN_PATH:-${BIN_DIR}/${APP_NAME}}"
+  CONFIG_FILE="${GONO_CLOUD_CONFIG:-${CONFIG_DIR}/config.toml}"
+  DATA_DIR="${GONO_CLOUD_DATA_DIR:-${STATE_DIR}/data}"
+  DB_PATH="${GONO_CLOUD_DB_PATH:-${STATE_DIR}/gono-cloud.db}"
+  TLS_DIR="${GONO_CLOUD_TLS_DIR:-${CONFIG_DIR}/tls}"
+  PLIST_PATH="${GONO_CLOUD_PLIST_PATH:-/Library/LaunchDaemons/${SERVICE_NAME}.plist}"
 }
 
 require_root() {
@@ -597,7 +597,7 @@ require_platform_commands() {
 
 target_arch() {
   local machine
-  machine="${GONO_ONE_ARCH:-$(uname -m)}"
+  machine="${GONO_CLOUD_ARCH:-$(uname -m)}"
 
   case "${machine}" in
     x86_64|amd64)
@@ -657,7 +657,7 @@ use_local_source() {
   case "${INSTALL_SOURCE}" in
     local)
       [[ -n "${LOCAL_BIN}" || -n "${REPO_ROOT}" ]] \
-        || die "GONO_ONE_INSTALL_SOURCE=local requires a local repo or GONO_ONE_BIN"
+        || die "GONO_CLOUD_INSTALL_SOURCE=local requires a local repo or GONO_CLOUD_BIN"
       return 0
       ;;
     release)
@@ -667,7 +667,7 @@ use_local_source() {
       [[ -z "${BIN_URL}" && -n "${REPO_ROOT}" ]]
       ;;
     *)
-      die "unsupported GONO_ONE_INSTALL_SOURCE='${INSTALL_SOURCE}'. Use auto, local, or release."
+      die "unsupported GONO_CLOUD_INSTALL_SOURCE='${INSTALL_SOURCE}'. Use auto, local, or release."
       ;;
   esac
 }
@@ -697,7 +697,7 @@ local_binary_candidate() {
       profile_dir="debug"
       ;;
     *)
-      die "unsupported GONO_ONE_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
+      die "unsupported GONO_CLOUD_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
       ;;
   esac
 
@@ -716,7 +716,7 @@ should_build_local_binary() {
       command -v cargo >/dev/null 2>&1
       ;;
     *)
-      die "unsupported GONO_ONE_LOCAL_BUILD='${LOCAL_BUILD}'. Use auto, 1, or 0."
+      die "unsupported GONO_CLOUD_LOCAL_BUILD='${LOCAL_BUILD}'. Use auto, 1, or 0."
       ;;
   esac
 }
@@ -735,7 +735,7 @@ build_local_binary() {
       cargo build --locked --manifest-path "${REPO_ROOT}/Cargo.toml"
       ;;
     *)
-      die "unsupported GONO_ONE_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
+      die "unsupported GONO_CLOUD_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
       ;;
   esac
 }
@@ -763,7 +763,7 @@ resolve_local_binary() {
     fi
   fi
 
-  [[ -x "${candidate}" ]] || die "local binary is not executable: ${candidate}. Set GONO_ONE_BIN or allow GONO_ONE_LOCAL_BUILD=auto."
+  [[ -x "${candidate}" ]] || die "local binary is not executable: ${candidate}. Set GONO_CLOUD_BIN or allow GONO_CLOUD_LOCAL_BUILD=auto."
   printf '%s\n' "${candidate}"
 }
 
@@ -786,9 +786,9 @@ prepare_local_binary_before_sudo() {
   fi
 
   [[ -x "${LOCAL_BIN}" ]] || die "local binary is not executable: ${LOCAL_BIN}"
-  export GONO_ONE_BIN="${LOCAL_BIN}"
-  export GONO_ONE_INSTALL_SOURCE="local"
-  export GONO_ONE_LOCAL_BUILD="0"
+  export GONO_CLOUD_BIN="${LOCAL_BIN}"
+  export GONO_CLOUD_INSTALL_SOURCE="local"
+  export GONO_CLOUD_LOCAL_BUILD="0"
   INSTALL_SOURCE="local"
   LOCAL_BUILD="0"
 }
@@ -804,7 +804,7 @@ verify_sha256() {
     actual="$(shasum -a 256 "${file}" | while read -r hash _; do echo "${hash}"; done)"
     [[ "${actual}" == "${expected}" ]] || die "sha256 mismatch: expected ${expected}, got ${actual}"
   else
-    die "GONO_ONE_SHA256 was set but neither sha256sum nor shasum is available"
+    die "GONO_CLOUD_SHA256 was set but neither sha256sum nor shasum is available"
   fi
 }
 
@@ -816,11 +816,11 @@ download_binary() {
 
   log "downloading ${url}"
   if ! curl -fL --retry 3 --retry-delay 2 -o "${artifact}" "${url}"; then
-    die "failed to download release artifact. Publish it under ${RELEASE_BASE} or set GONO_ONE_BIN_URL"
+    die "failed to download release artifact. Publish it under ${RELEASE_BASE} or set GONO_CLOUD_BIN_URL"
   fi
 
-  if [[ -n "${GONO_ONE_SHA256:-}" ]]; then
-    verify_sha256 "${GONO_ONE_SHA256}" "${artifact}"
+  if [[ -n "${GONO_CLOUD_SHA256:-}" ]]; then
+    verify_sha256 "${GONO_CLOUD_SHA256}" "${artifact}"
   fi
 
   mkdir -p "${extract_dir}"
@@ -880,7 +880,7 @@ ensure_linux_user() {
 
 ensure_macos_user() {
   if ! id -u "${RUN_USER}" >/dev/null 2>&1; then
-    die "macOS run user '${RUN_USER}' does not exist. Use GONO_ONE_USER=root or create the user first."
+    die "macOS run user '${RUN_USER}' does not exist. Use GONO_CLOUD_USER=root or create the user first."
   fi
 }
 
@@ -950,7 +950,7 @@ write_systemd_unit() {
   log "writing ${unit}"
   cat >"${unit}" <<EOF
 [Unit]
-Description=Gono One Nextcloud-compatible WebDAV service
+Description=Gono Cloud Nextcloud-compatible WebDAV service
 After=network-online.target
 Wants=network-online.target
 

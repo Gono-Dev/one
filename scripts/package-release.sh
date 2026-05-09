@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="gono-one"
+APP_NAME="gono-cloud"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${GONO_ONE_RELEASE_DIR:-${ROOT}/dist}"
-SKIP_BUILD="${GONO_ONE_SKIP_BUILD:-0}"
-CARGO_TARGET="${GONO_ONE_CARGO_TARGET:-}"
-PACKAGE_VERSION="${GONO_ONE_PACKAGE_VERSION:-}"
-RELEASE_TARGET="${GONO_ONE_RELEASE_TARGET:-}"
-BIN_PATH="${GONO_ONE_BIN:-}"
+OUT_DIR="${GONO_CLOUD_RELEASE_DIR:-${ROOT}/dist}"
+SKIP_BUILD="${GONO_CLOUD_SKIP_BUILD:-0}"
+CARGO_TARGET="${GONO_CLOUD_CARGO_TARGET:-}"
+PACKAGE_VERSION="${GONO_CLOUD_PACKAGE_VERSION:-}"
+RELEASE_TARGET="${GONO_CLOUD_RELEASE_TARGET:-}"
+BIN_PATH="${GONO_CLOUD_BIN:-}"
 
 log() {
-  printf '[gono-one-release] %s\n' "$*"
+  printf '[gono-cloud-release] %s\n' "$*"
 }
 
 die() {
-  printf '[gono-one-release] error: %s\n' "$*" >&2
+  printf '[gono-cloud-release] error: %s\n' "$*" >&2
   exit 1
 }
 
@@ -43,7 +43,7 @@ target_os() {
 
 target_arch() {
   local machine
-  machine="${GONO_ONE_ARCH:-$(uname -m)}"
+  machine="${GONO_CLOUD_ARCH:-$(uname -m)}"
 
   case "${machine}" in
     x86_64|amd64)

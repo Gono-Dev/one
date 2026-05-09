@@ -9,7 +9,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
-use gono_one::{
+use gono_cloud::{
     build_router, dav_handler::chunked_upload, db, db::BOOTSTRAP_USER, AppState, Config,
 };
 use tempfile::TempDir;
@@ -118,7 +118,7 @@ fn test_config(temp: &TempDir) -> Config {
     config.storage.data_dir = temp.path().join("data").to_string_lossy().into_owned();
     config.db.path = temp
         .path()
-        .join("gono-one.db")
+        .join("gono-cloud.db")
         .to_string_lossy()
         .into_owned();
     config.server.cert_file = temp.path().join("cert.pem").to_string_lossy().into_owned();
@@ -672,15 +672,15 @@ async fn metrics_require_basic_auth_and_are_prometheus_shaped() {
         .starts_with("text/plain"));
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
-    assert!(body.contains("# TYPE gono_one_sync_token gauge"));
-    assert!(body.contains("gono_one_file_records_total 1\n"));
-    assert!(body.contains("gono_one_change_log_entries_total 1\n"));
-    assert!(body.contains("gono_one_upload_sessions_total 0\n"));
-    assert!(body.contains("gono_one_sync_token 1\n"));
-    assert!(body.contains("gono_one_change_log_floor_token 0\n"));
-    assert!(body.contains("gono_one_storage_files_available_bytes "));
-    assert!(body.contains("gono_one_notify_push_active_connections 0\n"));
-    assert!(body.contains("gono_one_notify_push_events_total 1\n"));
+    assert!(body.contains("# TYPE gono_cloud_sync_token gauge"));
+    assert!(body.contains("gono_cloud_file_records_total 1\n"));
+    assert!(body.contains("gono_cloud_change_log_entries_total 1\n"));
+    assert!(body.contains("gono_cloud_upload_sessions_total 0\n"));
+    assert!(body.contains("gono_cloud_sync_token 1\n"));
+    assert!(body.contains("gono_cloud_change_log_floor_token 0\n"));
+    assert!(body.contains("gono_cloud_storage_files_available_bytes "));
+    assert!(body.contains("gono_cloud_notify_push_active_connections 0\n"));
+    assert!(body.contains("gono_cloud_notify_push_events_total 1\n"));
 }
 
 #[tokio::test]

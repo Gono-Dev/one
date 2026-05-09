@@ -1149,7 +1149,7 @@ mod tests {
         let config = DbConfig {
             path: temp
                 .path()
-                .join("gono-one.db")
+                .join("gono-cloud.db")
                 .to_string_lossy()
                 .into_owned(),
             max_connections: 1,

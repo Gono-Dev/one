@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::Path, time::Duration};
 
 use anyhow::{bail, Context};
 use axum_server::{tls_rustls::RustlsConfig, Handle};
-use gono_one::{
+use gono_cloud::{
     build_router,
     consistency::{self, RepairMode},
     dav_handler::chunked_upload,
@@ -68,7 +68,7 @@ async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
     let app = build_router(initialized.state);
 
     let server_result = if let Some(tls) = tls {
-        tracing::info!("gono-one listening on https://{addr}");
+        tracing::info!("gono-cloud listening on https://{addr}");
         let handle = Handle::<SocketAddr>::new();
         let shutdown_task = spawn_axum_server_shutdown(handle.clone());
         let result = axum_server::bind_rustls(addr, tls)
@@ -79,7 +79,7 @@ async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
         shutdown_task.abort();
         result
     } else {
-        tracing::info!("gono-one listening on http://{addr}");
+        tracing::info!("gono-cloud listening on http://{addr}");
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal())
@@ -129,9 +129,9 @@ async fn run_consistency_repair(config: Config, mode: RepairMode) -> anyhow::Res
 fn print_help() {
     println!(concat!(
         "Usage:\n",
-        "  gono-one [serve]\n",
-        "  gono-one consistency-check\n",
-        "  gono-one consistency-repair [--dry-run|--apply]\n",
+        "  gono-cloud [serve]\n",
+        "  gono-cloud consistency-check\n",
+        "  gono-cloud consistency-repair [--dry-run|--apply]\n",
         "\n",
         "Environment:\n",
         "  NC_DAV_CONFIG    Path to config.toml (default: config.toml)\n",
@@ -165,8 +165,8 @@ impl Command {
             [command] if command == "--help" || command == "-h" || command == "help" => {
                 Ok(Self::Help)
             }
-            [unknown] => bail!("unknown command {unknown:?}; run gono-one --help"),
-            _ => bail!("too many arguments; run gono-one --help"),
+            [unknown] => bail!("unknown command {unknown:?}; run gono-cloud --help"),
+            _ => bail!("too many arguments; run gono-cloud --help"),
         }
     }
 }

@@ -181,7 +181,7 @@ impl Config {
                 xattr_ns: "user.nc".to_owned(),
             },
             db: DbConfig {
-                path: "data/gono-one.db".to_owned(),
+                path: "data/gono-cloud.db".to_owned(),
                 max_connections: 5,
             },
             auth: AuthConfig {

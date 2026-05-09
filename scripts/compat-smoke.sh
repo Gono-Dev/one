@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gono-one-smoke.XXXXXX")"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gono-cloud-smoke.XXXXXX")"
 SERVER_PID=""
 RUN_LITMUS="${RUN_LITMUS:-0}"
 KEEP_SMOKE_DIR="${KEEP_SMOKE_DIR:-0}"
@@ -240,22 +240,22 @@ data_dir = "${WORK_DIR}/data"
 xattr_ns = "user.nc"
 
 [db]
-path = "${WORK_DIR}/gono-one.db"
+path = "${WORK_DIR}/gono-cloud.db"
 max_connections = 5
 
 [auth]
 realm = "Nextcloud"
 EOF
 
-echo "building gono-one"
+echo "building gono-cloud"
 cargo build --quiet --manifest-path "${ROOT}/Cargo.toml"
 
-echo "starting temporary gono-one on ${BASE_URL}"
+echo "starting temporary gono-cloud on ${BASE_URL}"
 NC_DAV_CONFIG="${CONFIG_FILE}" \
 NC_DAV_INSECURE_HTTP=1 \
 NC_DAV_LOG_FORMAT=text \
 RUST_LOG="${RUST_LOG:-info}" \
-"${ROOT}/target/debug/gono-one" >"${LOG_FILE}" 2>&1 &
+"${ROOT}/target/debug/gono-cloud" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
 
 wait_for_server "${BASE_URL}" "${LOG_FILE}"
@@ -363,7 +363,7 @@ assert_status_any "201,204" "MOVE" "${UPLOAD_URL}/.file" \
 curl -fsS -u "${AUTH}" "${DESTINATION}" | grep -q 'hello world'
 
 echo "checking metrics"
-curl -fsS -u "${AUTH}" "${BASE_URL}/metrics" | grep -q 'gono_one_sync_token'
+curl -fsS -u "${AUTH}" "${BASE_URL}/metrics" | grep -q 'gono_cloud_sync_token'
 
 if [[ "${RUN_LITMUS}" == "1" ]]; then
   LITMUS_BIN="$(litmus_cmd)"
