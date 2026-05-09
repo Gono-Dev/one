@@ -266,7 +266,7 @@ impl NcDavService {
         rel_path: &Path,
         operation: &str,
     ) -> Result<i64, Response<Body>> {
-        db::record_change(
+        let sync_token = db::record_change(
             &self.state.db,
             &self.state.owner,
             file_id,
@@ -277,7 +277,9 @@ impl NcDavService {
         .map_err(|err| {
             error!(?err, "failed to record WebDAV change");
             metadata_error_response()
-        })
+        })?;
+        self.state.notify_file_changed(Some(file_id));
+        Ok(sync_token)
     }
 }
 

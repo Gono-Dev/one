@@ -113,6 +113,96 @@ assert_status_any() {
   exit 1
 }
 
+websocket_smoke() {
+  BASE_URL="${BASE_URL}" PASSWORD="${PASSWORD}" python3 - <<'PY'
+import base64
+import os
+import socket
+import struct
+from urllib.parse import urlparse
+
+base_url = os.environ["BASE_URL"]
+password = os.environ["PASSWORD"]
+url = urlparse(base_url)
+port = url.port or (443 if url.scheme == "https" else 80)
+host = url.hostname
+key = base64.b64encode(os.urandom(16)).decode("ascii")
+
+def recv_exact(sock, size):
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise RuntimeError("websocket closed unexpectedly")
+        data += chunk
+    return data
+
+def send_frame(sock, opcode, payload):
+    payload = payload if isinstance(payload, bytes) else payload.encode("utf-8")
+    header = bytearray([0x80 | opcode])
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length <= 0xFFFF:
+        header.append(0x80 | 126)
+        header.extend(struct.pack("!H", length))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.pack("!Q", length))
+    mask = os.urandom(4)
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    sock.sendall(bytes(header) + mask + masked)
+
+def read_frame(sock):
+    first, second = recv_exact(sock, 2)
+    opcode = first & 0x0F
+    masked = second & 0x80
+    length = second & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", recv_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", recv_exact(sock, 8))[0]
+    mask = recv_exact(sock, 4) if masked else b""
+    payload = recv_exact(sock, length)
+    if masked:
+        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    return opcode, payload
+
+with socket.create_connection((host, port), timeout=5) as sock:
+    request = (
+        "GET /push/ws HTTP/1.1\r\n"
+        f"Host: {url.netloc}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    sock.sendall(request.encode("ascii"))
+    response = b""
+    while b"\r\n\r\n" not in response:
+        response += sock.recv(4096)
+    status_line = response.split(b"\r\n", 1)[0]
+    if b" 101 " not in status_line:
+        raise RuntimeError(f"websocket upgrade failed: {status_line!r}")
+
+    send_frame(sock, 0x1, "gono")
+    send_frame(sock, 0x1, password)
+    while True:
+        opcode, payload = read_frame(sock)
+        if opcode == 0x1:
+            text = payload.decode("utf-8")
+            if text != "authenticated":
+                raise RuntimeError(f"unexpected websocket text: {text!r}")
+            send_frame(sock, 0x8, b"")
+            break
+        if opcode == 0x9:
+            send_frame(sock, 0xA, payload)
+        elif opcode == 0x8:
+            raise RuntimeError("websocket closed before authentication")
+PY
+}
+
 require_cmd cargo
 require_cmd curl
 require_cmd grep
@@ -162,6 +252,10 @@ DAV_URL="${BASE_URL}/remote.php/dav"
 echo "checking public endpoints"
 curl -fsS "${BASE_URL}/status.php" | grep -q '"installed":true'
 curl -fsS "${BASE_URL}/ocs/v2.php/cloud/capabilities" | grep -q '"chunking":"1.0"'
+curl -fsS "${BASE_URL}/ocs/v2.php/cloud/capabilities" | grep -q '"notify_push"'
+
+echo "checking notify_push websocket"
+websocket_smoke
 
 echo "checking Basic Auth"
 assert_status "401" "PROPFIND" "${DAV_URL}/" -H "Depth: 0"

@@ -1,8 +1,12 @@
-use axum::Json;
+use std::sync::Arc;
+
+use axum::{extract::State, Json};
 use serde_json::{json, Value};
 
-pub async fn handler() -> Json<Value> {
-    Json(json!({
+use crate::{notify_push::routes, state::AppState};
+
+pub async fn handler(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let mut response = json!({
         "ocs": {
             "meta": {
                 "status": "ok",
@@ -33,5 +37,17 @@ pub async fn handler() -> Json<Value> {
                 }
             }
         }
-    }))
+    });
+
+    if let Some(runtime) = &state.notify_push {
+        response["ocs"]["data"]["capabilities"]["notify_push"] = json!({
+            "type": runtime.config().advertised_types.clone(),
+            "endpoints": {
+                "websocket": routes::websocket_endpoint(&state.base_url, &runtime.config().path),
+                "pre_auth": routes::pre_auth_endpoint(&state.base_url),
+            }
+        });
+    }
+
+    Json(response)
 }

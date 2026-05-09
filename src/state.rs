@@ -4,8 +4,9 @@ use sqlx::SqlitePool;
 
 use crate::{
     auth::SqliteUserStore,
-    config::Config,
+    config::{Config, NotifyPushConfig},
     db::{self, BootstrapOutcome, BOOTSTRAP_USER},
+    notify_push::NotifyRuntime,
     storage::StorageLayout,
 };
 
@@ -21,6 +22,8 @@ pub struct AppState {
     pub base_url: String,
     pub instance_id: String,
     pub xattr_ns: String,
+    pub notify_push_config: NotifyPushConfig,
+    pub notify_push: Option<Arc<NotifyRuntime>>,
 }
 
 #[derive(Debug)]
@@ -36,6 +39,10 @@ impl AppState {
         db::migrate(&db).await?;
         let bootstrap = db::ensure_bootstrap_user(&db).await?;
         let user_store = Arc::new(SqliteUserStore::new(db.clone()));
+        let notify_push = config
+            .notify_push
+            .enabled
+            .then(|| NotifyRuntime::new(config.notify_push.clone()));
 
         Ok(InitializedApp {
             state: Arc::new(Self {
@@ -49,8 +56,16 @@ impl AppState {
                 base_url: config.server.base_url,
                 instance_id: "phase1".to_owned(),
                 xattr_ns: config.storage.xattr_ns,
+                notify_push_config: config.notify_push,
+                notify_push,
             }),
             bootstrap,
         })
+    }
+
+    pub fn notify_file_changed(&self, file_id: Option<i64>) {
+        if let Some(notify_push) = &self.notify_push {
+            notify_push.notify_file(&self.owner, file_id);
+        }
     }
 }

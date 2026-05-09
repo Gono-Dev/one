@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use crate::{
     auth::require_basic_auth,
     dav_handler::{NcDavService, NcLocalFs},
-    nextcloud_proto,
+    nextcloud_proto, notify_push,
     state::AppState,
 };
 
@@ -42,7 +42,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ))
         .service(NcDavService::new(dav_handler, state.clone()));
 
-    Router::new()
+    let mut app = Router::new()
         .route("/status.php", get(nextcloud_proto::status::handler))
         .route(
             "/ocs/v2.php/cloud/capabilities",
@@ -62,8 +62,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/.well-known/carddav",
             get(|| async { Redirect::permanent("/remote.php/dav") }),
-        )
-        .nest_service("/remote.php/dav", dav_service.clone())
+        );
+
+    if state.notify_push.is_some() {
+        app = app.merge(notify_push::routes::router(&state.notify_push_config.path));
+    }
+
+    app.nest_service("/remote.php/dav", dav_service.clone())
         .nest_service("/remote.php/webdav", dav_service.clone())
         .fallback_service(dav_service)
         .with_state(state)

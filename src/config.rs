@@ -9,6 +9,8 @@ pub struct Config {
     pub storage: StorageConfig,
     pub db: DbConfig,
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub notify_push: NotifyPushConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +36,90 @@ pub struct DbConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
     pub realm: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotifyPushConfig {
+    #[serde(default = "NotifyPushConfig::default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "NotifyPushConfig::default_path")]
+    pub path: String,
+    #[serde(default = "NotifyPushConfig::default_advertised_types")]
+    pub advertised_types: Vec<String>,
+    #[serde(default = "NotifyPushConfig::default_pre_auth_ttl_secs")]
+    pub pre_auth_ttl_secs: u64,
+    #[serde(default = "NotifyPushConfig::default_user_connection_limit")]
+    pub user_connection_limit: usize,
+    #[serde(default = "NotifyPushConfig::default_max_debounce_secs")]
+    pub max_debounce_secs: u64,
+    #[serde(default = "NotifyPushConfig::default_ping_interval_secs")]
+    pub ping_interval_secs: u64,
+    #[serde(default = "NotifyPushConfig::default_auth_timeout_secs")]
+    pub auth_timeout_secs: u64,
+    #[serde(default = "NotifyPushConfig::default_max_connection_secs")]
+    pub max_connection_secs: u64,
+}
+
+impl Default for NotifyPushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "/push".to_owned(),
+            advertised_types: vec![
+                "files".to_owned(),
+                "activities".to_owned(),
+                "notifications".to_owned(),
+            ],
+            pre_auth_ttl_secs: 15,
+            user_connection_limit: 64,
+            max_debounce_secs: 15,
+            ping_interval_secs: 30,
+            auth_timeout_secs: 15,
+            max_connection_secs: 0,
+        }
+    }
+}
+
+impl NotifyPushConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_path() -> String {
+        "/push".to_owned()
+    }
+
+    fn default_advertised_types() -> Vec<String> {
+        vec![
+            "files".to_owned(),
+            "activities".to_owned(),
+            "notifications".to_owned(),
+        ]
+    }
+
+    fn default_pre_auth_ttl_secs() -> u64 {
+        15
+    }
+
+    fn default_user_connection_limit() -> usize {
+        64
+    }
+
+    fn default_max_debounce_secs() -> u64 {
+        15
+    }
+
+    fn default_ping_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_auth_timeout_secs() -> u64 {
+        15
+    }
+
+    fn default_max_connection_secs() -> u64 {
+        0
+    }
 }
 
 impl Config {
@@ -72,6 +158,7 @@ impl Config {
             auth: AuthConfig {
                 realm: "Nextcloud".to_owned(),
             },
+            notify_push: NotifyPushConfig::default(),
         }
     }
 }

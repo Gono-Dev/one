@@ -1,18 +1,77 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     body::{to_bytes, Body},
     http::{header, Method, Request, StatusCode},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use futures_util::{SinkExt, StreamExt};
 use gono_one::{
     build_router, dav_handler::chunked_upload, db, db::BOOTSTRAP_USER, AppState, Config,
 };
 use tempfile::TempDir;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tower::ServiceExt;
+
+type TestWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn auth_header(password: &str) -> String {
     format!("Basic {}", STANDARD.encode(format!("gono:{password}")))
+}
+
+async fn spawn_app_server(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("test server addr");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve test app");
+    });
+    (format!("http://{addr}"), handle)
+}
+
+async fn login_ws(base_url: &str, username: &str, password: &str) -> TestWebSocket {
+    let (mut websocket, _response) = connect_async(ws_url(base_url))
+        .await
+        .expect("connect websocket");
+    websocket
+        .send(Message::Text(username.to_owned().into()))
+        .await
+        .expect("send websocket username");
+    websocket
+        .send(Message::Text(password.to_owned().into()))
+        .await
+        .expect("send websocket password");
+    websocket
+}
+
+async fn next_ws_text(websocket: &mut TestWebSocket) -> String {
+    loop {
+        match websocket.next().await {
+            Some(Ok(Message::Text(text))) => return text.to_string(),
+            Some(Ok(Message::Ping(payload))) => {
+                websocket
+                    .send(Message::Pong(payload))
+                    .await
+                    .expect("reply pong");
+            }
+            Some(Ok(Message::Close(frame))) => panic!("websocket closed: {frame:?}"),
+            Some(Ok(_)) => {}
+            Some(Err(err)) => panic!("websocket error: {err}"),
+            None => panic!("websocket ended"),
+        }
+    }
+}
+
+fn ws_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if let Some(rest) = base_url.strip_prefix("https://") {
+        format!("wss://{rest}/push/ws")
+    } else if let Some(rest) = base_url.strip_prefix("http://") {
+        format!("ws://{rest}/push/ws")
+    } else {
+        format!("{base_url}/push/ws")
+    }
 }
 
 async fn app_with_temp_root() -> (axum::Router, TempDir, String) {
@@ -88,6 +147,9 @@ async fn capabilities_are_public() {
     let body = std::str::from_utf8(&body).unwrap();
     assert!(body.contains("\"status\":\"ok\""));
     assert!(body.contains("\"chunking\":\"1.0\""));
+    assert!(body.contains("\"notify_push\""));
+    assert!(body.contains("\"websocket\":\"wss://127.0.0.1:3000/push/ws\""));
+    assert!(body.contains("\"pre_auth\":\"https://127.0.0.1:3000/apps/notify_push/pre_auth\""));
 }
 
 #[tokio::test]
@@ -148,6 +210,344 @@ async fn metrics_require_basic_auth_and_are_prometheus_shaped() {
     assert!(body.contains("gono_one_upload_sessions_total 0\n"));
     assert!(body.contains("gono_one_sync_token 1\n"));
     assert!(body.contains("gono_one_storage_files_available_bytes "));
+    assert!(body.contains("gono_one_notify_push_active_connections 0\n"));
+    assert!(body.contains("gono_one_notify_push_events_total 1\n"));
+}
+
+#[tokio::test]
+async fn notify_push_pre_auth_uid_and_test_routes_work() {
+    let (app, _temp, password, state) = app_with_state().await;
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/apps/notify_push/pre_auth")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let token_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/apps/notify_push/pre_auth")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(token_response.status(), StatusCode::OK);
+    let token = to_bytes(token_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token = std::str::from_utf8(&token).unwrap();
+    assert!(token.len() >= 40);
+
+    let uid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/index.php/apps/notify_push/uid")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(uid.status(), StatusCode::OK);
+    let body = to_bytes(uid.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(std::str::from_utf8(&body).unwrap(), BOOTSTRAP_USER);
+
+    let runtime = state.notify_push.as_ref().expect("notify push runtime");
+    runtime.set_test_token("test-token");
+    runtime.set_test_cookie(4242);
+
+    let forbidden = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/push/test/cookie")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    for (method, uri, expected) in [
+        (Method::GET, "/push/test/cookie", "4242"),
+        (Method::GET, "/push/test/reverse_cookie", "4242"),
+        (Method::GET, "/push/test/mapping/arbitrary-id", "1"),
+        (Method::GET, "/push/test/remote/192.0.2.10", "192.0.2.10"),
+        (Method::POST, "/push/test/version", "set"),
+        (Method::POST, "/push/test/trigger/activity", "sent"),
+        (Method::POST, "/push/test/trigger/notification", "sent"),
+        (Method::POST, "/push/test/trigger/custom", "sent"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(uri)
+                    .header("token", "test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), expected);
+    }
+}
+
+#[tokio::test]
+async fn notify_push_websocket_basic_auth_success_and_failure() {
+    let (app, _temp, password, _state) = app_with_state().await;
+    let (base_url, server) = spawn_app_server(app).await;
+
+    let mut websocket = login_ws(&base_url, BOOTSTRAP_USER, &password).await;
+    assert_eq!(next_ws_text(&mut websocket).await, "authenticated");
+    let _ = websocket.close(None).await;
+
+    let mut bad = login_ws(&base_url, BOOTSTRAP_USER, "wrong-password").await;
+    assert!(next_ws_text(&mut bad).await.starts_with("err:"));
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn notify_push_pre_auth_websocket_token_is_one_time() {
+    let (app, _temp, password, _state) = app_with_state().await;
+    let token_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/index.php/apps/notify_push/pre_auth")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(token_response.status(), StatusCode::OK);
+    let token = to_bytes(token_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token = std::str::from_utf8(&token).unwrap().to_owned();
+
+    let (base_url, server) = spawn_app_server(app).await;
+
+    let mut websocket = login_ws(&base_url, "", &token).await;
+    assert_eq!(next_ws_text(&mut websocket).await, "authenticated");
+
+    let mut reused = login_ws(&base_url, "", &token).await;
+    assert!(next_ws_text(&mut reused).await.starts_with("err:"));
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn notify_push_websocket_receives_file_id_then_sync_collection_lists_change() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let (base_url, server) = spawn_app_server(app.clone()).await;
+
+    let mut websocket = login_ws(&base_url, BOOTSTRAP_USER, &password).await;
+    assert_eq!(next_ws_text(&mut websocket).await, "authenticated");
+    websocket
+        .send(Message::Text("listen notify_file_id".into()))
+        .await
+        .expect("send listen mode");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/ws-push.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("push me"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+    let changes = db::list_change_log(&state.db, BOOTSTRAP_USER)
+        .await
+        .expect("change log");
+    let file_id = changes.last().expect("last change").file_id;
+    assert_eq!(
+        next_ws_text(&mut websocket).await,
+        format!("notify_file_id [{file_id}]")
+    );
+
+    let report = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(sync_collection_body("0")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(report.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/ws-push.txt"));
+    assert!(body.contains("<d:sync-token>1</d:sync-token>"));
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn notify_push_events_are_emitted_for_all_file_mutations() {
+    let (app, _temp, password, state) = app_with_state().await;
+
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/notify-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("source"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+
+    let copy = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"COPY").unwrap())
+                .uri("/remote.php/dav/notify-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/notify-copy.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(copy.status().is_success());
+
+    let moved = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MOVE").unwrap())
+                .uri("/remote.php/dav/notify-source.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/notify-moved.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(moved.status().is_success());
+
+    let delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/remote.php/dav/notify-copy.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete.status().is_success());
+
+    let patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                .uri("/remote.php/dav/notify-moved.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(proppatch_favorite_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(patch.status().is_success());
+
+    let upload_base = "/remote.php/dav/uploads/gono/notify-upload";
+    let destination = "/remote.php/dav/notify-chunked.txt";
+    let mkcol = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri(upload_base)
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", destination)
+                .header("OC-Total-Length", "11")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mkcol.status(), StatusCode::CREATED);
+    for (chunk, body) in [("1", "hello "), ("2", "world")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("{upload_base}/{chunk}"))
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .header("Destination", destination)
+                    .header("OC-Total-Length", "11")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+    let chunk_move = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MOVE").unwrap())
+                .uri(format!("{upload_base}/.file"))
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", destination)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chunk_move.status(), StatusCode::CREATED);
+
+    let metrics = state
+        .notify_push
+        .as_ref()
+        .expect("notify push runtime")
+        .metrics();
+    assert_eq!(metrics.events_received, 7);
 }
 
 #[tokio::test]

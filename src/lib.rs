@@ -3,6 +3,7 @@ pub mod config;
 pub mod dav_handler;
 pub mod db;
 pub mod nextcloud_proto;
+pub mod notify_push;
 pub mod router;
 pub mod state;
 pub mod storage;

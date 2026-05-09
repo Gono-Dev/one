@@ -61,7 +61,7 @@ async fn render_metrics(state: &AppState) -> anyhow::Result<String> {
     let files_total = fs2::total_space(&state.files_root)
         .with_context(|| format!("read total space for {}", state.files_root.display()))?;
 
-    Ok(format!(
+    let mut body = format!(
         concat!(
             "# HELP gono_one_file_records_total SQLite file metadata rows for the owner.\n",
             "# TYPE gono_one_file_records_total gauge\n",
@@ -92,7 +92,53 @@ async fn render_metrics(state: &AppState) -> anyhow::Result<String> {
         sync_token,
         files_available,
         files_total,
-    ))
+    );
+
+    if let Some(runtime) = &state.notify_push {
+        let metrics = runtime.metrics();
+        body.push_str(&format!(
+            concat!(
+                "# HELP gono_one_notify_push_active_connections Active notify_push WebSocket connections.\n",
+                "# TYPE gono_one_notify_push_active_connections gauge\n",
+                "gono_one_notify_push_active_connections {}\n",
+                "# HELP gono_one_notify_push_active_users Users with at least one notify_push connection.\n",
+                "# TYPE gono_one_notify_push_active_users gauge\n",
+                "gono_one_notify_push_active_users {}\n",
+                "# HELP gono_one_notify_push_total_connections Total accepted notify_push WebSocket connections.\n",
+                "# TYPE gono_one_notify_push_total_connections counter\n",
+                "gono_one_notify_push_total_connections {}\n",
+                "# HELP gono_one_notify_push_events_total Notify push events received by the runtime.\n",
+                "# TYPE gono_one_notify_push_events_total counter\n",
+                "gono_one_notify_push_events_total {}\n",
+                "# HELP gono_one_notify_push_auth_failures_total Notify push authentication failures.\n",
+                "# TYPE gono_one_notify_push_auth_failures_total counter\n",
+                "gono_one_notify_push_auth_failures_total {}\n",
+                "# HELP gono_one_notify_push_messages_sent_total Notify push messages sent by type.\n",
+                "# TYPE gono_one_notify_push_messages_sent_total counter\n",
+                "gono_one_notify_push_messages_sent_total {}\n",
+                "gono_one_notify_push_messages_sent_total{{type=\"file\"}} {}\n",
+                "gono_one_notify_push_messages_sent_total{{type=\"activity\"}} {}\n",
+                "gono_one_notify_push_messages_sent_total{{type=\"notification\"}} {}\n",
+                "gono_one_notify_push_messages_sent_total{{type=\"custom\"}} {}\n",
+                "# HELP gono_one_notify_push_test_endpoint_hits_total notify_push compatibility test endpoint hits.\n",
+                "# TYPE gono_one_notify_push_test_endpoint_hits_total counter\n",
+                "gono_one_notify_push_test_endpoint_hits_total {}\n",
+            ),
+            metrics.active_connections,
+            metrics.active_users,
+            metrics.total_connections,
+            metrics.events_received,
+            metrics.auth_failures,
+            metrics.messages_sent,
+            metrics.messages_sent_file,
+            metrics.messages_sent_activity,
+            metrics.messages_sent_notification,
+            metrics.messages_sent_custom,
+            metrics.test_endpoint_hits,
+        ));
+    }
+
+    Ok(body)
 }
 
 async fn count_owner_rows(pool: &SqlitePool, query: &str, owner: &str) -> anyhow::Result<i64> {

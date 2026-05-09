@@ -106,7 +106,7 @@ pub async fn require_basic_auth(
     }
 }
 
-fn parse_basic_auth(header: Option<&HeaderValue>) -> Option<(String, String)> {
+pub(crate) fn parse_basic_auth(header: Option<&HeaderValue>) -> Option<(String, String)> {
     let header = header?.to_str().ok()?;
     let encoded = header.strip_prefix("Basic ")?;
     let decoded = STANDARD.decode(encoded).ok()?;

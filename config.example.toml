@@ -14,3 +14,14 @@ max_connections = 5
 
 [auth]
 realm = "Nextcloud"
+
+[notify_push]
+enabled = true
+path = "/push"
+advertised_types = ["files", "activities", "notifications"]
+pre_auth_ttl_secs = 15
+user_connection_limit = 64
+max_debounce_secs = 15
+ping_interval_secs = 30
+auth_timeout_secs = 15
+max_connection_secs = 0

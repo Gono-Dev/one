@@ -216,7 +216,7 @@ async fn move_file(
     .await
     .map_err(|err| internal_error(err, "persist uploaded file metadata"))?;
 
-    db::record_change(
+    let _sync_token = db::record_change(
         &state.db,
         &state.owner,
         record.id,
@@ -225,6 +225,7 @@ async fn move_file(
     )
     .await
     .map_err(|err| internal_error(err, "record uploaded file change"))?;
+    state.notify_file_changed(Some(record.id));
 
     remove_session_dir(&state, &upload_path).await?;
     db::delete_upload_session(&state.db, &state.owner, &upload_path.upload_id)
