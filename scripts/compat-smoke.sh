@@ -271,11 +271,11 @@ curl -fsS "${BASE_URL}/index.php/ocs/v2.php/cloud/capabilities" | grep -q '"chun
 
 echo "checking OCS user endpoints"
 assert_status "401" "GET" "${BASE_URL}/ocs/v2.php/cloud/user"
-curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v1.php/cloud/user" | grep -q '"id":"gono"'
 curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/cloud/user" | grep -q '"displayname":"gono"'
-curl -fsS -u "${AUTH}" "${BASE_URL}/index.php/ocs/v1.php/cloud/user" | grep -q '"id":"gono"'
 curl -fsS -u "${AUTH}" "${BASE_URL}/index.php/ocs/v2.php/cloud/user" | grep -q '"displayname":"gono"'
 curl -fsS -u "${AUTH}" "${BASE_URL}/ocs/v2.php/cloud/users" | grep -q '"gono"'
+assert_status "404" "GET" "${BASE_URL}/ocs/v1.php/cloud/user" -u "${AUTH}"
+assert_status "404" "GET" "${BASE_URL}/index.php/ocs/v1.php/cloud/capabilities" -u "${AUTH}"
 
 echo "checking OCS v2 compatibility placeholders"
 assert_status "401" "GET" "${BASE_URL}/ocs/v2.php/apps/files_sharing/api/v1/shares"

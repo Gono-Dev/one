@@ -44,22 +44,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .service(NcDavService::new(dav_handler, state.clone()));
 
     let capabilities = get(nextcloud_proto::capabilities::handler);
-    let ocs_user = get(nextcloud_proto::user::handler).route_layer(middleware::from_fn_with_state(
-        state.clone(),
-        require_basic_auth,
-    ));
-
     let mut app = Router::new()
         .route("/status.php", get(nextcloud_proto::status::handler))
-        .route("/ocs/v1.php/cloud/capabilities", capabilities.clone())
         .route("/ocs/v2.php/cloud/capabilities", capabilities.clone())
-        .route(
-            "/index.php/ocs/v1.php/cloud/capabilities",
-            capabilities.clone(),
-        )
         .route("/index.php/ocs/v2.php/cloud/capabilities", capabilities)
-        .route("/ocs/v1.php/cloud/user", ocs_user.clone())
-        .route("/index.php/ocs/v1.php/cloud/user", ocs_user)
         .merge(nextcloud_proto::ocs::router(state.clone()))
         .route(
             "/metrics",

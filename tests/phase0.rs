@@ -148,9 +148,7 @@ async fn status_php_is_public_and_nextcloud_shaped() {
 async fn capabilities_are_public() {
     let (app, _temp, _password) = app_with_temp_root().await;
     for uri in [
-        "/ocs/v1.php/cloud/capabilities",
         "/ocs/v2.php/cloud/capabilities",
-        "/index.php/ocs/v1.php/cloud/capabilities",
         "/index.php/ocs/v2.php/cloud/capabilities",
     ] {
         let response = app
@@ -193,12 +191,7 @@ async fn ocs_user_endpoints_require_auth_and_return_profile() {
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
-    for uri in [
-        "/ocs/v1.php/cloud/user",
-        "/ocs/v2.php/cloud/user",
-        "/index.php/ocs/v1.php/cloud/user",
-        "/index.php/ocs/v2.php/cloud/user",
-    ] {
+    for uri in ["/ocs/v2.php/cloud/user", "/index.php/ocs/v2.php/cloud/user"] {
         let response = app
             .clone()
             .oneshot(
@@ -219,6 +212,33 @@ async fn ocs_user_endpoints_require_auth_and_return_profile() {
         assert!(body.contains("\"id\":\"gono\""));
         assert!(body.contains("\"displayname\":\"gono\""));
         assert!(body.contains("\"quota\""));
+    }
+}
+
+#[tokio::test]
+async fn ocs_v1_endpoints_are_not_supported() {
+    let (app, _temp, password) = app_with_temp_root().await;
+
+    for uri in [
+        "/ocs/v1.php/cloud/capabilities",
+        "/index.php/ocs/v1.php/cloud/capabilities",
+        "/ocs/v1.php/cloud/user",
+        "/index.php/ocs/v1.php/cloud/user",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
     }
 }
 
