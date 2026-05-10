@@ -12,7 +12,18 @@ CREATE TABLE IF NOT EXISTS app_passwords (
     password_hash TEXT    NOT NULL,
     created_at    INTEGER NOT NULL,
     last_used_at  INTEGER,
+    expires_at    INTEGER,
     UNIQUE(username, label)
+);
+
+CREATE TABLE IF NOT EXISTS app_password_scopes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_password_id INTEGER NOT NULL REFERENCES app_passwords(id) ON DELETE CASCADE,
+    mount_path      TEXT    NOT NULL,
+    storage_path    TEXT    NOT NULL,
+    permission      TEXT    NOT NULL CHECK(permission IN ('view', 'full')),
+    created_at      INTEGER NOT NULL,
+    UNIQUE(app_password_id, mount_path)
 );
 
 CREATE TABLE IF NOT EXISTS file_ids (
@@ -100,3 +111,10 @@ CREATE INDEX IF NOT EXISTS idx_webdav_locks_path
 
 CREATE INDEX IF NOT EXISTS idx_webdav_locks_timeout
     ON webdav_locks(timeout_at);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value_json TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT
+);
