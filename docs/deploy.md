@@ -234,6 +234,7 @@ Before calling the deployment complete:
 - run `cargo check`, `cargo test`, and `scripts/compat-smoke.sh`;
 - optionally run `RUN_LITMUS=1 scripts/compat-smoke.sh` or the manual litmus workflow before
   release;
+- for local release validation, run the performance gate described in [docs/performance.md](performance.md);
 - connect with Gono Cloud Desktop using the service root URL, such as `https://gono.cloud`;
 - verify upload, download, rename, copy, delete, large chunked upload, and restart behavior;
 - confirm capabilities advertise `notify_push` and `/push/ws` accepts WebSocket login;
