@@ -772,7 +772,7 @@ def run_mixed_load(
                     pool.add(new_path)
             elif op == "move" and path:
                 new_path = pool.next_path()
-                ok, _, _ = record_request(
+                ok, status, _ = record_request(
                     recorder,
                     scenario,
                     op,
