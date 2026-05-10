@@ -91,6 +91,14 @@ async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
     if let Some(password) = &initialized.bootstrap.generated_password {
         tracing::warn!("Generated app password for gono: {password}");
     }
+    for admin_user in &initialized.bootstrap.generated_admin_users {
+        tracing::warn!(
+            "Generated app password for admin user {} ({}): {}",
+            admin_user.username,
+            admin_user.password_label,
+            admin_user.app_password
+        );
+    }
 
     let upload_cleanup = chunked_upload::spawn_cleanup_task(initialized.state.clone());
     let app = build_router(initialized.state);

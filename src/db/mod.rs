@@ -28,6 +28,7 @@ pub const DEFAULT_APP_PASSWORD_LABEL: &str = "default";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapOutcome {
     pub generated_password: Option<String>,
+    pub generated_admin_users: Vec<CreatedLocalUser>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,7 +213,119 @@ pub async fn ensure_bootstrap_user(pool: &SqlitePool) -> anyhow::Result<Bootstra
     tx.commit()
         .await
         .context("commit bootstrap user transaction")?;
-    Ok(BootstrapOutcome { generated_password })
+    Ok(BootstrapOutcome {
+        generated_password,
+        generated_admin_users: Vec::new(),
+    })
+}
+
+pub async fn ensure_configured_admin_users(
+    pool: &SqlitePool,
+    admin_users: &[String],
+) -> anyhow::Result<Vec<CreatedLocalUser>> {
+    let mut generated = Vec::new();
+    for username in admin_users {
+        if username == BOOTSTRAP_USER {
+            continue;
+        }
+        if let Some(created) = ensure_local_user_with_default_password(pool, username).await? {
+            generated.push(created);
+        }
+    }
+    Ok(generated)
+}
+
+async fn ensure_local_user_with_default_password(
+    pool: &SqlitePool,
+    username: &str,
+) -> anyhow::Result<Option<CreatedLocalUser>> {
+    validate_username(username)?;
+    let now = unix_timestamp();
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin ensure local admin user transaction")?;
+
+    let existing_display_name: Option<Option<String>> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE username = ?1")
+            .bind(username)
+            .fetch_optional(&mut *tx)
+            .await
+            .with_context(|| format!("lookup local admin user {username}"))?;
+
+    let display_name = existing_display_name
+        .clone()
+        .flatten()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| username.to_owned());
+
+    if existing_display_name.is_some() {
+        sqlx::query("UPDATE users SET enabled = 1 WHERE username = ?1")
+            .bind(username)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("enable local admin user {username}"))?;
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO users(username, display_name, enabled, created_at)
+            VALUES(?1, ?2, 1, ?3)
+            "#,
+        )
+        .bind(username)
+        .bind(&display_name)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("insert local admin user {username}"))?;
+    }
+
+    let existing_password: Option<(i64,)> = sqlx::query_as(
+        r#"
+        SELECT id
+        FROM app_passwords
+        WHERE username = ?1 AND label = ?2
+        "#,
+    )
+    .bind(username)
+    .bind(DEFAULT_APP_PASSWORD_LABEL)
+    .fetch_optional(&mut *tx)
+    .await
+    .with_context(|| format!("lookup default app password for admin user {username}"))?;
+
+    let created = if existing_password.is_none() {
+        let password = generate_app_password();
+        let password_hash = hash_password(&password).context("hash admin app password")?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO app_passwords(username, label, password_hash, created_at)
+            VALUES(?1, ?2, ?3, ?4)
+            "#,
+        )
+        .bind(username)
+        .bind(DEFAULT_APP_PASSWORD_LABEL)
+        .bind(password_hash)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("insert admin app password for {username}"))?;
+        insert_default_scope(&mut tx, result.last_insert_rowid(), now).await?;
+
+        Some(CreatedLocalUser {
+            username: username.to_owned(),
+            display_name,
+            password_label: DEFAULT_APP_PASSWORD_LABEL.to_owned(),
+            app_password: password,
+        })
+    } else {
+        None
+    };
+
+    tx.commit()
+        .await
+        .context("commit ensure local admin user transaction")?;
+    Ok(created)
 }
 
 pub async fn list_local_users(pool: &SqlitePool) -> anyhow::Result<Vec<LocalUser>> {
@@ -2128,6 +2241,40 @@ mod tests {
                 .expect("count enabled admins"),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn configured_admin_users_are_created_once() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        ensure_bootstrap_user(&pool)
+            .await
+            .expect("ensure bootstrap user");
+
+        let admins = vec![BOOTSTRAP_USER.to_owned(), "kimi".to_owned()];
+        let generated = ensure_configured_admin_users(&pool, &admins)
+            .await
+            .expect("create configured admin users");
+        assert_eq!(generated.len(), 1);
+        assert_eq!(generated[0].username, "kimi");
+        assert_eq!(generated[0].password_label, DEFAULT_APP_PASSWORD_LABEL);
+
+        let store = SqliteUserStore::new(pool.clone());
+        assert!(store
+            .verify("kimi", &generated[0].app_password)
+            .await
+            .expect("verify generated admin user")
+            .is_some());
+
+        let regenerated = ensure_configured_admin_users(&pool, &admins)
+            .await
+            .expect("ensure existing admin users");
+        assert!(regenerated.is_empty());
+        assert!(store
+            .verify("kimi", &generated[0].app_password)
+            .await
+            .expect("old admin password still valid")
+            .is_some());
     }
 
     #[tokio::test]

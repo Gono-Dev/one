@@ -32,10 +32,11 @@ The installer:
 - creates the platform data directory for SQLite, files, uploads, and xattrs.
 
 Web admin is disabled by default. During first install, the menu asks whether to enable the built-in
-`/admin` management page and which local users may access it through Basic Auth. Existing config
-files are preserved by the installer during upgrades, so add or edit `[admin]` manually when
-enabling admin on an existing installation. When exposing `/admin` through a reverse proxy, consider
-adding an IP allowlist or another network-level access control in front of it.
+`/admin` management page and which local users may access it through Basic Auth. Configured admin
+users that do not exist yet are created at startup, and their one-time app passwords are written to
+the service log. Existing config files are preserved by the installer during upgrades, so add or edit
+`[admin]` manually when enabling admin on an existing installation. When exposing `/admin` through a
+reverse proxy, consider adding an IP allowlist or another network-level access control in front of it.
 
 The `/admin/settings` page can edit the restart-applied runtime settings stored in SQLite,
 including `server.base_url`, `auth.realm`, sync retention, notify push options, and admin access.

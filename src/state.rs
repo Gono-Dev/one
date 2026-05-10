@@ -53,7 +53,11 @@ impl AppState {
         if config.admin.enabled && config.admin.users.is_empty() {
             warn!("admin.enabled=true but admin.users is empty; no user can access /admin");
         }
-        let bootstrap = db::ensure_bootstrap_user(&db).await?;
+        let mut bootstrap = db::ensure_bootstrap_user(&db).await?;
+        if config.admin.enabled {
+            bootstrap.generated_admin_users =
+                db::ensure_configured_admin_users(&db, &config.admin.users).await?;
+        }
         let sync_config = config.sync.clone();
         let prune = db::prune_change_log(
             &db,

@@ -1869,6 +1869,65 @@ async fn admin_users_page_requires_configured_admin() {
 }
 
 #[tokio::test]
+async fn configured_admin_user_is_created_for_admin_access() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut config = test_config(&temp);
+    config.admin.enabled = true;
+    config.admin.users = vec!["kimi".to_owned()];
+
+    let initialized = AppState::initialize(config)
+        .await
+        .expect("initialize with configured admin user");
+    let gono_password = initialized
+        .bootstrap
+        .generated_password
+        .clone()
+        .expect("bootstrap password");
+    let admin_user = initialized
+        .bootstrap
+        .generated_admin_users
+        .first()
+        .expect("generated configured admin user")
+        .clone();
+    assert_eq!(admin_user.username, "kimi");
+
+    let app = build_router(initialized.state.clone());
+    let gono_forbidden = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/users")
+                .header(header::AUTHORIZATION, auth_header(&gono_password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gono_forbidden.status(), StatusCode::FORBIDDEN);
+
+    let allowed = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/users")
+                .header(
+                    header::AUTHORIZATION,
+                    auth_header_for("kimi", &admin_user.app_password),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let body = to_bytes(allowed.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("User Management"));
+    assert!(body.contains("kimi"));
+}
+
+#[tokio::test]
 async fn admin_create_user_requires_csrf_and_shows_one_time_password() {
     let (app, _temp, password, state) = app_with_config(|config| {
         config.admin.enabled = true;
