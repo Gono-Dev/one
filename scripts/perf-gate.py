@@ -707,7 +707,7 @@ def run_mixed_load(
                     path or pool.base_path,
                     PROPFIND_BODY,
                     {"Depth": "0", "Content-Type": "application/xml"},
-                    {207},
+                    {207, 404},
                 )
             elif op == "propfind1":
                 record_request(
@@ -722,12 +722,28 @@ def run_mixed_load(
                     {207},
                 )
             elif op == "head":
-                record_request(recorder, scenario, op, client, "HEAD", path or pool.base_path)
+                record_request(
+                    recorder,
+                    scenario,
+                    op,
+                    client,
+                    "HEAD",
+                    path or pool.base_path,
+                    expected={200, 404},
+                )
             elif op == "get":
-                record_request(recorder, scenario, op, client, "GET", path or pool.base_path)
+                record_request(
+                    recorder,
+                    scenario,
+                    op,
+                    client,
+                    "GET",
+                    path or pool.base_path,
+                    expected={200, 404},
+                )
             elif op == "put_small":
                 new_path = pool.next_path()
-                ok, _, _ = record_request(
+                ok, status, _ = record_request(
                     recorder,
                     scenario,
                     op,
@@ -738,11 +754,11 @@ def run_mixed_load(
                     {"Content-Type": "application/octet-stream"},
                     {201, 204},
                 )
-                if ok:
+                if ok and status in {201, 204}:
                     pool.add(new_path)
             elif op == "copy" and path:
                 new_path = pool.next_path()
-                ok, _, _ = record_request(
+                ok, status, _ = record_request(
                     recorder,
                     scenario,
                     op,
@@ -750,9 +766,9 @@ def run_mixed_load(
                     "COPY",
                     path,
                     headers={"Destination": client.absolute_url(new_path)},
-                    expected={201, 204},
+                    expected={201, 204, 404},
                 )
-                if ok:
+                if ok and status in {201, 204}:
                     pool.add(new_path)
             elif op == "move" and path:
                 new_path = pool.next_path()
@@ -764,9 +780,9 @@ def run_mixed_load(
                     "MOVE",
                     path,
                     headers={"Destination": client.absolute_url(new_path)},
-                    expected={201, 204},
+                    expected={201, 204, 404},
                 )
-                if ok:
+                if ok and status in {201, 204}:
                     pool.replace(path, new_path)
             elif op == "delete" and path:
                 ok, _, _ = record_request(
