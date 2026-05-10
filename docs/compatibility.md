@@ -10,7 +10,7 @@ Run:
 scripts/compat-smoke.sh
 ```
 
-The script creates a temporary config and data directory, starts `gono-cloud` over local plain HTTP with `NC_DAV_INSECURE_HTTP=1`, reads the one-time `gono` app password from startup logs, and checks:
+The script creates a temporary config and data directory, starts `gono-cloud` over local plain HTTP with `GONE_CLOUD_INSECURE_HTTP=1`, reads the one-time `gono` app password from startup logs, and checks:
 
 - `/status.php`
 - capabilities
@@ -22,7 +22,7 @@ The script creates a temporary config and data directory, starts `gono-cloud` ov
 - notify_push capabilities and WebSocket authentication
 - authenticated `/metrics`
 
-Set `KEEP_SMOKE_DIR=1` to keep the temporary data directory for inspection. Set `NC_DAV_SMOKE_PORT=16102` to force a port.
+Set `KEEP_SMOKE_DIR=1` to keep the temporary data directory for inspection. Set `GONE_CLOUD_SMOKE_PORT=16102` to force a port.
 
 ## CI
 

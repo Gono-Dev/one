@@ -242,10 +242,10 @@ Before calling the deployment complete:
 ## Operational Notes
 
 - Back up SQLite, `data/users`, and xattrs from the same point in time.
-- Run `NC_DAV_CONFIG=/etc/gono-cloud/config.toml gono-cloud consistency-check` after restores or
+- Run `GONE_CLOUD_CONFIG=/etc/gono-cloud/config.toml gono-cloud consistency-check` after restores or
   manual filesystem maintenance. It is read-only and reports SQLite/file/xattr mismatches, orphan
   `file_id` rows, and orphan dead props.
-- Run `NC_DAV_CONFIG=/etc/gono-cloud/config.toml gono-cloud consistency-repair` first to preview safe
+- Run `GONE_CLOUD_CONFIG=/etc/gono-cloud/config.toml gono-cloud consistency-repair` first to preview safe
   fixes. Only run `gono-cloud consistency-repair --apply` after a backup; it can create missing
   `file_ids`, rewrite missing or stale xattrs/cache, and remove orphan `file_ids`/dead props.
 - Configure `[sync] change_log_retention_days` and `change_log_min_entries` for the deployment's

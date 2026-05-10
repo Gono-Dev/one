@@ -885,9 +885,9 @@ Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
 WorkingDirectory=${STATE_DIR}
-Environment=NC_DAV_CONFIG=${CONFIG_FILE}
-Environment=NC_DAV_INSECURE_HTTP=${INSECURE_HTTP}
-Environment=NC_DAV_LOG_FORMAT=${LOG_FORMAT}
+Environment=GONE_CLOUD_CONFIG=${CONFIG_FILE}
+Environment=GONE_CLOUD_INSECURE_HTTP=${INSECURE_HTTP}
+Environment=GONE_CLOUD_LOG_FORMAT=${LOG_FORMAT}
 Environment=RUST_LOG=${RUST_LOG_VALUE}
 ExecStart=${BIN_PATH}
 Restart=on-failure
@@ -932,11 +932,11 @@ write_launchd_plist() {
     <string>$(xml_escape "${RUN_GROUP}")</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>NC_DAV_CONFIG</key>
+        <key>GONE_CLOUD_CONFIG</key>
         <string>$(xml_escape "${CONFIG_FILE}")</string>
-        <key>NC_DAV_INSECURE_HTTP</key>
+        <key>GONE_CLOUD_INSECURE_HTTP</key>
         <string>$(xml_escape "${INSECURE_HTTP}")</string>
-        <key>NC_DAV_LOG_FORMAT</key>
+        <key>GONE_CLOUD_LOG_FORMAT</key>
         <string>$(xml_escape "${LOG_FORMAT}")</string>
         <key>RUST_LOG</key>
         <string>$(xml_escape "${RUST_LOG_VALUE}")</string>
@@ -1373,7 +1373,7 @@ install_service() {
   write_service_definition
 
   if [[ "${INSECURE_HTTP}" == "1" && "${BIND}" != 127.* && "${BIND}" != localhost:* ]]; then
-    warn "NC_DAV_INSECURE_HTTP=1 with non-loopback bind '${BIND}'. Put this behind trusted network controls or enable TLS."
+    warn "GONE_CLOUD_INSECURE_HTTP=1 with non-loopback bind '${BIND}'. Put this behind trusted network controls or enable TLS."
   fi
 
   start_time="$(date '+%Y-%m-%d %H:%M:%S')"

@@ -25,7 +25,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let config_path = std::env::var("NC_DAV_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
+    let config_path =
+        std::env::var("GONE_CLOUD_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
     let config = Config::load_or_dev_default(&config_path)?;
     match command {
         Command::Serve => run_server(&config_path, config).await,
@@ -77,13 +78,13 @@ async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
                 .await
                 .with_context(|| format!("load TLS certificate {cert_file} and key {key_file}"))?,
         )
-    } else if std::env::var("NC_DAV_INSECURE_HTTP").as_deref() == Ok("1") {
-        tracing::warn!("NC_DAV_INSECURE_HTTP=1 set; serving Basic Auth over plain HTTP");
+    } else if std::env::var("GONE_CLOUD_INSECURE_HTTP").as_deref() == Ok("1") {
+        tracing::warn!("GONE_CLOUD_INSECURE_HTTP=1 set; serving Basic Auth over plain HTTP");
         None
     } else {
         bail!(
             "TLS certificate or key missing: cert_file={cert_file}, key_file={key_file}. \
-             Create them or set NC_DAV_INSECURE_HTTP=1 for local-only smoke testing."
+             Create them or set GONE_CLOUD_INSECURE_HTTP=1 for local-only smoke testing."
         );
     };
 
@@ -359,7 +360,7 @@ fn print_help() {
         "  gono-cloud app-password-scope <username> <label> [--mount /client=/storage:permission]... [--expires-at TIMESTAMP|--no-expiry]\n",
         "\n",
         "Environment:\n",
-        "  NC_DAV_CONFIG    Path to config.toml (default: config.toml)\n",
+        "  GONE_CLOUD_CONFIG    Path to config.toml (default: config.toml)\n",
     ));
 }
 
@@ -576,7 +577,7 @@ fn init_tracing() {
 }
 
 fn log_format_from_env() -> LogFormat {
-    std::env::var("NC_DAV_LOG_FORMAT")
+    std::env::var("GONE_CLOUD_LOG_FORMAT")
         .ok()
         .as_deref()
         .map(LogFormat::parse)

@@ -42,8 +42,8 @@ litmus_cmd() {
 }
 
 find_port() {
-  if [[ -n "${NC_DAV_SMOKE_PORT:-}" ]]; then
-    echo "${NC_DAV_SMOKE_PORT}"
+  if [[ -n "${GONE_CLOUD_SMOKE_PORT:-}" ]]; then
+    echo "${GONE_CLOUD_SMOKE_PORT}"
     return
   fi
 
@@ -251,9 +251,9 @@ echo "building gono-cloud"
 cargo build --quiet --manifest-path "${ROOT}/Cargo.toml"
 
 echo "starting temporary gono-cloud on ${BASE_URL}"
-NC_DAV_CONFIG="${CONFIG_FILE}" \
-NC_DAV_INSECURE_HTTP=1 \
-NC_DAV_LOG_FORMAT=text \
+GONE_CLOUD_CONFIG="${CONFIG_FILE}" \
+GONE_CLOUD_INSECURE_HTTP=1 \
+GONE_CLOUD_LOG_FORMAT=text \
 RUST_LOG="${RUST_LOG:-info}" \
 "${ROOT}/target/debug/gono-cloud" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"

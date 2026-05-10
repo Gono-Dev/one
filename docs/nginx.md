@@ -103,7 +103,7 @@ bind = "127.0.0.1:16102"
 base_url = "https://files.example.com"
 ```
 
-The packaged service defaults to local plain HTTP through `NC_DAV_INSECURE_HTTP=1`, which is
+The packaged service defaults to local plain HTTP through `GONE_CLOUD_INSECURE_HTTP=1`, which is
 appropriate only while the bind address remains loopback-only. If you expose the application without
 a reverse proxy, provide `cert_file` and `key_file` instead of using insecure HTTP.
 
