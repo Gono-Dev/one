@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Context;
 use axum::{
@@ -7,16 +7,15 @@ use axum::{
     response::{IntoResponse, Response},
     Extension,
 };
-use sqlx::SqlitePool;
 use tracing::error;
 
-use crate::{auth::Principal, db, state::AppState};
+use crate::{auth::Principal, db, permissions, state::AppState};
 
 pub async fn handler(
     State(state): State<Arc<AppState>>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    match render_metrics(&state, &principal.username).await {
+    match render_metrics(&state, &principal).await {
         Ok(body) => ([(header::CONTENT_TYPE, prometheus_content_type())], body).into_response(),
         Err(err) => {
             error!(?err, "collect metrics");
@@ -29,40 +28,40 @@ pub async fn handler(
     }
 }
 
-async fn render_metrics(state: &AppState, owner: &str) -> anyhow::Result<String> {
-    let file_records = count_owner_rows(
+async fn render_metrics(state: &AppState, principal: &Principal) -> anyhow::Result<String> {
+    let owner = principal.username.as_str();
+    let file_records = count_visible_paths(
         &state.db,
-        "SELECT COUNT(*) FROM file_ids WHERE owner = ?1",
+        "SELECT rel_path FROM file_ids WHERE owner = ?1",
         owner,
+        principal,
     )
     .await
     .context("count file records")?;
-    let change_log_entries = count_owner_rows(
+    let change_log_entries = count_visible_paths(
         &state.db,
-        "SELECT COUNT(*) FROM change_log WHERE owner = ?1",
+        "SELECT rel_path FROM change_log WHERE owner = ?1",
         owner,
+        principal,
     )
     .await
     .context("count change log entries")?;
-    let upload_sessions = count_owner_rows(
+    let upload_sessions = count_visible_paths(
         &state.db,
-        "SELECT COUNT(*) FROM upload_sessions WHERE owner = ?1",
+        "SELECT target_path FROM upload_sessions WHERE owner = ?1",
         owner,
+        principal,
     )
     .await
     .context("count upload sessions")?;
-    let expired_upload_sessions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM upload_sessions WHERE expires_at < ?1")
-            .bind(db::unix_timestamp())
-            .fetch_one(&state.db)
+    let expired_upload_sessions =
+        count_visible_expired_upload_sessions(&state.db, owner, principal)
             .await
             .context("count expired upload sessions")?;
-    let sync_token = db::current_sync_token(&state.db, owner)
-        .await
-        .context("load sync token")?;
-    let change_log_floor_token = db::change_log_floor_token(&state.db, owner, sync_token)
-        .await
-        .context("load change log floor token")?;
+    let (sync_token, change_log_floor_token) =
+        visible_change_log_tokens(&state.db, owner, principal)
+            .await
+            .context("load visible change log tokens")?;
     let files_root = state.files_root_for_owner(owner)?;
     let space_root = if files_root.exists() {
         files_root
@@ -76,22 +75,22 @@ async fn render_metrics(state: &AppState, owner: &str) -> anyhow::Result<String>
 
     let mut body = format!(
         concat!(
-            "# HELP gono_cloud_file_records_total SQLite file metadata rows for the owner.\n",
+            "# HELP gono_cloud_file_records_total SQLite file metadata rows visible to the current app password.\n",
             "# TYPE gono_cloud_file_records_total gauge\n",
             "gono_cloud_file_records_total {}\n",
-            "# HELP gono_cloud_change_log_entries_total SQLite change log rows for the owner.\n",
+            "# HELP gono_cloud_change_log_entries_total SQLite change log rows visible to the current app password.\n",
             "# TYPE gono_cloud_change_log_entries_total gauge\n",
             "gono_cloud_change_log_entries_total {}\n",
-            "# HELP gono_cloud_upload_sessions_total Active chunked upload sessions for the owner.\n",
+            "# HELP gono_cloud_upload_sessions_total Active chunked upload sessions visible to the current app password.\n",
             "# TYPE gono_cloud_upload_sessions_total gauge\n",
             "gono_cloud_upload_sessions_total {}\n",
-            "# HELP gono_cloud_upload_sessions_expired_total Expired chunked upload sessions pending cleanup.\n",
+            "# HELP gono_cloud_upload_sessions_expired_total Expired chunked upload sessions visible to the current app password and pending cleanup.\n",
             "# TYPE gono_cloud_upload_sessions_expired_total gauge\n",
             "gono_cloud_upload_sessions_expired_total {}\n",
-            "# HELP gono_cloud_sync_token Current WebDAV sync token for the owner.\n",
+            "# HELP gono_cloud_sync_token Current WebDAV sync token visible to the current app password.\n",
             "# TYPE gono_cloud_sync_token gauge\n",
             "gono_cloud_sync_token {}\n",
-            "# HELP gono_cloud_change_log_floor_token Oldest previous sync token that can be used without a full resync.\n",
+            "# HELP gono_cloud_change_log_floor_token Oldest visible previous sync token that can be used without a full resync.\n",
             "# TYPE gono_cloud_change_log_floor_token gauge\n",
             "gono_cloud_change_log_floor_token {}\n",
             "# HELP gono_cloud_storage_files_available_bytes Available bytes in the files storage root.\n",
@@ -158,11 +157,70 @@ async fn render_metrics(state: &AppState, owner: &str) -> anyhow::Result<String>
     Ok(body)
 }
 
-async fn count_owner_rows(pool: &SqlitePool, query: &str, owner: &str) -> anyhow::Result<i64> {
-    let count = sqlx::query_scalar(query)
+async fn visible_change_log_tokens(
+    pool: &sqlx::SqlitePool,
+    owner: &str,
+    principal: &Principal,
+) -> anyhow::Result<(i64, i64)> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT rel_path, sync_token FROM change_log WHERE owner = ?1 ORDER BY sync_token ASC",
+    )
+    .bind(owner)
+    .fetch_all(pool)
+    .await?;
+
+    let mut min_visible = None::<i64>;
+    let mut max_visible = 0_i64;
+    for (path, token) in rows {
+        if permissions::resolve_scope_for_storage_path(principal, Path::new(&path))?.is_some() {
+            min_visible.get_or_insert(token);
+            max_visible = token;
+        }
+    }
+    let floor_token = min_visible
+        .map(|token| token.saturating_sub(1))
+        .unwrap_or(max_visible);
+    Ok((max_visible, floor_token))
+}
+
+async fn count_visible_paths(
+    pool: &sqlx::SqlitePool,
+    query: &str,
+    owner: &str,
+    principal: &Principal,
+) -> anyhow::Result<i64> {
+    let paths: Vec<String> = sqlx::query_scalar(query)
         .bind(owner)
-        .fetch_one(pool)
+        .fetch_all(pool)
         .await?;
+    count_visible_path_strings(principal, paths)
+}
+
+async fn count_visible_expired_upload_sessions(
+    pool: &sqlx::SqlitePool,
+    owner: &str,
+    principal: &Principal,
+) -> anyhow::Result<i64> {
+    let paths: Vec<String> = sqlx::query_scalar(
+        "SELECT target_path FROM upload_sessions WHERE owner = ?1 AND expires_at < ?2",
+    )
+    .bind(owner)
+    .bind(db::unix_timestamp())
+    .fetch_all(pool)
+    .await?;
+    count_visible_path_strings(principal, paths)
+}
+
+fn count_visible_path_strings(
+    principal: &Principal,
+    paths: impl IntoIterator<Item = String>,
+) -> anyhow::Result<i64> {
+    let mut count = 0_i64;
+    for path in paths {
+        if permissions::resolve_scope_for_storage_path(principal, Path::new(&path))?.is_some() {
+            count += 1;
+        }
+    }
     Ok(count)
 }
 

@@ -59,9 +59,9 @@ Current compatibility status with litmus 0.17:
 - Persisted lock discovery preserves the client-supplied owner value.
 - The only remaining warning is `delete_fragment`: neon/litmus and the HTTP stack normalize `#fragment` before the request reaches the WebDAV service, so the handler cannot reliably distinguish `/frag/` from `/frag/#ment`. If a lower layer exposes `#` in the request target, `gono-cloud` rejects it before dispatch.
 
-## Nextcloud Desktop Smoke
+## Gono Cloud Desktop Smoke
 
-Start the service with a real TLS certificate or with local-only HTTP for development. For the Nextcloud desktop client, use the service root URL:
+Start the service with a real TLS certificate or with local-only HTTP for development. For the Gono Cloud desktop client, use the service root URL:
 
 ```text
 http://127.0.0.1:<port>

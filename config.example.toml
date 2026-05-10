@@ -13,7 +13,11 @@ path = "data/gono-cloud.db"
 max_connections = 5
 
 [auth]
-realm = "Nextcloud"
+realm = "Gono Cloud"
+
+[admin]
+enabled = false
+users = []
 
 [sync]
 change_log_retention_days = 30

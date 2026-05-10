@@ -12,25 +12,35 @@ CentOS/RHEL-compatible systems with:
 bash <(curl -sL https://run.gono.cloud)
 ```
 
-Running without arguments starts an interactive menu. Choose `1` to install or upgrade, `2` to
-uninstall, or use the status/log/restart/user-management entries for service management.
+Running without arguments starts the interactive menu. Choose `1` to install or upgrade, `2` to
+restart, `3` to uninstall, `4` to show status, `5` to follow logs, `6` for help, or `0` to exit.
 
 To make that command work in production, `https://run.gono.cloud` must serve the raw contents of
 `scripts/install.sh` at the origin path `/`. Redirects are fine as long as `curl -sL` reaches the
-script. Release archives are downloaded from the GitHub Release by default, or users can pass
-`GONO_CLOUD_BIN_URL`/`--bin-url`.
+script. Remote installs download the latest release archive from GitHub Releases.
 
 The installer:
 
 - detects macOS or Linux and downloads the matching `x86_64`, `aarch64`, or Linux 32-bit ARM
   release artifact from GitHub Releases;
-- when run from a checked-out repository, defaults to building and installing the local binary
+- when run from a checked-out repository, automatically prefers a local release binary/build
   instead of downloading a release artifact;
 - installs the binary at `/opt/gono-cloud/bin/gono-cloud`;
 - on Linux, creates the `gono-cloud` system user and installs `gono-cloud.service` through systemd;
 - on macOS, installs a LaunchDaemon named `cloud.gono.gono-cloud`;
-- writes the platform config file if it does not already exist;
+- asks for first-install settings and writes the platform config file if it does not already exist;
 - creates the platform data directory for SQLite, files, uploads, and xattrs.
+
+Web admin is disabled by default. During first install, the menu asks whether to enable the built-in
+`/admin` management page and which local users may access it through Basic Auth. Existing config
+files are preserved by the installer during upgrades, so add or edit `[admin]` manually when
+enabling admin on an existing installation. When exposing `/admin` through a reverse proxy, consider
+adding an IP allowlist or another network-level access control in front of it.
+
+The `/admin/settings` page can edit the restart-applied runtime settings stored in SQLite,
+including `server.base_url`, `auth.realm`, sync retention, notify push options, and admin access.
+Startup-only paths such as bind address, TLS files, storage directory, and database path remain
+read-only and continue to come from `config.toml`.
 
 Default Linux layout:
 
@@ -75,18 +85,9 @@ ARM mapping:
 | Debian/Ubuntu 32-bit ARMv7 | `armv8l`, `armv7l`, `armhf` | `linux-armv7` |
 | Debian/Ubuntu 32-bit ARMv6 | `armv6l` | `linux-armv6` |
 
-Set `GONO_CLOUD_ARCH` to override architecture detection on unusual systems:
-
-```sh
-GONO_CLOUD_ARCH=aarch64 bash <(curl -sL https://run.gono.cloud)
-GONO_CLOUD_ARCH=armv7 bash <(curl -sL https://run.gono.cloud)
-```
-
-Each archive must contain an executable named `gono-cloud`. You can also override the artifact URL:
-
-```sh
-GONO_CLOUD_BIN_URL=https://example.com/gono-cloud-linux-x86_64.tar.gz bash <(curl -sL https://run.gono.cloud)
-```
+Each archive must contain an executable named `gono-cloud`. The interactive installer does not
+accept command-line overrides; publish the latest-style assets above before using the remote install
+entrypoint.
 
 Build a release archive for the current host with:
 
@@ -104,7 +105,7 @@ dist/gono-cloud-linux-x86_64.tar.gz.sha256
 dist/gono-cloud-0.1.0-linux-x86_64.tar.gz.sha256
 ```
 
-Cross-builds can pass Cargo and installer target names explicitly:
+Cross-builds can pass Cargo and release target names explicitly:
 
 ```sh
 GONO_CLOUD_CARGO_TARGET=aarch64-unknown-linux-gnu \
@@ -118,19 +119,14 @@ On `v*` tag builds, GitHub Actions packages native Linux/macOS artifacts for `x8
 separate litmus compatibility job without creating a GitHub Release. Ordinary pushes and pull
 requests do not run the Rust check/smoke job in CI.
 
-The installer uses GitHub Release URLs by default:
+The installer uses latest GitHub Release URLs:
 
 ```text
-latest:
 https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-linux-x86_64.tar.gz
-
-versioned:
-https://github.com/Gono-Dev/cloud.server/releases/download/v0.1.0/gono-cloud-0.1.0-linux-x86_64.tar.gz
 ```
 
-For versioned installs, both `--version 0.1.0` and `--version v0.1.0` resolve to the tag
-`v0.1.0` and the asset name `gono-cloud-0.1.0-<target>.tar.gz`. If a `.sha256` sidecar is present,
-the installer downloads it and verifies the archive automatically.
+If a `.sha256` sidecar is present, the installer downloads it and verifies the archive
+automatically.
 
 Create the first GitHub Release from a clean `main` branch with:
 
@@ -151,55 +147,15 @@ From a checked-out repository, the installer can be used directly:
 scripts/install.sh
 ```
 
-This also opens the interactive menu. For unattended local installs, pass a command explicitly:
+This opens the same interactive menu as the remote installer. Choose `1` to install or upgrade. If
+the script needs elevated privileges, it builds or locates the local release binary first when
+possible, then re-runs the selected action through `sudo`. Local repository installs prefer
+`target/release/gono-cloud` or a fresh release build; remote installs continue to use release
+artifacts.
 
-```sh
-scripts/install.sh install
-```
-
-If it needs elevated privileges, it first builds the local binary as the current user and then
-re-runs the same local script through `sudo`. This avoids downloading `https://run.gono.cloud` while
-developing locally.
-
-Useful local overrides:
-
-```sh
-GONO_CLOUD_BUILD_PROFILE=debug scripts/install.sh install
-GONO_CLOUD_BIN=/absolute/path/to/gono-cloud scripts/install.sh install
-GONO_CLOUD_LOCAL_BUILD=0 GONO_CLOUD_BIN=target/release/gono-cloud scripts/install.sh install
-GONO_CLOUD_INSTALL_SOURCE=release scripts/install.sh install
-```
-
-`GONO_CLOUD_INSTALL_SOURCE=auto` is the default: local repository installs use the local binary, while
-`bash <(curl -sL https://run.gono.cloud)` continues to use release artifacts.
-
-The installer also accepts command-line options for the common environment variables:
-
-```sh
-scripts/install.sh --help
-scripts/install.sh install --debug
-scripts/install.sh install --bin target/release/gono-cloud
-scripts/install.sh install --release --version latest
-scripts/install.sh install --domain files.example.com --bind 127.0.0.1:18080
-```
-
-It can also be used as a lightweight service management script, in the same style as common
-one-file installers:
-
-```sh
-scripts/install.sh status
-scripts/install.sh logs
-scripts/install.sh restart
-scripts/install.sh users
-scripts/install.sh uninstall
-scripts/install.sh uninstall --purge
-```
-
-The user-management menu wraps the installed `gono-cloud` binary and the configured SQLite database.
-It can list local application users with their app password labels/counts, create a user with a
-newly generated app password, or delete a local user. App passwords are printed once when a user is
-created; existing plaintext app passwords cannot be displayed later because only password hashes are
-stored.
+The installer no longer accepts command-line subcommands or options. Use the menu for service
+management: restart, uninstall, status, and logs. User and app-password management is available from
+the Web Admin UI after admin is enabled.
 
 ## Domain And Reverse Proxy
 
@@ -219,7 +175,8 @@ gono.cloud {
 ```
 
 Notify Push uses WebSocket at `/push/ws`. Caddy handles WebSocket upgrade automatically. For Nginx,
-make sure the proxy keeps the upgrade headers:
+make sure the proxy keeps the upgrade headers. A complete Nginx reference configuration is available
+in [docs/nginx.md](nginx.md):
 
 ```nginx
 location / {
@@ -240,12 +197,9 @@ location /push/ws {
 }
 ```
 
-Use a custom domain or port with:
-
-```sh
-GONO_CLOUD_DOMAIN=files.example.com bash <(curl -sL https://run.gono.cloud)
-GONO_CLOUD_BASE_URL=https://files.example.com GONO_CLOUD_BIND=127.0.0.1:18080 bash <(curl -sL https://run.gono.cloud)
-```
+On a first install, choose `1` in the interactive menu and enter the custom domain, base URL, and
+bind address when prompted. Existing installations preserve `config.toml`; edit the config file for
+startup-only values such as bind address, then restart from the menu.
 
 ## First Password
 
@@ -278,7 +232,7 @@ Before calling the deployment complete:
 - run `cargo check`, `cargo test`, and `scripts/compat-smoke.sh`;
 - optionally run `RUN_LITMUS=1 scripts/compat-smoke.sh` or the manual litmus workflow before
   release;
-- connect with Nextcloud Desktop using the service root URL, such as `https://gono.cloud`;
+- connect with Gono Cloud Desktop using the service root URL, such as `https://gono.cloud`;
 - verify upload, download, rename, copy, delete, large chunked upload, and restart behavior;
 - confirm capabilities advertise `notify_push` and `/push/ws` accepts WebSocket login;
 - confirm `/metrics` requires Basic Auth and logs are collected in the expected format.

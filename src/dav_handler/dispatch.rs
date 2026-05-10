@@ -3,6 +3,7 @@ use std::{
     convert::Infallible,
     io::Cursor,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -12,6 +13,7 @@ use axum::{
     extract::OriginalUri,
     http::{
         header::{HeaderName, CONTENT_LENGTH},
+        uri::PathAndQuery,
         HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri,
     },
     response::IntoResponse,
@@ -32,6 +34,7 @@ use crate::{
     },
     db,
     locks::SqliteLs,
+    permissions::{self, PermissionLevel, ScopeMatch},
     state::AppState,
     storage,
 };
@@ -78,10 +81,11 @@ impl NcDavService {
             return (StatusCode::FORBIDDEN, "Invalid WebDAV path").into_response();
         }
 
-        let owner = match authenticated_owner(&request) {
-            Ok(owner) => owner,
+        let principal = match authenticated_principal(&request) {
+            Ok(principal) => principal,
             Err(response) => return response,
         };
+        let owner = principal.username.clone();
         if let Err(response) = ensure_request_owner_path_matches(original_uri.path(), &owner) {
             return response;
         }
@@ -94,34 +98,89 @@ impl NcDavService {
         };
 
         if request.method() == Method::HEAD {
-            return self.handle_head(&owner, &files_root, request).await;
+            return self.handle_head(&principal, &files_root, request).await;
         }
 
         match request.method().as_str() {
-            "REPORT" => report::handle(self.state.clone(), owner, files_root, request).await,
-            "SEARCH" => search::handle(self.state.clone(), owner, files_root, request).await,
+            "REPORT" => report::handle(self.state.clone(), principal, files_root, request).await,
+            "SEARCH" => search::handle(self.state.clone(), principal, files_root, request).await,
             "MKCOL" | "PUT" | "MOVE" | "DELETE" if is_chunking_path(request.uri().path()) => {
-                chunked_upload::handle(self.state.clone(), owner, files_root, request).await
+                chunked_upload::handle(self.state.clone(), principal, files_root, request).await
             }
-            _ => self.forward_to_dav_server(owner, files_root, request).await,
+            _ => {
+                self.forward_to_dav_server(principal, files_root, request)
+                    .await
+            }
         }
     }
 
     async fn forward_to_dav_server(
         self,
-        owner: String,
+        principal: Principal,
         files_root: PathBuf,
         mut request: Request<Body>,
     ) -> Response<Body> {
+        let owner = principal.username.clone();
         let method = request.method().clone();
         let original_uri = original_request_uri(&request);
-        let request_path = original_uri.path().to_owned();
+        let client_request_path = original_uri.path().to_owned();
+        let client_rel_path = match parse_rel_path_for_owner(&client_request_path, &owner) {
+            Ok(path) => path,
+            Err(err) => {
+                warn!(?err, path = %client_request_path, "failed to resolve WebDAV request path");
+                return (StatusCode::FORBIDDEN, "Invalid WebDAV path").into_response();
+            }
+        };
+        let scope_match = match permissions::resolve_scope_for_client_path(
+            &principal,
+            &client_rel_path,
+        ) {
+            Ok(scope_match) => scope_match,
+            Err(_err)
+                if method.as_str() == "PROPFIND"
+                    && permissions::is_virtual_collection_path(&principal, &client_rel_path) =>
+            {
+                return virtual_propfind_response(
+                    &principal,
+                    &client_request_path,
+                    request.headers(),
+                    &client_rel_path,
+                );
+            }
+            Err(err) => {
+                warn!(?err, path = %client_rel_path.display(), "WebDAV path is outside app password scopes");
+                return (StatusCode::FORBIDDEN, "Path is outside app password scope")
+                    .into_response();
+            }
+        };
+        if !permissions::is_method_allowed(&scope_match, &method) {
+            return (StatusCode::FORBIDDEN, "App password scope is view-only").into_response();
+        }
+        let request_path = match path_for_request_style(
+            &client_request_path,
+            &owner,
+            &scope_match.storage_rel_path,
+        ) {
+            Ok(path) => path,
+            Err(err) => {
+                error!(?err, "failed to rewrite WebDAV request path");
+                return metadata_error_response();
+            }
+        };
+        let request_uri = match uri_with_replaced_path(&original_uri, &request_path) {
+            Ok(uri) => uri,
+            Err(err) => {
+                error!(?err, "failed to build rewritten WebDAV URI");
+                return metadata_error_response();
+            }
+        };
         let mount_prefix = mount_prefix_for_path(&request_path, &owner);
         let destination = request
             .headers()
             .get("destination")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let mut storage_destination = None::<String>;
         let upload_mtime = if method == Method::PUT {
             match parse_x_oc_mtime(request.headers()) {
                 Ok(mtime) => mtime,
@@ -139,10 +198,67 @@ impl NcDavService {
         };
         if matches!(method.as_str(), "COPY" | "MOVE") {
             if let Some(destination) = destination.as_deref() {
-                if let Err(err) = parse_rel_path_for_owner(destination, &owner) {
-                    error!(?err, "failed to validate Destination header");
-                    return (StatusCode::BAD_REQUEST, "Invalid Destination header").into_response();
+                let destination_rel = match parse_rel_path_for_owner(destination, &owner) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        error!(?err, "failed to validate Destination header");
+                        return (StatusCode::BAD_REQUEST, "Invalid Destination header")
+                            .into_response();
+                    }
+                };
+                let destination_scope = match permissions::resolve_scope_for_client_path(
+                    &principal,
+                    &destination_rel,
+                ) {
+                    Ok(scope_match) => scope_match,
+                    Err(err) => {
+                        warn!(?err, path = %destination_rel.display(), "Destination is outside app password scopes");
+                        return (
+                            StatusCode::FORBIDDEN,
+                            "Destination is outside app password scope",
+                        )
+                            .into_response();
+                    }
+                };
+                if destination_scope.scope.permission != PermissionLevel::Full
+                    || scope_match.scope.permission != PermissionLevel::Full
+                {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        "MOVE and COPY require full scope access",
+                    )
+                        .into_response();
                 }
+                let destination_style_path = match path_part(destination) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        error!(?err, "failed to parse Destination path");
+                        return (StatusCode::BAD_REQUEST, "Invalid Destination header")
+                            .into_response();
+                    }
+                };
+                let rewritten_destination = match path_for_request_style(
+                    &destination_style_path,
+                    &owner,
+                    &destination_scope.storage_rel_path,
+                ) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        error!(?err, "failed to rewrite Destination header");
+                        return metadata_error_response();
+                    }
+                };
+                let header_value = match HeaderValue::from_str(&rewritten_destination) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        error!(?err, "rewritten Destination header is invalid");
+                        return metadata_error_response();
+                    }
+                };
+                request.headers_mut().insert("destination", header_value);
+                storage_destination = Some(rewritten_destination);
+            } else {
+                return (StatusCode::BAD_REQUEST, "Destination header is required").into_response();
             }
         }
         if method == Method::PUT && auto_mkcol_enabled(request.headers()) {
@@ -163,7 +279,7 @@ impl NcDavService {
         } else {
             None
         };
-        *request.uri_mut() = original_uri;
+        *request.uri_mut() = request_uri;
         let handler = DavHandler::builder()
             .filesystem(Box::new(NcLocalFs::new(
                 &files_root,
@@ -194,6 +310,7 @@ impl NcDavService {
             }
             None => response,
         };
+        let response = rewrite_multistatus_hrefs(response, &principal).await;
 
         self.finalize_webdav_response(
             &owner,
@@ -201,7 +318,7 @@ impl NcDavService {
             response,
             &method,
             &request_path,
-            destination,
+            storage_destination.or(destination),
             source_record,
             upload_mtime,
         )
@@ -419,12 +536,13 @@ impl NcDavService {
 
     async fn handle_head(
         &self,
-        owner: &str,
+        principal: &Principal,
         files_root: &Path,
         request: Request<Body>,
     ) -> Response<Body> {
+        let owner = &principal.username;
         let original_uri = original_request_uri(&request);
-        let rel_path = match parse_rel_path_for_owner(original_uri.path(), owner) {
+        let client_rel_path = match parse_rel_path_for_owner(original_uri.path(), owner) {
             Ok(path) => path,
             Err(err) => {
                 warn!(
@@ -435,6 +553,22 @@ impl NcDavService {
                 return empty_response(StatusCode::FORBIDDEN);
             }
         };
+        let scope_match = match permissions::resolve_scope_for_client_path(
+            principal,
+            &client_rel_path,
+        ) {
+            Ok(scope_match) => scope_match,
+            Err(_err) if permissions::is_virtual_collection_path(principal, &client_rel_path) => {
+                let mut response = empty_response(StatusCode::OK);
+                insert_header(response.headers_mut(), CONTENT_LENGTH, "0");
+                return response;
+            }
+            Err(err) => {
+                warn!(?err, path = %client_rel_path.display(), "HEAD target is outside app password scopes");
+                return empty_response(StatusCode::FORBIDDEN);
+            }
+        };
+        let rel_path = scope_match.storage_rel_path.clone();
         let abs_path = match storage::safe_existing_path(files_root, &rel_path) {
             Ok(path) => path,
             Err(_) => return empty_response(StatusCode::NOT_FOUND),
@@ -478,7 +612,7 @@ impl NcDavService {
         insert_header(
             headers,
             X_NC_PERMISSIONS,
-            permissions_string(record.permissions, metadata.is_dir()),
+            scoped_permissions_string(&scope_match, record.permissions, metadata.is_dir()),
         );
         let content_length = if metadata.is_file() {
             metadata.len().to_string()
@@ -584,14 +718,14 @@ fn is_chunking_path(path: &str) -> bool {
         || path.starts_with("/remote.php/webdav/uploads/")
 }
 
-fn authenticated_owner(request: &Request<Body>) -> Result<String, Response<Body>> {
+fn authenticated_principal(request: &Request<Body>) -> Result<Principal, Response<Body>> {
     let Some(principal) = request.extensions().get::<Principal>() else {
         return Err((StatusCode::UNAUTHORIZED, "Authentication required").into_response());
     };
     if principal.username.is_empty() {
         return Err((StatusCode::UNAUTHORIZED, "Authentication required").into_response());
     }
-    Ok(principal.username.clone())
+    Ok(principal.clone())
 }
 
 fn ensure_request_owner_path_matches(path: &str, owner: &str) -> Result<(), Response<Body>> {
@@ -706,6 +840,150 @@ async fn complete_propfind_not_found_propstats(
         append_missing_propstats(&bytes, requested_props).unwrap_or_else(|| bytes.to_vec());
     parts.headers.remove(CONTENT_LENGTH);
     Response::from_parts(parts, Body::from(patched))
+}
+
+async fn rewrite_multistatus_hrefs(
+    response: Response<Body>,
+    principal: &Principal,
+) -> Response<Body> {
+    if response.status() != StatusCode::MULTI_STATUS {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, PROPFIND_RESPONSE_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!(?err, "failed to buffer multistatus response body");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid WebDAV response body",
+            )
+                .into_response();
+        }
+    };
+    let patched =
+        rewrite_multistatus_hrefs_body(&bytes, principal).unwrap_or_else(|| bytes.to_vec());
+    parts.headers.remove(CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(patched))
+}
+
+fn rewrite_multistatus_hrefs_body(body: &[u8], principal: &Principal) -> Option<Vec<u8>> {
+    let mut root = Element::parse(Cursor::new(body)).ok()?;
+    let mut changed = false;
+
+    root.children.retain_mut(|node| {
+        let XMLNode::Element(element) = node else {
+            return true;
+        };
+        if !is_dav_element(element, "response") {
+            return true;
+        }
+        match rewrite_response_href(element, principal) {
+            Ok(Some(())) => {
+                changed = true;
+                true
+            }
+            Ok(None) => {
+                changed = true;
+                false
+            }
+            Err(err) => {
+                warn!(?err, "failed to rewrite WebDAV response href");
+                true
+            }
+        }
+    });
+
+    if !changed {
+        return None;
+    }
+
+    let mut output = Vec::new();
+    root.write(&mut output).ok()?;
+    Some(output)
+}
+
+fn rewrite_response_href(
+    response: &mut Element,
+    principal: &Principal,
+) -> anyhow::Result<Option<()>> {
+    let Some(href) = response_href(response) else {
+        return Ok(Some(()));
+    };
+    let href_path = path_part(&href)?;
+    let storage_rel = parse_rel_path_for_owner(&href_path, &principal.username)?;
+    let Some(scope_match) = permissions::resolve_scope_for_storage_path(principal, &storage_rel)?
+    else {
+        return Ok(None);
+    };
+
+    let href_prefix = mount_prefix_for_path(&href_path, &principal.username);
+    let client_href = path_for_rel_path(&href_prefix, &scope_match.client_rel_path)?;
+    if set_response_href(response, &client_href) {
+        patch_response_permissions(response, scope_match.scope.permission);
+    }
+    Ok(Some(()))
+}
+
+fn response_href(response: &Element) -> Option<String> {
+    response
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .find(|element| is_dav_element(element, "href"))
+        .and_then(element_text)
+}
+
+fn set_response_href(response: &mut Element, value: &str) -> bool {
+    let Some(href) = response
+        .children
+        .iter_mut()
+        .filter_map(XMLNode::as_mut_element)
+        .find(|element| is_dav_element(element, "href"))
+    else {
+        return false;
+    };
+    set_element_text(href, value);
+    true
+}
+
+fn patch_response_permissions(response: &mut Element, permission: PermissionLevel) {
+    if permission == PermissionLevel::Full {
+        return;
+    }
+
+    for propstat in response
+        .children
+        .iter_mut()
+        .filter_map(XMLNode::as_mut_element)
+        .filter(|element| is_dav_element(element, "propstat"))
+    {
+        for prop in propstat
+            .children
+            .iter_mut()
+            .filter_map(XMLNode::as_mut_element)
+            .filter(|element| is_dav_element(element, "prop"))
+        {
+            for child in prop.children.iter_mut().filter_map(XMLNode::as_mut_element) {
+                if child.name == "permissions" && child.namespace.as_deref() == Some(OC_NS) {
+                    set_element_text(child, readonly_permissions_string());
+                }
+            }
+        }
+    }
+}
+
+fn element_text(element: &Element) -> Option<String> {
+    element.children.iter().find_map(|child| match child {
+        XMLNode::Text(text) => Some(text.clone()),
+        _ => None,
+    })
+}
+
+fn set_element_text(element: &mut Element, value: &str) {
+    element.children.clear();
+    element.children.push(XMLNode::Text(value.to_owned()));
 }
 
 fn append_missing_propstats(body: &[u8], requested_props: &[RequestedProp]) -> Option<Vec<u8>> {
@@ -836,6 +1114,164 @@ fn write_target_rel_path(
 
     path.map(|path| parse_rel_path_for_owner(path, owner))
         .transpose()
+}
+
+fn virtual_propfind_response(
+    principal: &Principal,
+    request_path: &str,
+    headers: &HeaderMap,
+    client_rel_path: &Path,
+) -> Response<Body> {
+    let href_prefix = mount_prefix_for_path(request_path, &principal.username);
+    let depth_zero = headers
+        .get("depth")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim() == "0")
+        .unwrap_or(false);
+    let mut xml = multistatus_start();
+    append_virtual_collection_response(
+        &mut xml,
+        &href_prefix,
+        client_rel_path,
+        PermissionLevel::View,
+    );
+
+    if !depth_zero {
+        match permissions::virtual_collection_children(principal, client_rel_path) {
+            Ok(children) => {
+                for child in children {
+                    append_virtual_collection_response(
+                        &mut xml,
+                        &href_prefix,
+                        &child,
+                        permission_for_virtual_child(principal, &child),
+                    );
+                }
+            }
+            Err(err) => warn!(?err, "failed to list virtual app password scope children"),
+        }
+    }
+
+    xml.push_str("</d:multistatus>");
+    Response::builder()
+        .status(StatusCode::MULTI_STATUS)
+        .header("content-type", "application/xml; charset=utf-8")
+        .body(Body::from(xml))
+        .expect("valid virtual PROPFIND response")
+}
+
+fn permission_for_virtual_child(principal: &Principal, child: &Path) -> PermissionLevel {
+    principal
+        .scopes
+        .iter()
+        .find(|scope| scope.mount_path == child)
+        .map(|scope| scope.permission)
+        .unwrap_or(PermissionLevel::View)
+}
+
+fn append_virtual_collection_response(
+    xml: &mut String,
+    href_prefix: &str,
+    rel_path: &Path,
+    permission: PermissionLevel,
+) {
+    let Ok(href) = path_for_rel_path(href_prefix, rel_path) else {
+        return;
+    };
+    xml.push_str("<d:response><d:href>");
+    xml.push_str(&xml_escape(&href));
+    xml.push_str("</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><oc:permissions>");
+    xml.push_str(match permission {
+        PermissionLevel::Full => permissions_string(0, true),
+        PermissionLevel::View => readonly_permissions_string(),
+    });
+    xml.push_str("</oc:permissions><nc:has-preview>false</nc:has-preview></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>");
+}
+
+fn multistatus_start() -> String {
+    String::from(
+        r#"<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">"#,
+    )
+}
+
+fn scoped_permissions_string(
+    scope_match: &ScopeMatch,
+    permissions: i64,
+    is_collection: bool,
+) -> &'static str {
+    match scope_match.scope.permission {
+        PermissionLevel::Full => permissions_string(permissions, is_collection),
+        PermissionLevel::View => readonly_permissions_string(),
+    }
+}
+
+fn readonly_permissions_string() -> &'static str {
+    "RGDNV"
+}
+
+fn path_for_request_style(
+    request_path: &str,
+    owner: &str,
+    rel_path: &Path,
+) -> anyhow::Result<String> {
+    path_for_rel_path(&mount_prefix_for_path(request_path, owner), rel_path)
+}
+
+fn path_for_rel_path(prefix: &str, rel_path: &Path) -> anyhow::Result<String> {
+    let rel_path = storage::rel_path_string(rel_path)?;
+    let encoded = percent_encode_path(&rel_path);
+    if prefix.is_empty() {
+        if encoded.is_empty() {
+            Ok("/".to_owned())
+        } else {
+            Ok(format!("/{encoded}"))
+        }
+    } else if encoded.is_empty() {
+        Ok(format!("{prefix}/"))
+    } else {
+        Ok(format!("{prefix}/{encoded}"))
+    }
+}
+
+fn uri_with_replaced_path(uri: &Uri, path: &str) -> anyhow::Result<Uri> {
+    let path_and_query = if let Some(query) = uri.query() {
+        format!("{path}?{query}")
+    } else {
+        path.to_owned()
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(PathAndQuery::from_str(&path_and_query)?);
+    Ok(Uri::from_parts(parts)?)
+}
+
+fn path_part(path_or_uri: &str) -> anyhow::Result<String> {
+    if path_or_uri.starts_with("http://") || path_or_uri.starts_with("https://") {
+        Ok(path_or_uri.parse::<Uri>()?.path().to_owned())
+    } else {
+        Ok(path_or_uri.to_owned())
+    }
+}
+
+fn percent_encode_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                encoded.push(*byte as char)
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 pub(crate) fn original_request_uri(request: &Request<Body>) -> Uri {

@@ -1,20 +1,20 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{sync::broadcast, time};
 use tracing::{debug, warn};
 
-use crate::{notify_push::runtime::SubscribeError, state::AppState};
+use crate::{auth::Principal, notify_push::runtime::SubscribeError, permissions, state::AppState};
 
-use super::{NotifyRuntime, PushMessage};
+use super::{NotifyRuntime, PushMessage, UpdatedFiles};
 
 pub async fn handle_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
     runtime: Arc<NotifyRuntime>,
 ) {
-    let user = match time::timeout(
+    let principal = match time::timeout(
         runtime.auth_timeout(),
         authenticate(&mut socket, &state, &runtime),
     )
@@ -35,6 +35,7 @@ pub async fn handle_socket(
         }
     };
 
+    let user = principal.username.clone();
     let mut receiver = match runtime.subscribe(&user) {
         Ok(receiver) => receiver,
         Err(SubscribeError::LimitExceeded) => {
@@ -67,7 +68,11 @@ pub async fn handle_socket(
         tokio::select! {
             msg = receiver.recv() => {
                 match msg {
-                    Ok(message) => merge_pending(&mut pending, message),
+                    Ok(message) => {
+                        if let Some(message) = filter_message_for_principal(&state, &principal, message).await {
+                            merge_pending(&mut pending, message);
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         merge_pending(&mut pending, PushMessage::file(None));
                     }
@@ -122,7 +127,7 @@ async fn authenticate(
     socket: &mut WebSocket,
     state: &AppState,
     runtime: &NotifyRuntime,
-) -> Result<String, &'static str> {
+) -> Result<Principal, &'static str> {
     let username = read_text(socket).await.ok_or("Invalid auth message")?;
     let password = read_text(socket).await.ok_or("Invalid auth message")?;
 
@@ -132,7 +137,7 @@ async fn authenticate(
             .ok_or("Invalid pre-auth token")
     } else {
         match state.user_store.verify(&username, &password).await {
-            Ok(Some(_)) => Ok(username),
+            Ok(Some(principal)) => Ok(principal),
             Ok(None) => Err("Invalid credentials"),
             Err(_) => Err("Authentication backend error"),
         }
@@ -148,6 +153,51 @@ async fn read_text(socket: &mut WebSocket) -> Option<String> {
             _ => {}
         }
     }
+}
+
+async fn filter_message_for_principal(
+    state: &AppState,
+    principal: &Principal,
+    message: PushMessage,
+) -> Option<PushMessage> {
+    let PushMessage::File(files) = message else {
+        return Some(message);
+    };
+    let UpdatedFiles::Known(ids) = files else {
+        return principal_sees_entire_storage(principal).then_some(PushMessage::File(files));
+    };
+
+    let mut visible = BTreeSet::new();
+    for file_id in ids {
+        let rel_path =
+            match crate::db::file_rel_path_by_id(&state.db, &principal.username, file_id).await {
+                Ok(Some(rel_path)) => rel_path,
+                Ok(None) => continue,
+                Err(err) => {
+                    warn!(?err, file_id, "failed to resolve notify_push file id");
+                    continue;
+                }
+            };
+        if permissions::resolve_scope_for_storage_path(principal, Path::new(&rel_path))
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            visible.insert(file_id);
+        }
+    }
+
+    if visible.is_empty() {
+        None
+    } else {
+        Some(PushMessage::File(UpdatedFiles::Known(visible)))
+    }
+}
+
+fn principal_sees_entire_storage(principal: &Principal) -> bool {
+    principal.scopes.iter().any(|scope| {
+        scope.mount_path.as_os_str().is_empty() && scope.storage_path.as_os_str().is_empty()
+    })
 }
 
 fn merge_pending(pending: &mut Option<PushMessage>, message: PushMessage) {

@@ -10,6 +10,8 @@ pub struct Config {
     pub db: DbConfig,
     pub auth: AuthConfig,
     #[serde(default)]
+    pub admin: AdminConfig,
+    #[serde(default)]
     pub sync: SyncConfig,
     #[serde(default)]
     pub notify_push: NotifyPushConfig,
@@ -38,6 +40,23 @@ pub struct DbConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
     pub realm: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub users: Vec<String>,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            users: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,8 +204,9 @@ impl Config {
                 max_connections: 5,
             },
             auth: AuthConfig {
-                realm: "Nextcloud".to_owned(),
+                realm: "Gono Cloud".to_owned(),
             },
+            admin: AdminConfig::default(),
             sync: SyncConfig::default(),
             notify_push: NotifyPushConfig::default(),
         }

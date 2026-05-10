@@ -12,7 +12,7 @@ use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 use crate::{
-    auth::require_basic_auth, dav_handler::NcDavService, nextcloud_proto, notify_push,
+    admin, auth::require_basic_auth, dav_handler::NcDavService, nextcloud_proto, notify_push,
     state::AppState,
 };
 
@@ -59,6 +59,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     if state.notify_push.is_some() {
         app = app.merge(notify_push::routes::router(&state.notify_push_config.path));
+    }
+    if state.admin_config.enabled {
+        app = app.merge(admin::routes::router(state.clone()));
+    } else {
+        app = app.merge(admin::routes::disabled_router());
     }
 
     app.nest_service("/remote.php/dav", dav_service.clone())

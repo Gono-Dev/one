@@ -6,7 +6,9 @@ use gono_cloud::{
     build_router,
     consistency::{self, RepairMode},
     dav_handler::chunked_upload,
-    db, AppState, Config,
+    db::{self, AppPasswordScopeInput},
+    permissions::PermissionLevel,
+    AppState, Config,
 };
 use sqlx::SqlitePool;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -35,6 +37,25 @@ async fn main() -> anyhow::Result<()> {
             display_name,
         } => run_user_add(config, &username, display_name.as_deref()).await,
         Command::UserDelete { username } => run_user_delete(config, &username).await,
+        Command::AppPasswordList { username } => run_app_password_list(config, &username).await,
+        Command::AppPasswordAdd {
+            username,
+            label,
+            mounts,
+            expires_at,
+        } => run_app_password_add(config, &username, &label, &mounts, expires_at).await,
+        Command::AppPasswordReset { username, label } => {
+            run_app_password_reset(config, &username, &label).await
+        }
+        Command::AppPasswordDelete { username, label } => {
+            run_app_password_delete(config, &username, &label).await
+        }
+        Command::AppPasswordScope {
+            username,
+            label,
+            mounts,
+            expires_at,
+        } => run_app_password_scope(config, &username, &label, &mounts, expires_at).await,
         Command::Help => unreachable!("handled before config load"),
     }
 }
@@ -197,6 +218,123 @@ async fn run_user_delete(config: Config, username: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_app_password_list(config: Config, username: &str) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    let passwords = db::list_local_app_passwords(&pool, username).await?;
+    if passwords.is_empty() {
+        println!("No app passwords found for {username}.");
+        return Ok(());
+    }
+    println!(
+        "{:<24} {:<20} {:<20} SCOPES",
+        "LABEL", "LAST_USED", "EXPIRES"
+    );
+    for password in passwords {
+        let scopes = password
+            .scopes
+            .iter()
+            .map(|scope| {
+                format!(
+                    "{}={}:{}",
+                    scope.mount_path,
+                    scope.storage_path,
+                    scope.permission.as_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "{:<24} {:<20} {:<20} {}",
+            password.label,
+            password
+                .last_used_at
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            password
+                .expires_at
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "never".to_owned()),
+            scopes
+        );
+    }
+    Ok(())
+}
+
+async fn run_app_password_add(
+    config: Config,
+    username: &str,
+    label: &str,
+    mounts: &[String],
+    expires_at: Option<i64>,
+) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    let scopes = parse_mount_options(mounts)?;
+    let created =
+        db::create_local_app_password(&pool, username, label, expires_at, &scopes).await?;
+    println!("Created app password: {}", created.password_label);
+    println!("Username: {}", created.username);
+    println!("App password: {}", created.app_password);
+    println!("Save this password now; it cannot be shown again.");
+    Ok(())
+}
+
+async fn run_app_password_reset(config: Config, username: &str, label: &str) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    let reset = db::reset_local_app_password(&pool, username, label).await?;
+    println!("Reset app password: {}", reset.password_label);
+    println!("Username: {}", reset.username);
+    println!("App password: {}", reset.app_password);
+    println!("Save this password now; it cannot be shown again.");
+    Ok(())
+}
+
+async fn run_app_password_delete(
+    config: Config,
+    username: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    if db::delete_local_app_password(&pool, username, label).await? {
+        println!("Deleted app password {label} for {username}.");
+    } else {
+        println!("App password not found: {username}/{label}");
+    }
+    Ok(())
+}
+
+async fn run_app_password_scope(
+    config: Config,
+    username: &str,
+    label: &str,
+    mounts: &[String],
+    expires_at: ExpiryUpdate,
+) -> anyhow::Result<()> {
+    let pool = user_admin_pool(&config).await?;
+    if !mounts.is_empty() {
+        let scopes = parse_mount_options(mounts)?;
+        if db::replace_local_app_password_scopes(&pool, username, label, &scopes).await? {
+            println!("Updated scopes for app password {label}.");
+        } else {
+            println!("App password not found: {username}/{label}");
+        }
+    }
+    match expires_at {
+        ExpiryUpdate::Unchanged => {}
+        ExpiryUpdate::Never => {
+            db::update_local_app_password_expiry(&pool, username, label, None).await?;
+            println!("Updated expiry for app password {label}: never.");
+        }
+        ExpiryUpdate::At(timestamp) => {
+            db::update_local_app_password_expiry(&pool, username, label, Some(timestamp)).await?;
+            println!("Updated expiry for app password {label}: {timestamp}.");
+        }
+    }
+    if mounts.is_empty() && expires_at == ExpiryUpdate::Unchanged {
+        println!("No app password changes requested.");
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(concat!(
         "Usage:\n",
@@ -206,6 +344,11 @@ fn print_help() {
         "  gono-cloud user-list\n",
         "  gono-cloud user-add <username> [display-name]\n",
         "  gono-cloud user-delete <username>\n",
+        "  gono-cloud app-password-list <username>\n",
+        "  gono-cloud app-password-add <username> <label> [--mount /client=/storage:permission]... [--expires-at TIMESTAMP]\n",
+        "  gono-cloud app-password-reset <username> <label>\n",
+        "  gono-cloud app-password-delete <username> <label>\n",
+        "  gono-cloud app-password-scope <username> <label> [--mount /client=/storage:permission]... [--expires-at TIMESTAMP|--no-expiry]\n",
         "\n",
         "Environment:\n",
         "  NC_DAV_CONFIG    Path to config.toml (default: config.toml)\n",
@@ -225,7 +368,37 @@ enum Command {
     UserDelete {
         username: String,
     },
+    AppPasswordList {
+        username: String,
+    },
+    AppPasswordAdd {
+        username: String,
+        label: String,
+        mounts: Vec<String>,
+        expires_at: Option<i64>,
+    },
+    AppPasswordReset {
+        username: String,
+        label: String,
+    },
+    AppPasswordDelete {
+        username: String,
+        label: String,
+    },
+    AppPasswordScope {
+        username: String,
+        label: String,
+        mounts: Vec<String>,
+        expires_at: ExpiryUpdate,
+    },
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpiryUpdate {
+    Unchanged,
+    Never,
+    At(i64),
 }
 
 impl Command {
@@ -256,6 +429,39 @@ impl Command {
             [command, username] if command == "user-delete" => Ok(Self::UserDelete {
                 username: username.to_owned(),
             }),
+            [command, username] if command == "app-password-list" => Ok(Self::AppPasswordList {
+                username: username.to_owned(),
+            }),
+            [command, username, label, rest @ ..] if command == "app-password-add" => {
+                let (mounts, expires_at) = parse_app_password_add_options(rest)?;
+                Ok(Self::AppPasswordAdd {
+                    username: username.to_owned(),
+                    label: label.to_owned(),
+                    mounts,
+                    expires_at,
+                })
+            }
+            [command, username, label] if command == "app-password-reset" => {
+                Ok(Self::AppPasswordReset {
+                    username: username.to_owned(),
+                    label: label.to_owned(),
+                })
+            }
+            [command, username, label] if command == "app-password-delete" => {
+                Ok(Self::AppPasswordDelete {
+                    username: username.to_owned(),
+                    label: label.to_owned(),
+                })
+            }
+            [command, username, label, rest @ ..] if command == "app-password-scope" => {
+                let (mounts, expires_at) = parse_app_password_scope_options(rest)?;
+                Ok(Self::AppPasswordScope {
+                    username: username.to_owned(),
+                    label: label.to_owned(),
+                    mounts,
+                    expires_at,
+                })
+            }
             [command] if command == "--help" || command == "-h" || command == "help" => {
                 Ok(Self::Help)
             }
@@ -263,6 +469,83 @@ impl Command {
             _ => bail!("too many arguments; run gono-cloud --help"),
         }
     }
+}
+
+fn parse_app_password_add_options(args: &[String]) -> anyhow::Result<(Vec<String>, Option<i64>)> {
+    let (mounts, expiry) = parse_app_password_options(args, false)?;
+    let expires_at = match expiry {
+        ExpiryUpdate::Unchanged | ExpiryUpdate::Never => None,
+        ExpiryUpdate::At(timestamp) => Some(timestamp),
+    };
+    Ok((mounts, expires_at))
+}
+
+fn parse_app_password_scope_options(
+    args: &[String],
+) -> anyhow::Result<(Vec<String>, ExpiryUpdate)> {
+    parse_app_password_options(args, true)
+}
+
+fn parse_app_password_options(
+    args: &[String],
+    allow_no_expiry: bool,
+) -> anyhow::Result<(Vec<String>, ExpiryUpdate)> {
+    let mut mounts = Vec::new();
+    let mut expiry = ExpiryUpdate::Unchanged;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--mount" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("--mount requires a value"))?;
+                mounts.push(value.to_owned());
+            }
+            "--expires-at" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("--expires-at requires a value"))?;
+                expiry = ExpiryUpdate::At(parse_cli_timestamp(value)?);
+            }
+            "--no-expiry" if allow_no_expiry => expiry = ExpiryUpdate::Never,
+            unknown => anyhow::bail!("unknown option {unknown:?}; run gono-cloud --help"),
+        }
+        index += 1;
+    }
+    Ok((mounts, expiry))
+}
+
+fn parse_mount_options(values: &[String]) -> anyhow::Result<Vec<AppPasswordScopeInput>> {
+    values
+        .iter()
+        .map(|value| parse_mount_option(value))
+        .collect()
+}
+
+fn parse_mount_option(value: &str) -> anyhow::Result<AppPasswordScopeInput> {
+    let (paths, permission) = value
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("--mount must use /client=/storage:permission"))?;
+    let (mount_path, storage_path) = paths
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("--mount must use /client=/storage:permission"))?;
+    Ok(AppPasswordScopeInput {
+        mount_path: mount_path.to_owned(),
+        storage_path: storage_path.to_owned(),
+        permission: match permission {
+            "view" => PermissionLevel::View,
+            "full" => PermissionLevel::Full,
+            _ => anyhow::bail!("mount permission must be view or full"),
+        },
+    })
+}
+
+fn parse_cli_timestamp(value: &str) -> anyhow::Result<i64> {
+    value
+        .parse::<i64>()
+        .with_context(|| format!("parse UNIX timestamp {value:?}"))
 }
 
 fn init_tracing() {
@@ -360,7 +643,7 @@ async fn stop_upload_cleanup(upload_cleanup: tokio::task::JoinHandle<()>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, LogFormat, RepairMode};
+    use super::{Command, ExpiryUpdate, LogFormat, RepairMode};
 
     #[test]
     fn log_format_parser_accepts_supported_formats() {
@@ -417,6 +700,45 @@ mod tests {
             Command::parse(["user-delete".to_owned(), "alice".to_owned()]).unwrap(),
             Command::UserDelete {
                 username: "alice".to_owned()
+            }
+        );
+        assert_eq!(
+            Command::parse(["app-password-list".to_owned(), "alice".to_owned()]).unwrap(),
+            Command::AppPasswordList {
+                username: "alice".to_owned()
+            }
+        );
+        assert_eq!(
+            Command::parse([
+                "app-password-add".to_owned(),
+                "alice".to_owned(),
+                "mobile".to_owned(),
+                "--mount".to_owned(),
+                "/Docs=/Projects:view".to_owned(),
+                "--expires-at".to_owned(),
+                "2000".to_owned(),
+            ])
+            .unwrap(),
+            Command::AppPasswordAdd {
+                username: "alice".to_owned(),
+                label: "mobile".to_owned(),
+                mounts: vec!["/Docs=/Projects:view".to_owned()],
+                expires_at: Some(2000),
+            }
+        );
+        assert_eq!(
+            Command::parse([
+                "app-password-scope".to_owned(),
+                "alice".to_owned(),
+                "mobile".to_owned(),
+                "--no-expiry".to_owned(),
+            ])
+            .unwrap(),
+            Command::AppPasswordScope {
+                username: "alice".to_owned(),
+                label: "mobile".to_owned(),
+                mounts: Vec::new(),
+                expires_at: ExpiryUpdate::Never,
             }
         );
         assert_eq!(

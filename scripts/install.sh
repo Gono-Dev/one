@@ -2,14 +2,12 @@
 set -euo pipefail
 
 APP_NAME="gono-cloud"
-INSTALL_URL="${GONO_CLOUD_INSTALL_URL:-https://run.gono.cloud}"
-INSTALL_SOURCE="${GONO_CLOUD_INSTALL_SOURCE:-auto}"
-LOCAL_BUILD="${GONO_CLOUD_LOCAL_BUILD:-auto}"
-LOCAL_BUILD_PROFILE="${GONO_CLOUD_BUILD_PROFILE:-release}"
-LOCAL_BIN="${GONO_CLOUD_BIN:-${GONO_CLOUD_LOCAL_BIN:-}}"
-COMMAND="${GONO_CLOUD_COMMAND:-}"
-ASSUME_YES="${GONO_CLOUD_YES:-0}"
-PURGE="${GONO_CLOUD_PURGE:-0}"
+INSTALL_URL="https://run.gono.cloud"
+RELEASE_REPO="Gono-Dev/cloud.server"
+RELEASE_BASE="https://github.com/${RELEASE_REPO}/releases"
+
+INTERNAL_ACTION="${INSTALLER_INTERNAL_ACTION:-}"
+INTERNAL_LOCAL_BIN="${INSTALLER_INTERNAL_LOCAL_BIN:-}"
 
 SCRIPT_PATH=""
 SCRIPT_DIR=""
@@ -33,24 +31,21 @@ PLIST_PATH=""
 
 RUN_USER=""
 RUN_GROUP=""
-DOMAIN="${GONO_CLOUD_DOMAIN:-gono.cloud}"
-BASE_URL="${GONO_CLOUD_BASE_URL:-https://${DOMAIN}}"
-BASE_URL_EXPLICIT=0
-if [[ -n "${GONO_CLOUD_BASE_URL+x}" ]]; then
-  BASE_URL_EXPLICIT=1
-fi
-BIND="${GONO_CLOUD_BIND:-127.0.0.1:16102}"
-XATTR_NS="${GONO_CLOUD_XATTR_NS:-user.nc}"
-AUTH_REALM="${GONO_CLOUD_AUTH_REALM:-Nextcloud}"
-MAX_CONNECTIONS="${GONO_CLOUD_DB_MAX_CONNECTIONS:-5}"
-LOG_FORMAT="${GONO_CLOUD_LOG_FORMAT:-text}"
-RUST_LOG_VALUE="${RUST_LOG:-info}"
-INSECURE_HTTP="${GONO_CLOUD_INSECURE_HTTP:-1}"
-RELEASE_REPO="${GONO_CLOUD_RELEASE_REPO:-Gono-Dev/cloud.server}"
-RELEASE_BASE="${GONO_CLOUD_RELEASE_BASE:-https://github.com/${RELEASE_REPO}/releases}"
-VERSION="${GONO_CLOUD_VERSION:-latest}"
-BIN_URL="${GONO_CLOUD_BIN_URL:-}"
-HEALTH_URL="${GONO_CLOUD_HEALTH_URL:-}"
+
+DOMAIN="gono.cloud"
+BASE_URL="https://${DOMAIN}"
+BIND="127.0.0.1:16102"
+XATTR_NS="user.nc"
+AUTH_REALM="Gono Cloud"
+ADMIN_ENABLED="false"
+ADMIN_USERS=""
+MAX_CONNECTIONS="5"
+LOG_FORMAT="text"
+RUST_LOG_VALUE="info"
+INSECURE_HTTP="1"
+LOCAL_BIN=""
+PRESERVE_CONFIG="0"
+PURGE="0"
 
 LOG_STDOUT_OFFSET=0
 LOG_STDERR_OFFSET=0
@@ -72,14 +67,6 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
-sudo_bash() {
-  if [[ -r /dev/tty ]]; then
-    sudo -E bash "$@" </dev/tty
-  else
-    sudo -E bash "$@"
-  fi
-}
-
 usage_name() {
   if [[ -n "${SCRIPT_PATH}" && -n "${REPO_ROOT}" && "${SCRIPT_PATH}" == "${REPO_ROOT}/"* ]]; then
     printf '%s\n' "${SCRIPT_PATH#"${REPO_ROOT}/"}"
@@ -90,490 +77,46 @@ usage_name() {
   fi
 }
 
-show_usage() {
+show_help() {
   cat <<EOF
-Gono Cloud installer
+Gono Cloud interactive installer
 
-Usage:
+Run without arguments:
   $(usage_name)
-  $(usage_name) install [options]
-  $(usage_name) status [options]
-  $(usage_name) logs [options]
-  $(usage_name) restart [options]
-  $(usage_name) users [options]
-  $(usage_name) uninstall [options]
-  bash <(curl -sL ${INSTALL_URL})
-  bash <(curl -sL ${INSTALL_URL}) install [options]
 
-Commands:
-  no arguments              Start the interactive menu
-  install                   Install or upgrade Gono Cloud
-  status                    Show service status
-  logs, show_log            Follow service logs
-  restart                   Restart service and run health check
-  users                     Manage local application users
-  uninstall                 Stop service and remove service files/binary
-  help                      Show this help
-
-Source options:
-  --local                    Use local repository/binary source
-  --release                  Download a release artifact
-  --install-source VALUE     auto, local, or release (default: ${INSTALL_SOURCE})
-  --bin PATH                 Install this local gono-cloud binary
-  --bin-url URL              Download this exact binary/archive URL
-  --version VERSION          Release version or latest (default: ${VERSION})
-  --release-base URL         GitHub releases base URL (default: ${RELEASE_BASE})
-  --sha256 HASH              Verify downloaded artifact sha256
-
-Local build options:
-  --build-profile VALUE      release or debug (default: ${LOCAL_BUILD_PROFILE})
-  --debug                    Same as --build-profile debug
-  --local-build              Force cargo build for local source
-  --no-local-build           Reuse existing local binary
-
-Target options:
-  --arch ARCH                Override architecture detection
-  --domain DOMAIN            Public domain (default: ${DOMAIN})
-  --base-url URL             Public base URL (default: ${BASE_URL})
-  --bind ADDR                Local bind address (default: ${BIND})
-  --install-dir DIR          Install prefix (default: platform-specific)
-  --config FILE              Config file path
-  --config-dir DIR           Config directory
-  --state-dir DIR            State directory
-  --data-dir DIR             Data directory
-  --db-path FILE             SQLite database path
-  --log-dir DIR              Log directory
-  --tls-dir DIR              TLS directory
-
-Service options:
-  --service-name NAME        systemd/launchd service name
-  --user USER                Service user
-  --group GROUP              Service group
-  --health-url URL           Health check URL
-  --insecure-http VALUE      1 or 0 (default: ${INSECURE_HTTP})
-  --no-insecure-http         Same as --insecure-http 0
-  --log-format VALUE         text, compact, or json (default: ${LOG_FORMAT})
-  --rust-log VALUE           RUST_LOG value (default: ${RUST_LOG_VALUE})
-
-Other:
-  -h, --help, help           Show this help
-  -y, --yes                  Skip confirmation prompts
-  --purge                    With uninstall, also remove config, data, and logs
-
-Examples:
-  scripts/install.sh
-  scripts/install.sh install --debug
-  scripts/install.sh install --release --version latest
-  scripts/install.sh status
-  scripts/install.sh logs
-  scripts/install.sh restart
-  scripts/install.sh users
-  scripts/install.sh uninstall
-  scripts/install.sh uninstall --purge
-  scripts/install.sh install --bin target/release/gono-cloud
-  scripts/install.sh install --release --version latest
-  scripts/install.sh install --domain files.example.com
-  bash <(curl -sL ${INSTALL_URL}) install --base-url https://files.example.com
-
-Environment variables are still supported. For example:
-  GONO_CLOUD_BIN=/path/to/gono-cloud scripts/install.sh install
-  GONO_CLOUD_INSTALL_SOURCE=release scripts/install.sh install
-EOF
-}
-
-set_command() {
-  COMMAND="$1"
-  export GONO_CLOUD_COMMAND="${COMMAND}"
-}
-
-is_enabled() {
-  case "$1" in
-    1|true|yes|y|on)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-prompt_uninstall_purge() {
-  local input
-  if is_enabled "${ASSUME_YES}"; then
-    return
-  fi
-
-  printf "Don't Remove config, data, and logs too? [Y/n] "
-  if ! read -r input; then
-    die "failed to read purge selection"
-  fi
-  case "${input}" in
-    [nN]|[nN][oO])
-      PURGE="1"
-      export GONO_CLOUD_PURGE="${PURGE}"
-      ;;
-  esac
-}
-
-prompt_interactive_uninstall() {
-  local input
-  if is_enabled "${ASSUME_YES}"; then
-    return
-  fi
-
-  warn "uninstall will stop Gono Cloud and remove the service files plus installed binary"
-  warn "config, database, stored files, and logs are preserved by default"
-  printf "Continue uninstall and keep data? [Y/n] "
-  if ! read -r input; then
-    die "failed to read uninstall confirmation"
-  fi
-  case "${input}" in
-    [nN]|[nN][oO])
-      log "uninstall cancelled"
-      exit 0
-      ;;
-  esac
-
-  prompt_uninstall_purge
-  ASSUME_YES="1"
-  export GONO_CLOUD_YES="${ASSUME_YES}"
-}
-
-show_interactive_menu() {
-  local choice
-
-  if [[ ! -t 0 ]]; then
-    warn "no interactive terminal detected; reading menu selection from stdin"
-  fi
-
-  while true; do
-    cat <<EOF
-Gono Cloud installer
-
-Please select an action:
+Menu actions:
   1. Install or upgrade Gono Cloud
-  2. Uninstall Gono Cloud
-  3. Restart service
+  2. Restart service
+  3. Uninstall Gono Cloud
   4. Show service status
-  5. Show service logs
-  6. User management
-  7. Help
+  5. Follow service logs
+  6. Help
   0. Exit
+
+Notes:
+  - Command-line install/status/logs/restart/uninstall options are no longer supported.
+  - Install or upgrade automatically uses a local repository binary/build when available.
+  - Remote installs download the latest release artifact from GitHub.
+  - Existing config files are preserved by default during upgrades.
+  - Local accounts are handled by the Web Admin UI or the gono-cloud binary CLI.
 EOF
-    printf "Enter choice [1-7,0]: "
-    if ! read -r choice; then
-      die "failed to read menu selection. For non-interactive use, run '$(usage_name) install' or '$(usage_name) uninstall'."
-    fi
-
-    case "${choice}" in
-      1|install|i|I)
-        set_command "install"
-        return
-        ;;
-      2|uninstall|remove|u|U)
-        set_command "uninstall"
-        prompt_interactive_uninstall
-        return
-        ;;
-      3|restart|r|R)
-        set_command "restart"
-        return
-        ;;
-      4|status|s|S)
-        set_command "status"
-        return
-        ;;
-      5|logs|log|l|L)
-        set_command "logs"
-        return
-        ;;
-      6|users|user|u|U)
-        set_command "users"
-        return
-        ;;
-      7|help|h|H|\?)
-        show_usage
-        ;;
-      0|exit|quit|q|Q)
-        log "cancelled"
-        exit 0
-        ;;
-      *)
-        warn "invalid selection: ${choice:-<empty>}"
-        ;;
-    esac
-    printf '\n'
-  done
 }
 
-default_command_if_missing() {
-  if [[ -z "${COMMAND}" ]]; then
-    set_command "install"
+reject_args() {
+  warn "command-line arguments are no longer supported by this installer"
+  warn "run without arguments and choose an action from the interactive menu"
+  show_help >&2
+  exit 1
+}
+
+sudo_run_script() {
+  local script="$1"
+  shift
+  if [[ -r /dev/tty ]]; then
+    sudo env "$@" bash "${script}" </dev/tty
+  else
+    sudo env "$@" bash "${script}"
   fi
-}
-
-need_arg() {
-  local option="$1"
-  local value="${2:-}"
-  [[ -n "${value}" ]] || die "${option} requires a value"
-}
-
-parse_args() {
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      -h|--help|help)
-        show_usage
-        exit 0
-        ;;
-      install)
-        set_command "install"
-        shift
-        ;;
-      status|show_status)
-        set_command "status"
-        shift
-        ;;
-      logs|log|show_log)
-        set_command "logs"
-        shift
-        ;;
-      restart|restart_and_update)
-        set_command "restart"
-        shift
-        ;;
-      users|user|user-management|manage-users)
-        set_command "users"
-        shift
-        ;;
-      uninstall|remove)
-        set_command "uninstall"
-        shift
-        ;;
-      --local)
-        INSTALL_SOURCE="local"
-        export GONO_CLOUD_INSTALL_SOURCE="${INSTALL_SOURCE}"
-        shift
-        ;;
-      --release)
-        INSTALL_SOURCE="release"
-        export GONO_CLOUD_INSTALL_SOURCE="${INSTALL_SOURCE}"
-        shift
-        ;;
-      --install-source)
-        need_arg "$1" "${2:-}"
-        INSTALL_SOURCE="$2"
-        export GONO_CLOUD_INSTALL_SOURCE="${INSTALL_SOURCE}"
-        shift 2
-        ;;
-      --bin)
-        need_arg "$1" "${2:-}"
-        LOCAL_BIN="$2"
-        export GONO_CLOUD_BIN="${LOCAL_BIN}"
-        shift 2
-        ;;
-      --bin-url)
-        need_arg "$1" "${2:-}"
-        BIN_URL="$2"
-        export GONO_CLOUD_BIN_URL="${BIN_URL}"
-        shift 2
-        ;;
-      --version)
-        need_arg "$1" "${2:-}"
-        VERSION="$2"
-        export GONO_CLOUD_VERSION="${VERSION}"
-        shift 2
-        ;;
-      --release-base)
-        need_arg "$1" "${2:-}"
-        RELEASE_BASE="$2"
-        export GONO_CLOUD_RELEASE_BASE="${RELEASE_BASE}"
-        shift 2
-        ;;
-      --sha256)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_SHA256="$2"
-        shift 2
-        ;;
-      --build-profile)
-        need_arg "$1" "${2:-}"
-        LOCAL_BUILD_PROFILE="$2"
-        export GONO_CLOUD_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
-        shift 2
-        ;;
-      --debug)
-        LOCAL_BUILD_PROFILE="debug"
-        export GONO_CLOUD_BUILD_PROFILE="${LOCAL_BUILD_PROFILE}"
-        shift
-        ;;
-      --local-build)
-        LOCAL_BUILD="1"
-        export GONO_CLOUD_LOCAL_BUILD="${LOCAL_BUILD}"
-        shift
-        ;;
-      --no-local-build)
-        LOCAL_BUILD="0"
-        export GONO_CLOUD_LOCAL_BUILD="${LOCAL_BUILD}"
-        shift
-        ;;
-      --arch)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_ARCH="$2"
-        shift 2
-        ;;
-      --domain)
-        need_arg "$1" "${2:-}"
-        DOMAIN="$2"
-        export GONO_CLOUD_DOMAIN="${DOMAIN}"
-        if [[ "${BASE_URL_EXPLICIT}" == "0" ]]; then
-          BASE_URL="https://${DOMAIN}"
-          export GONO_CLOUD_BASE_URL="${BASE_URL}"
-        fi
-        shift 2
-        ;;
-      --base-url)
-        need_arg "$1" "${2:-}"
-        BASE_URL="$2"
-        BASE_URL_EXPLICIT=1
-        export GONO_CLOUD_BASE_URL="${BASE_URL}"
-        shift 2
-        ;;
-      --bind)
-        need_arg "$1" "${2:-}"
-        BIND="$2"
-        export GONO_CLOUD_BIND="${BIND}"
-        shift 2
-        ;;
-      --install-dir)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_INSTALL_DIR="$2"
-        shift 2
-        ;;
-      --config)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_CONFIG="$2"
-        shift 2
-        ;;
-      --config-dir)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_CONFIG_DIR="$2"
-        shift 2
-        ;;
-      --state-dir)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_STATE_DIR="$2"
-        shift 2
-        ;;
-      --data-dir)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_DATA_DIR="$2"
-        shift 2
-        ;;
-      --db-path)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_DB_PATH="$2"
-        shift 2
-        ;;
-      --log-dir)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_LOG_DIR="$2"
-        shift 2
-        ;;
-      --tls-dir)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_TLS_DIR="$2"
-        shift 2
-        ;;
-      --service-name)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_SERVICE_NAME="$2"
-        shift 2
-        ;;
-      --user)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_USER="$2"
-        shift 2
-        ;;
-      --group)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_GROUP="$2"
-        shift 2
-        ;;
-      --health-url)
-        need_arg "$1" "${2:-}"
-        HEALTH_URL="$2"
-        export GONO_CLOUD_HEALTH_URL="${HEALTH_URL}"
-        shift 2
-        ;;
-      --insecure-http)
-        need_arg "$1" "${2:-}"
-        INSECURE_HTTP="$2"
-        export GONO_CLOUD_INSECURE_HTTP="${INSECURE_HTTP}"
-        shift 2
-        ;;
-      --no-insecure-http)
-        INSECURE_HTTP="0"
-        export GONO_CLOUD_INSECURE_HTTP="${INSECURE_HTTP}"
-        shift
-        ;;
-      --log-format)
-        need_arg "$1" "${2:-}"
-        LOG_FORMAT="$2"
-        export GONO_CLOUD_LOG_FORMAT="${LOG_FORMAT}"
-        shift 2
-        ;;
-      --rust-log)
-        need_arg "$1" "${2:-}"
-        RUST_LOG_VALUE="$2"
-        export RUST_LOG="${RUST_LOG_VALUE}"
-        shift 2
-        ;;
-      --xattr-ns)
-        need_arg "$1" "${2:-}"
-        XATTR_NS="$2"
-        export GONO_CLOUD_XATTR_NS="${XATTR_NS}"
-        shift 2
-        ;;
-      --auth-realm)
-        need_arg "$1" "${2:-}"
-        AUTH_REALM="$2"
-        export GONO_CLOUD_AUTH_REALM="${AUTH_REALM}"
-        shift 2
-        ;;
-      --max-connections)
-        need_arg "$1" "${2:-}"
-        MAX_CONNECTIONS="$2"
-        export GONO_CLOUD_DB_MAX_CONNECTIONS="${MAX_CONNECTIONS}"
-        shift 2
-        ;;
-      --plist-path)
-        need_arg "$1" "${2:-}"
-        export GONO_CLOUD_PLIST_PATH="$2"
-        shift 2
-        ;;
-      -y|--yes)
-        ASSUME_YES="1"
-        export GONO_CLOUD_YES="${ASSUME_YES}"
-        shift
-        ;;
-      --purge)
-        PURGE="1"
-        export GONO_CLOUD_PURGE="${PURGE}"
-        shift
-        ;;
-      --)
-        shift
-        [[ "$#" -eq 0 ]] || die "unexpected extra arguments: $*"
-        ;;
-      -*)
-        show_usage >&2
-        die "unknown option: $1"
-        ;;
-      *)
-        show_usage >&2
-        die "unknown argument: $1"
-        ;;
-    esac
-  done
 }
 
 resolve_script_context() {
@@ -601,6 +144,152 @@ resolve_script_context() {
   if [[ -f "${SCRIPT_DIR}/../Cargo.toml" && -d "${SCRIPT_DIR}/../src" ]]; then
     REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
   fi
+}
+
+download_script_for_sudo() {
+  local sudo_script="${TMP_DIR}/gono-cloud-install.sh"
+  require_cmd curl
+  curl -fsSL "${INSTALL_URL}" -o "${sudo_script}"
+  chmod 0700 "${sudo_script}"
+  printf '%s\n' "${sudo_script}"
+}
+
+run_action_as_root() {
+  local action="$1"
+  local script
+  local -a env_args
+
+  if [[ "${EUID}" -eq 0 ]]; then
+    dispatch_action "${action}"
+    return
+  fi
+
+  if [[ "${action}" == "install" ]]; then
+    prepare_local_binary_before_sudo
+  fi
+
+  command -v sudo >/dev/null 2>&1 || die "please run as root or install sudo"
+
+  env_args=("INSTALLER_INTERNAL_ACTION=${action}")
+  if [[ -n "${LOCAL_BIN}" ]]; then
+    env_args+=("INSTALLER_INTERNAL_LOCAL_BIN=${LOCAL_BIN}")
+  fi
+
+  log "re-running selected action with sudo"
+  if [[ -n "${SCRIPT_PATH}" && -r "${SCRIPT_PATH}" ]]; then
+    sudo_run_script "${SCRIPT_PATH}" "${env_args[@]}"
+  else
+    script="$(download_script_for_sudo)"
+    sudo_run_script "${script}" "${env_args[@]}"
+  fi
+  exit $?
+}
+
+prompt_text() {
+  local prompt="$1"
+  local default="$2"
+  local input
+
+  if [[ -n "${default}" ]]; then
+    printf "%s [%s]: " "${prompt}" "${default}" >&2
+  else
+    printf "%s: " "${prompt}" >&2
+  fi
+  if ! read -r input; then
+    die "failed to read input"
+  fi
+  if [[ -z "${input}" ]]; then
+    printf '%s\n' "${default}"
+  else
+    printf '%s\n' "${input}"
+  fi
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local default="$2"
+  local input suffix
+
+  case "${default}" in
+    y|Y|yes|YES|true|1)
+      suffix="[Y/n]"
+      default="y"
+      ;;
+    *)
+      suffix="[y/N]"
+      default="n"
+      ;;
+  esac
+
+  while true; do
+    printf "%s %s " "${prompt}" "${suffix}" >&2
+    if ! read -r input; then
+      die "failed to read input"
+    fi
+    case "${input:-${default}}" in
+      y|Y|yes|YES|Yes)
+        return 0
+        ;;
+      n|N|no|NO|No)
+        return 1
+        ;;
+      *)
+        warn "please answer yes or no"
+        ;;
+    esac
+  done
+}
+
+show_interactive_menu() {
+  local choice
+
+  while true; do
+    cat <<EOF
+Gono Cloud installer
+
+Please select an action:
+  1. Install or upgrade Gono Cloud
+  2. Restart service
+  3. Uninstall Gono Cloud
+  4. Show service status
+  5. Show service logs
+  6. Help
+  0. Exit
+EOF
+    printf "Enter choice [1-6,0]: "
+    if ! read -r choice; then
+      die "failed to read menu selection"
+    fi
+
+    case "${choice}" in
+      1|install|i|I)
+        run_action_as_root "install"
+        ;;
+      2|restart|r|R)
+        run_action_as_root "restart"
+        ;;
+      3|uninstall|remove|u|U)
+        run_action_as_root "uninstall"
+        ;;
+      4|status|s|S)
+        run_action_as_root "status"
+        ;;
+      5|logs|log|l|L)
+        run_action_as_root "logs"
+        ;;
+      6|help|h|H|\?)
+        show_help
+        ;;
+      0|exit|quit|q|Q)
+        log "cancelled"
+        exit 0
+        ;;
+      *)
+        warn "invalid selection: ${choice:-<empty>}"
+        ;;
+    esac
+    printf '\n'
+  done
 }
 
 detect_platform() {
@@ -641,29 +330,96 @@ detect_linux_package_manager() {
   esac
 }
 
+extract_toml_string() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+
+  awk -v section="${section}" -v key="${key}" '
+    $0 ~ /^[[:space:]]*\[/ {
+      in_section = ($0 ~ "^[[:space:]]*\\[" section "\\][[:space:]]*$")
+      next
+    }
+    in_section {
+      line = $0
+      sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ "^[[:space:]]*" key "[[:space:]]*=") {
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        sub(/^[[:space:]]*"/, "", line)
+        sub(/"[[:space:]]*$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "${file}"
+}
+
+extract_toml_bool() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+
+  awk -v section="${section}" -v key="${key}" '
+    $0 ~ /^[[:space:]]*\[/ {
+      in_section = ($0 ~ "^[[:space:]]*\\[" section "\\][[:space:]]*$")
+      next
+    }
+    in_section {
+      line = $0
+      sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ "^[[:space:]]*" key "[[:space:]]*=") {
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/[[:space:]]/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "${file}"
+}
+
+load_existing_config_defaults() {
+  local value
+  [[ -r "${CONFIG_FILE}" ]] || return 0
+
+  value="$(extract_toml_string "${CONFIG_FILE}" server bind || true)"
+  [[ -n "${value}" ]] && BIND="${value}"
+  value="$(extract_toml_string "${CONFIG_FILE}" server base_url || true)"
+  [[ -n "${value}" ]] && BASE_URL="${value}"
+  value="$(extract_toml_string "${CONFIG_FILE}" storage data_dir || true)"
+  [[ -n "${value}" ]] && DATA_DIR="${value}"
+  value="$(extract_toml_string "${CONFIG_FILE}" storage xattr_ns || true)"
+  [[ -n "${value}" ]] && XATTR_NS="${value}"
+  value="$(extract_toml_string "${CONFIG_FILE}" db path || true)"
+  [[ -n "${value}" ]] && DB_PATH="${value}"
+  value="$(extract_toml_string "${CONFIG_FILE}" auth realm || true)"
+  [[ -n "${value}" ]] && AUTH_REALM="${value}"
+  value="$(extract_toml_bool "${CONFIG_FILE}" admin enabled || true)"
+  [[ -n "${value}" ]] && ADMIN_ENABLED="${value}"
+}
+
 set_platform_defaults() {
   PLATFORM="$(detect_platform)"
 
   case "${PLATFORM}" in
     linux)
       PACKAGE_MANAGER="$(detect_linux_package_manager)"
-      SERVICE_NAME="${GONO_CLOUD_SERVICE_NAME:-gono-cloud}"
-      INSTALL_DIR="${GONO_CLOUD_INSTALL_DIR:-/opt/gono-cloud}"
-      CONFIG_DIR="${GONO_CLOUD_CONFIG_DIR:-/etc/gono-cloud}"
-      STATE_DIR="${GONO_CLOUD_STATE_DIR:-/var/lib/gono-cloud}"
-      LOG_DIR="${GONO_CLOUD_LOG_DIR:-/var/log/gono-cloud}"
-      RUN_USER="${GONO_CLOUD_USER:-gono-cloud}"
-      RUN_GROUP="${GONO_CLOUD_GROUP:-gono-cloud}"
+      SERVICE_NAME="gono-cloud"
+      INSTALL_DIR="/opt/gono-cloud"
+      CONFIG_DIR="/etc/gono-cloud"
+      STATE_DIR="/var/lib/gono-cloud"
+      LOG_DIR="/var/log/gono-cloud"
+      RUN_USER="gono-cloud"
+      RUN_GROUP="gono-cloud"
       ;;
     macos)
       PACKAGE_MANAGER="none"
-      SERVICE_NAME="${GONO_CLOUD_SERVICE_NAME:-cloud.gono.gono-cloud}"
-      INSTALL_DIR="${GONO_CLOUD_INSTALL_DIR:-/opt/gono-cloud}"
-      CONFIG_DIR="${GONO_CLOUD_CONFIG_DIR:-/Library/Application Support/Gono Cloud}"
-      STATE_DIR="${GONO_CLOUD_STATE_DIR:-/Library/Application Support/Gono Cloud}"
-      LOG_DIR="${GONO_CLOUD_LOG_DIR:-/Library/Logs/Gono Cloud}"
-      RUN_USER="${GONO_CLOUD_USER:-root}"
-      RUN_GROUP="${GONO_CLOUD_GROUP:-wheel}"
+      SERVICE_NAME="cloud.gono.gono-cloud"
+      INSTALL_DIR="/opt/gono-cloud"
+      CONFIG_DIR="/Library/Application Support/Gono Cloud"
+      STATE_DIR="/Library/Application Support/Gono Cloud"
+      LOG_DIR="/Library/Logs/Gono Cloud"
+      RUN_USER="root"
+      RUN_GROUP="wheel"
       ;;
     *)
       die "unsupported platform: ${PLATFORM}"
@@ -671,47 +427,13 @@ set_platform_defaults() {
   esac
 
   BIN_DIR="${INSTALL_DIR}/bin"
-  BIN_PATH="${GONO_CLOUD_BIN_PATH:-${BIN_DIR}/${APP_NAME}}"
-  CONFIG_FILE="${GONO_CLOUD_CONFIG:-${CONFIG_DIR}/config.toml}"
-  DATA_DIR="${GONO_CLOUD_DATA_DIR:-${STATE_DIR}/data}"
-  DB_PATH="${GONO_CLOUD_DB_PATH:-${STATE_DIR}/gono-cloud.db}"
-  TLS_DIR="${GONO_CLOUD_TLS_DIR:-${CONFIG_DIR}/tls}"
-  PLIST_PATH="${GONO_CLOUD_PLIST_PATH:-/Library/LaunchDaemons/${SERVICE_NAME}.plist}"
-}
-
-require_root() {
-  local -a forwarded_args
-  local sudo_script
-  forwarded_args=("$@")
-
-  if [[ "${EUID}" -eq 0 ]]; then
-    return
-  fi
-
-  if [[ "$#" -eq 0 && -n "${COMMAND}" ]]; then
-    forwarded_args=("${COMMAND}")
-    if is_enabled "${PURGE}"; then
-      forwarded_args+=("--purge")
-    fi
-    if is_enabled "${ASSUME_YES}"; then
-      forwarded_args+=("--yes")
-    fi
-  fi
-
-  if command -v sudo >/dev/null 2>&1; then
-    log "re-running installer with sudo"
-    if [[ -n "${SCRIPT_PATH}" && -r "${SCRIPT_PATH}" ]]; then
-      sudo_bash "${SCRIPT_PATH}" "${forwarded_args[@]}"
-    else
-      sudo_script="${TMP_DIR}/gono-cloud-install.sh"
-      curl -fsSL "${INSTALL_URL}" -o "${sudo_script}"
-      chmod 0700 "${sudo_script}"
-      sudo_bash "${sudo_script}" "${forwarded_args[@]}"
-    fi
-    exit $?
-  fi
-
-  die "please run as root or install sudo"
+  BIN_PATH="${BIN_DIR}/${APP_NAME}"
+  CONFIG_FILE="${CONFIG_DIR}/config.toml"
+  DATA_DIR="${STATE_DIR}/data"
+  DB_PATH="${STATE_DIR}/gono-cloud.db"
+  TLS_DIR="${CONFIG_DIR}/tls"
+  PLIST_PATH="/Library/LaunchDaemons/${SERVICE_NAME}.plist"
+  load_existing_config_defaults
 }
 
 install_packages() {
@@ -761,7 +483,7 @@ require_platform_commands() {
 
 target_arch() {
   local machine
-  machine="${GONO_CLOUD_ARCH:-$(uname -m)}"
+  machine="$(uname -m)"
 
   case "${machine}" in
     x86_64|amd64)
@@ -802,178 +524,78 @@ target_os() {
   esac
 }
 
-release_tag() {
-  local version="$1"
-  case "${version}" in
-    v*)
-      echo "${version}"
-      ;;
-    *)
-      echo "v${version}"
-      ;;
-  esac
-}
-
-release_asset_version() {
-  local version="$1"
-  echo "${version#v}"
-}
-
 artifact_url() {
-  local arch os target tag asset_version
+  local arch os target
   arch="$(target_arch)"
   os="$(target_os)"
   target="${os}-${arch}"
-
-  if [[ -n "${BIN_URL}" ]]; then
-    echo "${BIN_URL}"
-  elif [[ "${VERSION}" == "latest" ]]; then
-    echo "${RELEASE_BASE}/latest/download/${APP_NAME}-${target}.tar.gz"
-  else
-    tag="$(release_tag "${VERSION}")"
-    asset_version="$(release_asset_version "${VERSION}")"
-    echo "${RELEASE_BASE}/download/${tag}/${APP_NAME}-${asset_version}-${target}.tar.gz"
-  fi
-}
-
-use_local_source() {
-  case "${INSTALL_SOURCE}" in
-    local)
-      [[ -n "${LOCAL_BIN}" || -n "${REPO_ROOT}" ]] \
-        || die "GONO_CLOUD_INSTALL_SOURCE=local requires a local repo or GONO_CLOUD_BIN"
-      return 0
-      ;;
-    release)
-      return 1
-      ;;
-    auto)
-      [[ -z "${BIN_URL}" && -n "${REPO_ROOT}" ]]
-      ;;
-    *)
-      die "unsupported GONO_CLOUD_INSTALL_SOURCE='${INSTALL_SOURCE}'. Use auto, local, or release."
-      ;;
-  esac
+  echo "${RELEASE_BASE}/latest/download/${APP_NAME}-${target}.tar.gz"
 }
 
 target_dir() {
-  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-    case "${CARGO_TARGET_DIR}" in
-      /*)
-        printf '%s\n' "${CARGO_TARGET_DIR}"
-        ;;
-      *)
-        printf '%s/%s\n' "$(pwd -P)" "${CARGO_TARGET_DIR}"
-        ;;
-    esac
-  else
-    printf '%s\n' "${REPO_ROOT}/target"
-  fi
+  printf '%s\n' "${REPO_ROOT}/target"
 }
 
 local_binary_candidate() {
-  local profile_dir
-  case "${LOCAL_BUILD_PROFILE}" in
-    release)
-      profile_dir="release"
-      ;;
-    debug|dev)
-      profile_dir="debug"
-      ;;
-    *)
-      die "unsupported GONO_CLOUD_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
-      ;;
-  esac
-
-  printf '%s/%s/%s\n' "$(target_dir)" "${profile_dir}" "${APP_NAME}"
-}
-
-should_build_local_binary() {
-  case "${LOCAL_BUILD}" in
-    1|true|yes)
-      return 0
-      ;;
-    0|false|no)
-      return 1
-      ;;
-    auto)
-      command -v cargo >/dev/null 2>&1
-      ;;
-    *)
-      die "unsupported GONO_CLOUD_LOCAL_BUILD='${LOCAL_BUILD}'. Use auto, 1, or 0."
-      ;;
-  esac
+  printf '%s/release/%s\n' "$(target_dir)" "${APP_NAME}"
 }
 
 build_local_binary() {
   [[ -n "${REPO_ROOT}" ]] || die "cannot build local binary: repository root was not detected"
   require_cmd cargo
-
-  case "${LOCAL_BUILD_PROFILE}" in
-    release)
-      log "building local release binary from ${REPO_ROOT}" >&2
-      cargo build --locked --release --manifest-path "${REPO_ROOT}/Cargo.toml"
-      ;;
-    debug|dev)
-      log "building local debug binary from ${REPO_ROOT}" >&2
-      cargo build --locked --manifest-path "${REPO_ROOT}/Cargo.toml"
-      ;;
-    *)
-      die "unsupported GONO_CLOUD_BUILD_PROFILE='${LOCAL_BUILD_PROFILE}'. Use release or debug."
-      ;;
-  esac
-}
-
-normalize_path() {
-  local path="$1"
-  case "${path}" in
-    /*)
-      printf '%s\n' "${path}"
-      ;;
-    *)
-      printf '%s/%s\n' "$(pwd -P)" "${path}"
-      ;;
-  esac
-}
-
-resolve_local_binary() {
-  local candidate
-  if [[ -n "${LOCAL_BIN}" ]]; then
-    candidate="$(normalize_path "${LOCAL_BIN}")"
-  else
-    candidate="$(local_binary_candidate)"
-    if should_build_local_binary; then
-      build_local_binary
-    fi
-  fi
-
-  [[ -x "${candidate}" ]] || die "local binary is not executable: ${candidate}. Set GONO_CLOUD_BIN or allow GONO_CLOUD_LOCAL_BUILD=auto."
-  printf '%s\n' "${candidate}"
+  log "building local release binary from ${REPO_ROOT}" >&2
+  cargo build --locked --release --manifest-path "${REPO_ROOT}/Cargo.toml"
 }
 
 prepare_local_binary_before_sudo() {
-  if [[ "${EUID}" -eq 0 ]]; then
+  local candidate
+  [[ -n "${REPO_ROOT}" ]] || return 0
+
+  candidate="$(local_binary_candidate)"
+  if [[ -x "${candidate}" ]]; then
+    LOCAL_BIN="${candidate}"
     return
-  fi
-  if ! use_local_source; then
-    return
-  fi
-  if [[ -n "${LOCAL_BIN}" ]]; then
-    LOCAL_BIN="$(normalize_path "${LOCAL_BIN}")"
-  else
-    if should_build_local_binary; then
-      build_local_binary
-      LOCAL_BIN="$(local_binary_candidate)"
-    else
-      LOCAL_BIN="$(local_binary_candidate)"
-    fi
   fi
 
-  [[ -x "${LOCAL_BIN}" ]] || die "local binary is not executable: ${LOCAL_BIN}"
-  export GONO_CLOUD_BIN="${LOCAL_BIN}"
-  export GONO_CLOUD_INSTALL_SOURCE="local"
-  export GONO_CLOUD_LOCAL_BUILD="0"
-  INSTALL_SOURCE="local"
-  LOCAL_BUILD="0"
+  if command -v cargo >/dev/null 2>&1; then
+    build_local_binary
+    if [[ -x "${candidate}" ]]; then
+      LOCAL_BIN="${candidate}"
+    fi
+  else
+    warn "cargo is not available; sudo install will fall back to the latest release artifact"
+  fi
+}
+
+use_local_source() {
+  local candidate
+
+  if [[ -n "${LOCAL_BIN}" ]]; then
+    [[ -x "${LOCAL_BIN}" ]] || die "local binary is not executable: ${LOCAL_BIN}"
+    return 0
+  fi
+
+  [[ -n "${REPO_ROOT}" ]] || return 1
+
+  candidate="$(local_binary_candidate)"
+  if [[ -x "${candidate}" ]]; then
+    LOCAL_BIN="${candidate}"
+    return 0
+  fi
+
+  if command -v cargo >/dev/null 2>&1; then
+    build_local_binary
+    [[ -x "${candidate}" ]] || die "local build did not produce ${candidate}"
+    LOCAL_BIN="${candidate}"
+    return 0
+  fi
+
+  return 1
+}
+
+sha256_from_sidecar() {
+  local file="$1"
+  sed -n '1s/^\([0-9a-fA-F]\{64\}\).*/\1/p' "${file}"
 }
 
 verify_sha256() {
@@ -987,24 +609,14 @@ verify_sha256() {
     actual="$(shasum -a 256 "${file}" | while read -r hash _; do echo "${hash}"; done)"
     [[ "${actual}" == "${expected}" ]] || die "sha256 mismatch: expected ${expected}, got ${actual}"
   else
-    die "GONO_CLOUD_SHA256 was set but neither sha256sum nor shasum is available"
+    die "neither sha256sum nor shasum is available"
   fi
-}
-
-sha256_from_sidecar() {
-  local file="$1"
-  sed -n '1s/^\([0-9a-fA-F]\{64\}\).*/\1/p' "${file}"
 }
 
 verify_downloaded_artifact() {
   local url="$1"
   local artifact="$2"
   local sidecar sidecar_url expected
-
-  if [[ -n "${GONO_CLOUD_SHA256:-}" ]]; then
-    verify_sha256 "${GONO_CLOUD_SHA256}" "${artifact}"
-    return
-  fi
 
   sidecar="${TMP_DIR}/artifact.sha256"
   sidecar_url="${url%%\?*}.sha256"
@@ -1025,7 +637,7 @@ download_binary() {
 
   log "downloading ${url}"
   if ! curl -fL --retry 3 --retry-delay 2 -o "${artifact}" "${url}"; then
-    die "failed to download release artifact from ${url}. Check the GitHub Release assets or set GONO_CLOUD_BIN_URL"
+    die "failed to download release artifact from ${url}"
   fi
 
   verify_downloaded_artifact "${url}" "${artifact}"
@@ -1034,7 +646,7 @@ download_binary() {
   case "${url%%\?*}" in
     *.tar.gz|*.tgz)
       tar -xzf "${artifact}" -C "${extract_dir}"
-      candidate="$(find "${extract_dir}" -type f -name "${APP_NAME}" | head -n 1)"
+      candidate="$(find "${extract_dir}" -type f -name "${APP_NAME}" | sed -n '1p')"
       [[ -n "${candidate}" ]] || die "archive does not contain ${APP_NAME}"
       install -m 0755 "${candidate}" "${BIN_PATH}"
       ;;
@@ -1044,16 +656,10 @@ download_binary() {
   esac
 }
 
-install_local_binary() {
-  local source_binary
-  source_binary="$(resolve_local_binary)"
-  log "installing local binary ${source_binary}"
-  install -m 0755 "${source_binary}" "${BIN_PATH}"
-}
-
 install_binary() {
   if use_local_source; then
-    install_local_binary
+    log "installing local binary ${LOCAL_BIN}"
+    install -m 0755 "${LOCAL_BIN}" "${BIN_PATH}"
   else
     download_binary
   fi
@@ -1087,7 +693,7 @@ ensure_linux_user() {
 
 ensure_macos_user() {
   if ! id -u "${RUN_USER}" >/dev/null 2>&1; then
-    die "macOS run user '${RUN_USER}' does not exist. Use GONO_CLOUD_USER=root or create the user first."
+    die "macOS run user '${RUN_USER}' does not exist"
   fi
 }
 
@@ -1104,33 +710,147 @@ ensure_run_identity() {
 
 prepare_directories() {
   mkdir -p "${BIN_DIR}" "${CONFIG_DIR}" "${TLS_DIR}" "${STATE_DIR}" "${DATA_DIR}" "$(dirname "${DB_PATH}")" "${LOG_DIR}"
-  chown -R "${RUN_USER}:${RUN_GROUP}" "${STATE_DIR}" "${LOG_DIR}"
-  chmod 0750 "${STATE_DIR}" "${DATA_DIR}"
-  chmod 0755 "${LOG_DIR}"
+  case "${PLATFORM}" in
+    macos)
+      chown -R "${RUN_USER}:${RUN_GROUP}" "${STATE_DIR}" "${LOG_DIR}"
+      chmod 0755 "${STATE_DIR}" "${LOG_DIR}"
+      chmod 0750 "${DATA_DIR}"
+      ;;
+    linux)
+      chown -R "${RUN_USER}:${RUN_GROUP}" "${STATE_DIR}" "${LOG_DIR}"
+      chmod 0750 "${STATE_DIR}" "${DATA_DIR}"
+      chmod 0755 "${LOG_DIR}"
+      ;;
+  esac
+}
+
+toml_string_array_from_csv() {
+  local csv="$1"
+  local IFS=,
+  local item trimmed first
+  local output="["
+  first=1
+
+  for item in ${csv}; do
+    trimmed="${item//[[:space:]]/}"
+    [[ -n "${trimmed}" ]] || continue
+    trimmed="${trimmed//\\/\\\\}"
+    trimmed="${trimmed//\"/\\\"}"
+    if [[ "${first}" == "1" ]]; then
+      first=0
+    else
+      output+=", "
+    fi
+    output+="\"${trimmed}\""
+  done
+
+  output+="]"
+  printf '%s\n' "${output}"
+}
+
+toml_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "${value}"
+}
+
+normalize_base_url_input() {
+  local value="$1"
+  case "${value}" in
+    http://*|https://*)
+      ;;
+    *)
+      value="https://${value}"
+      ;;
+  esac
+
+  while [[ "${value}" == */ ]]; do
+    value="${value%/}"
+  done
+  printf '%s\n' "${value}"
+}
+
+host_from_base_url() {
+  local value="$1"
+  value="${value#http://}"
+  value="${value#https://}"
+  value="${value%%/*}"
+  printf '%s\n' "${value}"
+}
+
+prompt_base_url() {
+  local value host
+
+  while true; do
+    value="$(prompt_text "Public base URL (domain is OK)" "${BASE_URL}")"
+    value="$(normalize_base_url_input "${value}")"
+    host="$(host_from_base_url "${value}")"
+    if [[ -n "${host}" ]]; then
+      BASE_URL="${value}"
+      DOMAIN="${host}"
+      return
+    fi
+    warn "public base URL must include a host"
+  done
+}
+
+prompt_new_config_values() {
+  prompt_base_url
+  BIND="$(prompt_text "Local bind address" "${BIND}")"
+  AUTH_REALM="$(prompt_text "Auth realm" "${AUTH_REALM}")"
+
+  if prompt_yes_no "Disable Web admin at ${BASE_URL}/admin?" "y"; then
+    ADMIN_ENABLED="false"
+    ADMIN_USERS=""
+  else
+    ADMIN_ENABLED="true"
+    ADMIN_USERS="$(prompt_text "Admin users, comma separated" "gono")"
+  fi
+}
+
+configure_config_file() {
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    log "existing config found: ${CONFIG_FILE}"
+    if prompt_yes_no "Keep existing config during this install/upgrade?" "y"; then
+      PRESERVE_CONFIG="1"
+      load_existing_config_defaults
+      return
+    fi
+  fi
+
+  PRESERVE_CONFIG="0"
+  prompt_new_config_values
 }
 
 write_config() {
-  if [[ -f "${CONFIG_FILE}" ]]; then
+  if [[ "${PRESERVE_CONFIG}" == "1" ]]; then
     log "keeping existing config ${CONFIG_FILE}"
-  else
-    log "writing ${CONFIG_FILE}"
-    cat >"${CONFIG_FILE}" <<EOF
+    return
+  fi
+
+  log "writing ${CONFIG_FILE}"
+  cat >"${CONFIG_FILE}" <<EOF
 [server]
-bind = "${BIND}"
-cert_file = "${TLS_DIR}/cert.pem"
-key_file = "${TLS_DIR}/key.pem"
-base_url = "${BASE_URL}"
+bind = "$(toml_escape "${BIND}")"
+cert_file = "$(toml_escape "${TLS_DIR}/cert.pem")"
+key_file = "$(toml_escape "${TLS_DIR}/key.pem")"
+base_url = "$(toml_escape "${BASE_URL}")"
 
 [storage]
-data_dir = "${DATA_DIR}"
-xattr_ns = "${XATTR_NS}"
+data_dir = "$(toml_escape "${DATA_DIR}")"
+xattr_ns = "$(toml_escape "${XATTR_NS}")"
 
 [db]
-path = "${DB_PATH}"
+path = "$(toml_escape "${DB_PATH}")"
 max_connections = ${MAX_CONNECTIONS}
 
 [auth]
-realm = "${AUTH_REALM}"
+realm = "$(toml_escape "${AUTH_REALM}")"
+
+[admin]
+enabled = ${ADMIN_ENABLED}
+users = $(toml_string_array_from_csv "${ADMIN_USERS}")
 
 [sync]
 change_log_retention_days = 30
@@ -1147,9 +867,8 @@ ping_interval_secs = 30
 auth_timeout_secs = 15
 max_connection_secs = 0
 EOF
-    chown root:"${RUN_GROUP}" "${CONFIG_FILE}"
-    chmod 0640 "${CONFIG_FILE}"
-  fi
+  chown root:"${RUN_GROUP}" "${CONFIG_FILE}"
+  chmod 0640 "${CONFIG_FILE}"
 }
 
 write_systemd_unit() {
@@ -1157,7 +876,7 @@ write_systemd_unit() {
   log "writing ${unit}"
   cat >"${unit}" <<EOF
 [Unit]
-Description=Gono Cloud Nextcloud-compatible WebDAV service
+Description=Gono Cloud Gono Cloud compatible WebDAV service
 After=network-online.target
 Wants=network-online.target
 
@@ -1249,16 +968,11 @@ write_service_definition() {
 }
 
 health_url() {
-  if [[ -n "${HEALTH_URL}" ]]; then
-    echo "${HEALTH_URL}"
-    return
-  fi
-
   local port="${BIND##*:}"
   echo "http://127.0.0.1:${port}/status.php"
 }
 
-show_service_logs() {
+show_service_logs_tail() {
   case "${PLATFORM}" in
     linux)
       journalctl -u "${SERVICE_NAME}" -n 80 --no-pager >&2 || true
@@ -1284,18 +998,19 @@ service_is_active() {
 
 wait_for_service() {
   local url="$1"
+  local _
   for _ in $(seq 1 60); do
     if curl -fsS "${url}" >/dev/null 2>&1; then
       return 0
     fi
     if ! service_is_active; then
-      show_service_logs
+      show_service_logs_tail
       die "${SERVICE_NAME} failed to start"
     fi
     sleep 1
   done
 
-  show_service_logs
+  show_service_logs_tail
   die "service did not become healthy at ${url}"
 }
 
@@ -1339,7 +1054,7 @@ start_linux_service() {
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}" >/dev/null
   if ! systemctl restart "${SERVICE_NAME}"; then
-    show_service_logs
+    show_service_logs_tail
     die "failed to start systemd service ${SERVICE_NAME}"
   fi
 }
@@ -1350,6 +1065,42 @@ prepare_macos_log_files() {
   capture_macos_log_offsets
 }
 
+wait_for_macos_service_unloaded() {
+  local target="$1"
+  local _
+
+  for _ in $(seq 1 20); do
+    if ! launchctl print "${target}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  warn "launchd still reports ${target} as loaded after bootout"
+}
+
+bootstrap_macos_service() {
+  local target="$1"
+  local attempt output
+
+  for attempt in 1 2 3; do
+    if output="$(launchctl bootstrap system "${PLIST_PATH}" 2>&1)"; then
+      return 0
+    fi
+
+    if launchctl print "${target}" >/dev/null 2>&1; then
+      warn "launchctl bootstrap reported an error, but ${target} is loaded; continuing with kickstart"
+      return 0
+    fi
+
+    warn "launchctl bootstrap failed on attempt ${attempt}: ${output}"
+    sleep "${attempt}"
+  done
+
+  show_service_logs_tail
+  die "failed to bootstrap launchd service from ${PLIST_PATH}"
+}
+
 start_macos_service() {
   local target="system/${SERVICE_NAME}"
   prepare_macos_log_files
@@ -1358,17 +1109,11 @@ start_macos_service() {
   launchctl bootout "${target}" >/dev/null 2>&1 \
     || launchctl bootout system "${PLIST_PATH}" >/dev/null 2>&1 \
     || true
-  if ! launchctl bootstrap system "${PLIST_PATH}"; then
-    if launchctl print "${target}" >/dev/null 2>&1; then
-      warn "launchctl bootstrap failed because ${target} is already loaded; using kickstart"
-    else
-      show_service_logs
-      die "failed to bootstrap launchd service from ${PLIST_PATH}"
-    fi
-  fi
+  wait_for_macos_service_unloaded "${target}"
+  bootstrap_macos_service "${target}"
   launchctl enable "${target}" >/dev/null 2>&1 || true
   if ! launchctl kickstart -k "${target}"; then
-    show_service_logs
+    show_service_logs_tail
     die "failed to kickstart launchd service ${target}"
   fi
 }
@@ -1379,7 +1124,7 @@ restart_linux_service() {
   systemctl daemon-reload
   systemctl reset-failed "${SERVICE_NAME}" >/dev/null 2>&1 || true
   if ! systemctl restart "${SERVICE_NAME}"; then
-    show_service_logs
+    show_service_logs_tail
     die "failed to restart systemd service ${SERVICE_NAME}"
   fi
 }
@@ -1391,17 +1136,14 @@ restart_macos_service() {
   [[ -f "${PLIST_PATH}" ]] || die "launchd plist is not installed at ${PLIST_PATH}"
   if launchctl print "${target}" >/dev/null 2>&1; then
     if ! launchctl kickstart -k "${target}"; then
-      show_service_logs
+      show_service_logs_tail
       die "failed to restart launchd service ${target}"
     fi
   else
-    if ! launchctl bootstrap system "${PLIST_PATH}"; then
-      show_service_logs
-      die "failed to bootstrap launchd service from ${PLIST_PATH}"
-    fi
+    bootstrap_macos_service "${target}"
     launchctl enable "${target}" >/dev/null 2>&1 || true
     if ! launchctl kickstart -k "${target}"; then
-      show_service_logs
+      show_service_logs_tail
       die "failed to start launchd service ${target}"
     fi
   fi
@@ -1527,113 +1269,11 @@ follow_service_logs() {
       fi
 
       if [[ "${#readable_logs[@]}" -eq 0 ]]; then
-        die "no readable macOS log files found. Try 'sudo $(usage_name) logs' or check '$(service_status_hint)'."
+        die "no readable macOS log files found. Check '$(service_status_hint)'."
       fi
       tail -f "${readable_logs[@]}"
       ;;
   esac
-}
-
-ensure_admin_binary() {
-  [[ -x "${BIN_PATH}" ]] || die "Gono Cloud binary is not installed at ${BIN_PATH}. Install first, or set GONO_CLOUD_INSTALL_DIR/GONO_CLOUD_BIN_PATH."
-}
-
-run_user_cli() {
-  ensure_admin_binary
-  NC_DAV_CONFIG="${CONFIG_FILE}" "${BIN_PATH}" "$@"
-}
-
-prompt_local_user_name() {
-  local prompt="$1"
-  local username
-
-  printf "%s" "${prompt}" >&2
-  if ! read -r username; then
-    die "failed to read username"
-  fi
-  username="${username//[[:space:]]/}"
-  [[ -n "${username}" ]] || die "username cannot be empty"
-  printf '%s\n' "${username}"
-}
-
-prompt_display_name() {
-  local display_name
-  printf "Display name (optional): " >&2
-  if ! read -r display_name; then
-    die "failed to read display name"
-  fi
-  printf '%s\n' "${display_name}"
-}
-
-confirm_delete_local_user() {
-  local username="$1"
-  local input
-
-  if is_enabled "${ASSUME_YES}"; then
-    return
-  fi
-
-  warn "this deletes login credentials for local user '${username}'. Stored files are not removed."
-  printf "Delete user '${username}'? [y/N] "
-  if ! read -r input; then
-    die "failed to read delete confirmation"
-  fi
-  case "${input}" in
-    [yY]|[yY][eE][sS])
-      ;;
-    *)
-      log "user delete cancelled"
-      return 1
-      ;;
-  esac
-}
-
-show_user_management_menu() {
-  local choice username display_name
-
-  while true; do
-    cat <<EOF
-Gono Cloud user management
-
-Please select an action:
-  1. List local users
-  2. Add local user
-  3. Delete local user
-  0. Back
-EOF
-    printf "Enter choice [1-3,0]: "
-    if ! read -r choice; then
-      die "failed to read user management selection"
-    fi
-
-    case "${choice}" in
-      1|list|l|L)
-        run_user_cli user-list
-        ;;
-      2|add|a|A)
-        username="$(prompt_local_user_name "Username: ")"
-        display_name="$(prompt_display_name)"
-        if [[ -n "${display_name}" ]]; then
-          run_user_cli user-add "${username}" "${display_name}"
-        else
-          run_user_cli user-add "${username}"
-        fi
-        ;;
-      3|delete|remove|d|D)
-        username="$(prompt_local_user_name "Username to delete: ")"
-        if confirm_delete_local_user "${username}"; then
-          run_user_cli user-delete "${username}"
-        fi
-        ;;
-      0|back|b|B|exit|quit|q|Q)
-        return
-        ;;
-      *)
-        warn "invalid selection: ${choice:-<empty>}"
-        ;;
-    esac
-    printf '\n'
-  done
 }
 
 restart_existing_service() {
@@ -1674,27 +1314,18 @@ stop_existing_service() {
 }
 
 confirm_uninstall() {
-  local input
-  if [[ "${ASSUME_YES}" == "1" || "${ASSUME_YES}" == "true" || "${ASSUME_YES}" == "yes" ]]; then
-    return
+  warn "uninstall will stop ${SERVICE_NAME} and remove service files plus ${BIN_PATH}"
+  warn "config, database, stored files, and logs are preserved by default"
+  if ! prompt_yes_no "Continue uninstall and keep data?" "y"; then
+    log "uninstall cancelled"
+    exit 0
   fi
 
-  warn "uninstall will stop ${SERVICE_NAME} and remove service files plus ${BIN_PATH}"
-  if [[ "${PURGE}" == "1" || "${PURGE}" == "true" || "${PURGE}" == "yes" ]]; then
-    warn "purge is enabled; config, data, and logs will also be removed"
+  if prompt_yes_no "Don't remove config, data, and logs?" "y"; then
+    PURGE="0"
   else
-    warn "config, data, and logs will be preserved; pass --purge to remove them"
+    PURGE="1"
   fi
-  printf "Continue? [y/N] "
-  read -r input
-  case "${input}" in
-    [yY]|[yY][eE][sS])
-      ;;
-    *)
-      log "uninstall cancelled"
-      exit 0
-      ;;
-  esac
 }
 
 uninstall_service() {
@@ -1716,12 +1347,12 @@ uninstall_service() {
   rm -f "${BIN_PATH}"
   rmdir "${BIN_DIR}" "${INSTALL_DIR}" >/dev/null 2>&1 || true
 
-  if [[ "${PURGE}" == "1" || "${PURGE}" == "true" || "${PURGE}" == "yes" ]]; then
+  if [[ "${PURGE}" == "1" ]]; then
     rm -rf "${CONFIG_DIR}" "${STATE_DIR}" "${LOG_DIR}"
   fi
 
   log "uninstalled ${APP_NAME}"
-  if [[ "${PURGE}" != "1" && "${PURGE}" != "true" && "${PURGE}" != "yes" ]]; then
+  if [[ "${PURGE}" != "1" ]]; then
     log "preserved config: ${CONFIG_DIR}"
     log "preserved state: ${STATE_DIR}"
     log "preserved logs: ${LOG_DIR}"
@@ -1736,6 +1367,7 @@ install_service() {
 
   ensure_run_identity
   prepare_directories
+  configure_config_file
   install_binary
   write_config
   write_service_definition
@@ -1758,6 +1390,9 @@ install_service() {
   log "local health: ${url}"
   log "public base URL: ${BASE_URL}"
   log "webdav URL: ${BASE_URL}/remote.php/dav"
+  if [[ "${ADMIN_ENABLED}" == "true" ]]; then
+    log "admin URL: ${BASE_URL}/admin"
+  fi
   if [[ -n "${password}" ]]; then
     log "bootstrap user: gono"
     log "bootstrap app password: ${password}"
@@ -1768,12 +1403,18 @@ install_service() {
   log "configure HTTPS reverse proxy, including WebSocket upgrade for ${BASE_URL}/push/ws, to forward to http://${BIND}"
 }
 
-dispatch_command() {
-  case "${COMMAND}" in
+dispatch_action() {
+  local action="$1"
+
+  case "${action}" in
     install)
-      prepare_local_binary_before_sudo
-      require_root "$@"
       install_service
+      ;;
+    restart)
+      restart_existing_service
+      ;;
+    uninstall)
+      uninstall_service
       ;;
     status)
       show_service_status
@@ -1781,21 +1422,8 @@ dispatch_command() {
     logs)
       follow_service_logs
       ;;
-    restart)
-      require_root "$@"
-      restart_existing_service
-      ;;
-    users)
-      require_root "$@"
-      show_user_management_menu
-      ;;
-    uninstall)
-      require_root "$@"
-      uninstall_service
-      ;;
     *)
-      show_usage >&2
-      die "unknown command: ${COMMAND}"
+      die "unknown internal action: ${action}"
       ;;
   esac
 }
@@ -1803,14 +1431,24 @@ dispatch_command() {
 main() {
   require_cmd uname
   resolve_script_context
-  if [[ "$#" -eq 0 && -z "${COMMAND}" ]]; then
-    show_interactive_menu
-  else
-    parse_args "$@"
-    default_command_if_missing
+
+  if [[ "$#" -gt 0 ]]; then
+    reject_args
   fi
+
+  if [[ -n "${INTERNAL_LOCAL_BIN}" ]]; then
+    LOCAL_BIN="${INTERNAL_LOCAL_BIN}"
+  fi
+
   set_platform_defaults
-  dispatch_command "$@"
+
+  if [[ -n "${INTERNAL_ACTION}" ]]; then
+    [[ "${EUID}" -eq 0 ]] || die "internal action requires root"
+    dispatch_action "${INTERNAL_ACTION}"
+    return
+  fi
+
+  show_interactive_menu
 }
 
 TMP_DIR="$(mktemp -d)"

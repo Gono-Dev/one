@@ -19,11 +19,19 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use sqlx::{Row, SqlitePool};
 use tracing::error;
 
-use crate::{db::unix_timestamp, state::AppState};
+use crate::{
+    db::unix_timestamp,
+    permissions::{self, AppPasswordScope, PermissionLevel},
+    state::AppState,
+};
 
 #[derive(Debug, Clone)]
 pub struct Principal {
     pub username: String,
+    pub app_password_id: i64,
+    pub app_password_label: String,
+    pub expires_at: Option<i64>,
+    pub scopes: Vec<AppPasswordScope>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +51,7 @@ impl SqliteUserStore {
     ) -> anyhow::Result<Option<Principal>> {
         let rows = sqlx::query(
             r#"
-            SELECT app_passwords.id, app_passwords.password_hash
+            SELECT app_passwords.id, app_passwords.label, app_passwords.password_hash, app_passwords.expires_at
             FROM app_passwords
             JOIN users ON users.username = app_passwords.username
             WHERE users.username = ?1 AND users.enabled = 1
@@ -63,8 +71,15 @@ impl SqliteUserStore {
                 .is_ok()
             {
                 let id: i64 = row.try_get("id")?;
+                let label: String = row.try_get("label")?;
+                let expires_at: Option<i64> = row.try_get("expires_at")?;
+                let now = unix_timestamp();
+                if expires_at.is_some_and(|expires_at| expires_at <= now) {
+                    return Ok(None);
+                }
+                let scopes = load_app_password_scopes(&self.pool, id).await?;
                 sqlx::query("UPDATE app_passwords SET last_used_at = ?1 WHERE id = ?2")
-                    .bind(unix_timestamp())
+                    .bind(now)
                     .bind(id)
                     .execute(&self.pool)
                     .await
@@ -72,12 +87,56 @@ impl SqliteUserStore {
 
                 return Ok(Some(Principal {
                     username: username.to_owned(),
+                    app_password_id: id,
+                    app_password_label: label,
+                    expires_at,
+                    scopes,
                 }));
             }
         }
 
         Ok(None)
     }
+}
+
+async fn load_app_password_scopes(
+    pool: &SqlitePool,
+    app_password_id: i64,
+) -> anyhow::Result<Vec<AppPasswordScope>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, mount_path, storage_path, permission
+        FROM app_password_scopes
+        WHERE app_password_id = ?1
+        ORDER BY mount_path
+        "#,
+    )
+    .bind(app_password_id)
+    .fetch_all(pool)
+    .await
+    .context("load app password scopes")?;
+
+    if rows.is_empty() {
+        return Ok(vec![permissions::default_scope()]);
+    }
+
+    let scopes = rows
+        .into_iter()
+        .map(|row| {
+            Ok(AppPasswordScope {
+                id: row.try_get("id")?,
+                mount_path: permissions::normalize_scope_path(
+                    &row.try_get::<String, _>("mount_path")?,
+                )?,
+                storage_path: permissions::normalize_scope_path(
+                    &row.try_get::<String, _>("storage_path")?,
+                )?,
+                permission: PermissionLevel::parse(&row.try_get::<String, _>("permission")?)?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    permissions::validate_scope_set(&scopes)?;
+    Ok(scopes)
 }
 
 pub async fn require_basic_auth(

@@ -14,9 +14,10 @@ use quick_xml::{escape::escape, events::Event, Reader};
 use tracing::{error, warn};
 
 use crate::{
+    auth::Principal,
     dav_handler::dispatch::{mount_prefix_for_path, original_request_uri},
     dav_handler::fs::permissions_string,
-    db,
+    db, permissions,
     state::AppState,
     storage,
 };
@@ -25,11 +26,11 @@ const SEARCH_BODY_LIMIT: usize = 1024 * 1024;
 
 pub async fn handle(
     state: Arc<AppState>,
-    owner: String,
+    principal: Principal,
     files_root: PathBuf,
     request: Request<Body>,
 ) -> Response<Body> {
-    match handle_inner(state, owner, files_root, request).await {
+    match handle_inner(state, principal, files_root, request).await {
         Ok(response) => response,
         Err(err) => {
             error!(?err, "failed to handle SEARCH");
@@ -40,12 +41,13 @@ pub async fn handle(
 
 async fn handle_inner(
     state: Arc<AppState>,
-    owner: String,
+    principal: Principal,
     files_root: PathBuf,
     request: Request<Body>,
 ) -> anyhow::Result<Response<Body>> {
     let request_path = original_request_uri(&request).path().to_owned();
-    let href_prefix = mount_prefix_for_path(&request_path, &owner);
+    let owner = &principal.username;
+    let href_prefix = mount_prefix_for_path(&request_path, owner);
     let body = to_bytes(request.into_body(), SEARCH_BODY_LIMIT)
         .await
         .context("read SEARCH body")?;
@@ -57,16 +59,25 @@ async fn handle_inner(
         bail!("unsupported SEARCH where operator {operator}");
     }
 
-    let scope_rel = scope_rel_path(search.scope_href.as_deref(), &owner)?;
-    let scope_abs = storage::safe_existing_path(&files_root, &scope_rel)?;
+    let client_scope_rel = scope_rel_path(search.scope_href.as_deref(), owner)?;
+    let scope_match =
+        match permissions::resolve_scope_for_client_path(&principal, &client_scope_rel) {
+            Ok(scope_match) => scope_match,
+            Err(_) => {
+                return Ok(
+                    (StatusCode::FORBIDDEN, "Path is outside app password scope").into_response(),
+                );
+            }
+        };
+    let scope_abs = storage::safe_existing_path(&files_root, &scope_match.storage_rel_path)?;
     let mut xml = multistatus_start();
     append_search_matches(
         &mut xml,
         &state,
-        &owner,
+        &principal,
         &files_root,
         &href_prefix,
-        scope_rel,
+        scope_match.storage_rel_path,
         scope_abs,
         search.depth,
         &search.filters,
@@ -80,7 +91,7 @@ async fn handle_inner(
 async fn append_search_matches(
     xml: &mut String,
     state: &AppState,
-    owner: &str,
+    principal: &Principal,
     files_root: &Path,
     href_prefix: &str,
     scope_rel: PathBuf,
@@ -88,6 +99,7 @@ async fn append_search_matches(
     depth: SearchDepth,
     filters: &[SearchFilter],
 ) -> anyhow::Result<()> {
+    let owner = &principal.username;
     let mut stack = vec![(scope_rel, scope_abs, 0_usize)];
 
     while let Some((rel_path, abs_path, level)) = stack.pop() {
@@ -106,7 +118,12 @@ async fn append_search_matches(
         .await?;
 
         if matches_filters(&record, filters) {
-            let rel_path = storage::rel_path_string(&rel_path)?;
+            let Some(client_rel_path) =
+                permissions::storage_path_to_client_path(principal, &rel_path)?
+            else {
+                continue;
+            };
+            let rel_path = storage::rel_path_string(&client_rel_path)?;
             append_resource_response(xml, href_prefix, &rel_path, &record, metadata.is_dir());
         }
 

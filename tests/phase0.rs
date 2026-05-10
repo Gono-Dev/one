@@ -10,7 +10,8 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
 use gono_cloud::{
-    build_router, dav_handler::chunked_upload, db, db::BOOTSTRAP_USER, AppState, Config,
+    build_router, dav_handler::chunked_upload, db, db::BOOTSTRAP_USER,
+    permissions::PermissionLevel, AppState, Config,
 };
 use tempfile::TempDir;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -691,6 +692,126 @@ async fn metrics_require_basic_auth_and_are_prometheus_shaped() {
 }
 
 #[tokio::test]
+async fn metrics_are_filtered_by_app_password_scope() {
+    let (app, _temp, _password, state) = app_with_state().await;
+    let visible_rel = std::path::Path::new("Projects/readme.txt");
+    let outside_rel = std::path::Path::new("Outside/readme.txt");
+    let visible_abs = state.files_root.join(visible_rel);
+    let outside_abs = state.files_root.join(outside_rel);
+    std::fs::create_dir_all(visible_abs.parent().unwrap()).expect("create visible dir");
+    std::fs::create_dir_all(outside_abs.parent().unwrap()).expect("create outside dir");
+    std::fs::write(&visible_abs, "project docs").expect("write visible file");
+    std::fs::write(&outside_abs, "outside docs").expect("write outside file");
+
+    let visible_record = db::ensure_file_record(
+        &state.db,
+        db::FileRecordInput {
+            owner: BOOTSTRAP_USER,
+            rel_path: visible_rel,
+            abs_path: &visible_abs,
+            instance_id: &state.instance_id,
+            xattr_ns: &state.xattr_ns,
+        },
+    )
+    .await
+    .expect("insert visible file record");
+    let outside_record = db::ensure_file_record(
+        &state.db,
+        db::FileRecordInput {
+            owner: BOOTSTRAP_USER,
+            rel_path: outside_rel,
+            abs_path: &outside_abs,
+            instance_id: &state.instance_id,
+            xattr_ns: &state.xattr_ns,
+        },
+    )
+    .await
+    .expect("insert outside file record");
+    db::record_change(
+        &state.db,
+        BOOTSTRAP_USER,
+        visible_record.id,
+        visible_rel,
+        "create",
+    )
+    .await
+    .expect("record visible change");
+    db::record_change(
+        &state.db,
+        BOOTSTRAP_USER,
+        outside_record.id,
+        outside_rel,
+        "create",
+    )
+    .await
+    .expect("record outside change");
+
+    db::upsert_upload_session(
+        &state.db,
+        "visible-upload",
+        BOOTSTRAP_USER,
+        std::path::Path::new("Projects/upload.txt"),
+        1,
+    )
+    .await
+    .expect("insert visible upload session");
+    db::upsert_upload_session(
+        &state.db,
+        "outside-upload",
+        BOOTSTRAP_USER,
+        std::path::Path::new("Outside/upload.txt"),
+        1,
+    )
+    .await
+    .expect("insert outside upload session");
+    sqlx::query("UPDATE upload_sessions SET expires_at = ?1 WHERE owner = ?2")
+        .bind(db::unix_timestamp() - 60)
+        .bind(BOOTSTRAP_USER)
+        .execute(&state.db)
+        .await
+        .expect("expire upload sessions");
+
+    let scoped = db::create_local_app_password(
+        &state.db,
+        BOOTSTRAP_USER,
+        "metrics-scope",
+        None,
+        &[db::AppPasswordScopeInput {
+            mount_path: "/Docs".to_owned(),
+            storage_path: "/Projects".to_owned(),
+            permission: PermissionLevel::View,
+        }],
+    )
+    .await
+    .expect("create scoped app password");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/metrics")
+                .header(
+                    header::AUTHORIZATION,
+                    auth_header_for(BOOTSTRAP_USER, &scoped.app_password),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("gono_cloud_file_records_total 1\n"));
+    assert!(body.contains("gono_cloud_change_log_entries_total 1\n"));
+    assert!(body.contains("gono_cloud_upload_sessions_total 1\n"));
+    assert!(body.contains("gono_cloud_upload_sessions_expired_total 1\n"));
+    assert!(body.contains("gono_cloud_sync_token 1\n"));
+    assert!(body.contains("gono_cloud_change_log_floor_token 0\n"));
+}
+
+#[tokio::test]
 async fn notify_push_pre_auth_uid_and_test_routes_work() {
     let (app, _temp, password, state) = app_with_state().await;
 
@@ -1280,6 +1401,143 @@ async fn standard_nextcloud_files_webdav_path_shares_storage_with_remote_php_dav
 }
 
 #[tokio::test]
+async fn app_password_scopes_map_paths_and_enforce_permissions() {
+    let (app, _temp, _password, state) = app_with_state().await;
+    std::fs::create_dir_all(state.files_root.join("Projects")).expect("create projects");
+    std::fs::write(state.files_root.join("Projects/readme.txt"), "project docs")
+        .expect("seed project file");
+    std::fs::create_dir_all(state.files_root.join("Inbox/Uploads")).expect("create upload target");
+
+    let scoped = db::create_local_app_password(
+        &state.db,
+        BOOTSTRAP_USER,
+        "scoped",
+        None,
+        &[
+            db::AppPasswordScopeInput {
+                mount_path: "/Docs".to_owned(),
+                storage_path: "/Projects".to_owned(),
+                permission: PermissionLevel::View,
+            },
+            db::AppPasswordScopeInput {
+                mount_path: "/Uploads".to_owned(),
+                storage_path: "/Inbox/Uploads".to_owned(),
+                permission: PermissionLevel::Full,
+            },
+        ],
+    )
+    .await
+    .expect("create scoped app password");
+    let scoped_auth = auth_header_for(BOOTSTRAP_USER, &scoped.app_password);
+
+    let root = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/files/gono/")
+                .header("Depth", "1")
+                .header(header::AUTHORIZATION, &scoped_auth)
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(root.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(root.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/files/gono/Docs"));
+    assert!(body.contains("/remote.php/dav/files/gono/Uploads"));
+    assert!(!body.contains("/remote.php/dav/files/gono/Projects"));
+
+    let docs_propfind = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/files/gono/Docs/")
+                .header("Depth", "1")
+                .header(header::AUTHORIZATION, &scoped_auth)
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(docs_propfind.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(docs_propfind.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/files/gono/Docs/readme.txt"));
+    assert!(!body.contains("/remote.php/dav/files/gono/Projects/readme.txt"));
+
+    let get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/remote.php/dav/files/gono/Docs/readme.txt")
+                .header(header::AUTHORIZATION, &scoped_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = to_bytes(get.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], b"project docs");
+
+    let outside = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/remote.php/dav/files/gono/Projects/readme.txt")
+                .header(header::AUTHORIZATION, &scoped_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+
+    let readonly_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/Docs/new.txt")
+                .header(header::AUTHORIZATION, &scoped_auth)
+                .body(Body::from("blocked"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(readonly_put.status(), StatusCode::FORBIDDEN);
+
+    let writable_put = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/Uploads/new.txt")
+                .header(header::AUTHORIZATION, &scoped_auth)
+                .body(Body::from("uploaded"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(writable_put.status(), StatusCode::CREATED);
+    assert_eq!(
+        std::fs::read_to_string(state.files_root.join("Inbox/Uploads/new.txt"))
+            .expect("read mapped upload"),
+        "uploaded"
+    );
+    assert!(!state.files_root.join("Uploads/new.txt").exists());
+}
+
+#[tokio::test]
 async fn local_users_are_confined_to_their_own_nextcloud_files_root() {
     let (app, temp, gono_password, state) = app_with_state().await;
     let alice = db::create_local_user(&state.db, "alice", Some("Alice"))
@@ -1532,6 +1790,294 @@ async fn wrong_basic_auth_password_is_rejected() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn admin_disabled_returns_not_found() {
+    let (app, _temp, _password) = app_with_temp_root().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_users_page_requires_configured_admin() {
+    let (app, _temp, password, state) = app_with_config(|config| {
+        config.admin.enabled = true;
+        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
+    })
+    .await;
+
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/users")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let alice = db::create_local_user(&state.db, "alice", None)
+        .await
+        .expect("create non-admin user");
+    let forbidden = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/users")
+                .header(
+                    header::AUTHORIZATION,
+                    auth_header_for("alice", &alice.app_password),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    let allowed = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/users")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let body = to_bytes(allowed.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("User Management"));
+    assert!(body.contains("gono"));
+}
+
+#[tokio::test]
+async fn admin_create_user_requires_csrf_and_shows_one_time_password() {
+    let (app, _temp, password, state) = app_with_config(|config| {
+        config.admin.enabled = true;
+        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
+    })
+    .await;
+
+    let invalid_csrf = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/users")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "_csrf=wrong&username=alice&display_name=Alice+Example",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_csrf.status(), StatusCode::FORBIDDEN);
+
+    let body = format!(
+        "_csrf={}&username=alice&display_name=Alice+Example",
+        state.admin_csrf_token
+    );
+    let created = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/users")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("App password created"));
+    assert!(body.contains("Alice Example"));
+}
+
+#[tokio::test]
+async fn admin_settings_page_saves_editable_settings_with_restart_notice() {
+    let (app, _temp, password, state) = app_with_config(|config| {
+        config.admin.enabled = true;
+        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
+    })
+    .await;
+
+    let page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/settings")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let body = to_bytes(page.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("Settings"));
+    assert!(body.contains("server_base_url"));
+    assert!(body.contains("readonly-field"));
+
+    let invalid_csrf = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/settings")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(settings_form_body(
+                    "wrong",
+                    "https://changed.example",
+                    "/push",
+                    BOOTSTRAP_USER,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_csrf.status(), StatusCode::FORBIDDEN);
+
+    let saved = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/settings")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(settings_form_body(
+                    &state.admin_csrf_token,
+                    "https://changed.example",
+                    "/push",
+                    BOOTSTRAP_USER,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let body = to_bytes(saved.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("Settings saved"));
+    assert!(body.contains("Restart required"));
+    assert!(body.contains("https://changed.example"));
+    assert_ne!(state.base_url, "https://changed.example");
+
+    let value: String =
+        sqlx::query_scalar("SELECT value_json FROM settings WHERE key = 'server.base_url'")
+            .fetch_one(&state.db)
+            .await
+            .expect("load saved setting");
+    assert_eq!(value, "\"https://changed.example\"");
+}
+
+#[tokio::test]
+async fn admin_settings_rejects_invalid_values() {
+    let (app, _temp, password, state) = app_with_config(|config| {
+        config.admin.enabled = true;
+        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
+    })
+    .await;
+
+    let invalid_url = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/settings")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(settings_form_body(
+                    &state.admin_csrf_token,
+                    "ftp://wrong.example",
+                    "/push",
+                    BOOTSTRAP_USER,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_url.status(), StatusCode::OK);
+    let body = to_bytes(invalid_url.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("server.base_url must start"));
+
+    let invalid_path = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/settings")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(settings_form_body(
+                    &state.admin_csrf_token,
+                    "https://changed.example",
+                    "push",
+                    BOOTSTRAP_USER,
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_path.status(), StatusCode::OK);
+    let body = to_bytes(invalid_path.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("notify_push.path must start"));
+}
+
+fn settings_form_body(csrf: &str, base_url: &str, notify_path: &str, admin_users: &str) -> String {
+    format!(
+        concat!(
+            "_csrf={csrf}",
+            "&server_base_url={base_url}",
+            "&auth_realm=Gono Cloud",
+            "&sync_change_log_retention_days=30",
+            "&sync_change_log_min_entries=10000",
+            "&notify_push_enabled=true",
+            "&notify_push_path={notify_path}",
+            "&notify_push_advertised_types=files,activities,notifications",
+            "&notify_push_pre_auth_ttl_secs=15",
+            "&notify_push_user_connection_limit=64",
+            "&notify_push_max_debounce_secs=15",
+            "&notify_push_ping_interval_secs=30",
+            "&notify_push_auth_timeout_secs=15",
+            "&notify_push_max_connection_secs=0",
+            "&admin_enabled=true",
+            "&admin_users={admin_users}",
+        ),
+        csrf = csrf,
+        base_url = base_url,
+        notify_path = notify_path,
+        admin_users = admin_users,
+    )
 }
 
 #[tokio::test]

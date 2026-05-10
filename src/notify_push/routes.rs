@@ -8,7 +8,10 @@ use axum::{
     Router,
 };
 
-use crate::{auth::parse_basic_auth, state::AppState};
+use crate::{
+    auth::{parse_basic_auth, Principal},
+    state::AppState,
+};
 
 use super::{websocket, NotifyRuntime};
 
@@ -40,20 +43,20 @@ async fn pre_auth(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Res
     let Some(runtime) = state.notify_push.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(username) = verify_basic(&state, &headers).await else {
+    let Some(principal) = verify_basic(&state, &headers).await else {
         return unauthorized(&state.auth_realm);
     };
-    runtime.issue_pre_auth(username).into_response()
+    runtime.issue_pre_auth(principal).into_response()
 }
 
 async fn uid(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let Some(_runtime) = state.notify_push.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(username) = verify_basic(&state, &headers).await else {
+    let Some(principal) = verify_basic(&state, &headers).await else {
         return unauthorized(&state.auth_realm);
     };
-    username.into_response()
+    principal.username.into_response()
 }
 
 async fn test_cookie(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -109,7 +112,7 @@ async fn test_trigger(
     })
 }
 
-async fn verify_basic(state: &AppState, headers: &HeaderMap) -> Option<String> {
+async fn verify_basic(state: &AppState, headers: &HeaderMap) -> Option<Principal> {
     let (username, password) = parse_basic_auth(headers.get(AUTHORIZATION))?;
     state
         .user_store
@@ -117,7 +120,6 @@ async fn verify_basic(state: &AppState, headers: &HeaderMap) -> Option<String> {
         .await
         .ok()
         .flatten()
-        .map(|principal| principal.username)
 }
 
 fn with_valid_test_token(

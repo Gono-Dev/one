@@ -8,9 +8,10 @@ use tracing::{info, warn};
 
 use crate::{
     auth::SqliteUserStore,
-    config::{Config, NotifyPushConfig, SyncConfig},
+    config::{AdminConfig, Config, NotifyPushConfig, SyncConfig},
     db::{self, BootstrapOutcome, BOOTSTRAP_USER},
     notify_push::NotifyRuntime,
+    settings,
     storage::{self, StorageLayout},
 };
 
@@ -22,6 +23,8 @@ pub struct AppState {
     pub db: SqlitePool,
     pub user_store: Arc<SqliteUserStore>,
     pub auth_realm: String,
+    pub admin_config: AdminConfig,
+    pub admin_csrf_token: String,
     pub owner: String,
     pub base_url: String,
     pub instance_id: String,
@@ -29,6 +32,7 @@ pub struct AppState {
     pub sync_config: SyncConfig,
     pub notify_push_config: NotifyPushConfig,
     pub notify_push: Option<Arc<NotifyRuntime>>,
+    pub config: Config,
 }
 
 #[derive(Debug)]
@@ -39,9 +43,16 @@ pub struct InitializedApp {
 
 impl AppState {
     pub async fn initialize(config: Config) -> anyhow::Result<InitializedApp> {
-        let storage = StorageLayout::prepare(&config.storage)?;
         let db = db::connect(&config.db).await?;
         db::migrate(&db).await?;
+        let config = settings::load_effective_config(&db, config).await?;
+        let storage = StorageLayout::prepare(&config.storage)?;
+        for username in &config.admin.users {
+            db::validate_username(username)?;
+        }
+        if config.admin.enabled && config.admin.users.is_empty() {
+            warn!("admin.enabled=true but admin.users is empty; no user can access /admin");
+        }
         let bootstrap = db::ensure_bootstrap_user(&db).await?;
         let sync_config = config.sync.clone();
         let prune = db::prune_change_log(
@@ -64,6 +75,7 @@ impl AppState {
             .notify_push
             .enabled
             .then(|| NotifyRuntime::new(config.notify_push.clone()));
+        let state_config = config.clone();
 
         Ok(InitializedApp {
             state: Arc::new(Self {
@@ -73,6 +85,8 @@ impl AppState {
                 db,
                 user_store,
                 auth_realm: config.auth.realm,
+                admin_config: config.admin,
+                admin_csrf_token: generate_csrf_token(),
                 owner: BOOTSTRAP_USER.to_owned(),
                 base_url: config.server.base_url,
                 instance_id: "phase1".to_owned(),
@@ -80,6 +94,7 @@ impl AppState {
                 sync_config,
                 notify_push_config: config.notify_push,
                 notify_push,
+                config: state_config,
             }),
             bootstrap,
         })
@@ -133,4 +148,13 @@ impl AppState {
             Err(err) => warn!(?err, "failed to prune change_log"),
         }
     }
+}
+
+fn generate_csrf_token() -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use rand::{rngs::OsRng, RngCore};
+
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }

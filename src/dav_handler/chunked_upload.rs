@@ -16,11 +16,13 @@ use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 
 use crate::{
+    auth::Principal,
     dav_handler::{
         dispatch::{parse_rel_path, parse_rel_path_for_owner},
         fs::permissions_string,
     },
     db,
+    permissions::{self, PermissionLevel},
     state::AppState,
     storage::{self, safe_create_path, safe_existing_path, safe_write_path},
 };
@@ -38,7 +40,7 @@ type ChunkResult<T> = Result<T, Response<Body>>;
 
 pub async fn handle(
     state: Arc<AppState>,
-    owner: String,
+    principal: Principal,
     files_root: PathBuf,
     request: Request<Body>,
 ) -> Response<Body> {
@@ -46,7 +48,7 @@ pub async fn handle(
         return internal_error(err, "cleanup expired upload sessions");
     }
 
-    match handle_inner(state, owner, files_root, request).await {
+    match handle_inner(state, principal, files_root, request).await {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -74,14 +76,14 @@ pub fn spawn_cleanup_task(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
 
 async fn handle_inner(
     state: Arc<AppState>,
-    owner: String,
+    principal: Principal,
     files_root: PathBuf,
     request: Request<Body>,
 ) -> ChunkResult<Response<Body>> {
     let method = request.method().clone();
     let upload_path = UploadPath::parse(request.uri().path())?;
 
-    if upload_path.owner != owner {
+    if upload_path.owner != principal.username {
         return Err(text_response(
             StatusCode::FORBIDDEN,
             "Upload owner does not match authenticated user",
@@ -89,10 +91,10 @@ async fn handle_inner(
     }
 
     match method.as_str() {
-        "MKCOL" => mkcol_session(state, &owner, &files_root, request, upload_path).await,
-        "PUT" => put_chunk(state, &owner, &files_root, request, upload_path).await,
+        "MKCOL" => mkcol_session(state, &principal, &files_root, request, upload_path).await,
+        "PUT" => put_chunk(state, &principal, &files_root, request, upload_path).await,
         "DELETE" => delete_session(state, upload_path).await,
-        "MOVE" => move_file(state, &owner, &files_root, request, upload_path).await,
+        "MOVE" => move_file(state, &principal, &files_root, request, upload_path).await,
         _ => Err(text_response(
             StatusCode::METHOD_NOT_ALLOWED,
             "Unsupported chunking method",
@@ -102,11 +104,12 @@ async fn handle_inner(
 
 async fn mkcol_session(
     state: Arc<AppState>,
-    owner: &str,
+    principal: &Principal,
     files_root: &Path,
     request: Request<Body>,
     upload_path: UploadPath,
 ) -> ChunkResult<Response<Body>> {
+    let owner = &principal.username;
     if upload_path.chunk_name.is_some() {
         return Err(text_response(
             StatusCode::BAD_REQUEST,
@@ -114,7 +117,7 @@ async fn mkcol_session(
         ));
     }
 
-    let target_rel = destination_rel_path(request.headers(), owner)?;
+    let target_rel = destination_rel_path(request.headers(), principal)?;
     validate_target_path(files_root, &target_rel)?;
     let total_size = parse_total_length(request.headers())?.unwrap_or(0);
     check_available_space(files_root, total_size)?;
@@ -143,11 +146,12 @@ async fn mkcol_session(
 
 async fn put_chunk(
     state: Arc<AppState>,
-    owner: &str,
+    principal: &Principal,
     files_root: &Path,
     request: Request<Body>,
     upload_path: UploadPath,
 ) -> ChunkResult<Response<Body>> {
+    let owner = &principal.username;
     let chunk_name = upload_path.chunk_name.as_deref().ok_or_else(|| {
         text_response(
             StatusCode::BAD_REQUEST,
@@ -160,7 +164,7 @@ async fn put_chunk(
     if let Some(total_size) = total_size {
         check_available_space(files_root, total_size)?;
     }
-    let destination = destination_rel_path(request.headers(), owner)?;
+    let destination = destination_rel_path(request.headers(), principal)?;
     let session = require_session(&state, &upload_path).await?;
     ensure_destination_matches(&destination, &session.target_path)?;
 
@@ -188,11 +192,12 @@ async fn put_chunk(
 
 async fn move_file(
     state: Arc<AppState>,
-    owner: &str,
+    principal: &Principal,
     files_root: &Path,
     request: Request<Body>,
     upload_path: UploadPath,
 ) -> ChunkResult<Response<Body>> {
+    let owner = &principal.username;
     if upload_path.chunk_name.as_deref() != Some(".file") {
         return Err(text_response(
             StatusCode::BAD_REQUEST,
@@ -200,7 +205,7 @@ async fn move_file(
         ));
     }
 
-    let destination = destination_rel_path(request.headers(), owner)?;
+    let destination = destination_rel_path(request.headers(), principal)?;
     let session = require_session(&state, &upload_path).await?;
     ensure_destination_matches(&destination, &session.target_path)?;
     validate_target_path(files_root, &destination)?;
@@ -418,15 +423,28 @@ async fn remove_session_dir_inner(
     Ok(())
 }
 
-fn destination_rel_path(headers: &HeaderMap, owner: &str) -> ChunkResult<PathBuf> {
+fn destination_rel_path(headers: &HeaderMap, principal: &Principal) -> ChunkResult<PathBuf> {
     let destination = headers
         .get("destination")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| text_response(StatusCode::BAD_REQUEST, "Destination header is required"))?;
-    parse_rel_path_for_owner(destination, owner).map_err(|err| {
-        warn!(?err, "invalid chunked upload destination header");
-        text_response(StatusCode::BAD_REQUEST, "Invalid Destination header")
-    })
+    let client_rel_path =
+        parse_rel_path_for_owner(destination, &principal.username).map_err(|err| {
+            warn!(?err, "invalid chunked upload destination header");
+            text_response(StatusCode::BAD_REQUEST, "Invalid Destination header")
+        })?;
+    let scope_match = permissions::resolve_scope_for_client_path(principal, &client_rel_path)
+        .map_err(|err| {
+            warn!(?err, path = %client_rel_path.display(), "chunked upload destination is outside app password scopes");
+            text_response(StatusCode::FORBIDDEN, "Destination is outside app password scope")
+        })?;
+    if scope_match.scope.permission != PermissionLevel::Full {
+        return Err(text_response(
+            StatusCode::FORBIDDEN,
+            "App password scope is view-only",
+        ));
+    }
+    Ok(scope_match.storage_rel_path)
 }
 
 fn validate_target_path(files_root: &Path, target_rel: &Path) -> ChunkResult<()> {

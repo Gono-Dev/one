@@ -15,7 +15,11 @@ use sqlx::{
     Row, SqliteConnection, SqlitePool,
 };
 
-use crate::{config::DbConfig, storage};
+use crate::{
+    config::DbConfig,
+    permissions::{self, PermissionLevel},
+    storage,
+};
 
 pub const BOOTSTRAP_USER: &str = "gono";
 const BOOTSTRAP_LABEL: &str = "bootstrap";
@@ -34,12 +38,52 @@ pub struct LocalUser {
     pub created_at: i64,
     pub app_password_count: i64,
     pub app_password_labels: Vec<String>,
+    pub app_passwords: Vec<LocalAppPassword>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAppPassword {
+    pub id: i64,
+    pub label: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub scopes: Vec<LocalAppPasswordScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAppPasswordScope {
+    pub id: i64,
+    pub mount_path: String,
+    pub storage_path: String,
+    pub permission: PermissionLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppPasswordScopeInput {
+    pub mount_path: String,
+    pub storage_path: String,
+    pub permission: PermissionLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedLocalAppPassword {
+    pub username: String,
+    pub password_label: String,
+    pub app_password: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedLocalUser {
     pub username: String,
     pub display_name: String,
+    pub password_label: String,
+    pub app_password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetLocalUserPassword {
+    pub username: String,
     pub password_label: String,
     pub app_password: String,
 }
@@ -145,7 +189,7 @@ pub async fn ensure_bootstrap_user(pool: &SqlitePool) -> anyhow::Result<Bootstra
         let password = generate_app_password();
         let password_hash = hash_password(&password).context("hash bootstrap app password")?;
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO app_passwords(username, label, password_hash, created_at)
             VALUES(?1, ?2, ?3, ?4)
@@ -158,6 +202,7 @@ pub async fn ensure_bootstrap_user(pool: &SqlitePool) -> anyhow::Result<Bootstra
         .execute(&mut *tx)
         .await
         .context("insert bootstrap app password")?;
+        insert_default_scope(&mut tx, result.last_insert_rowid(), now).await?;
 
         Some(password)
     } else {
@@ -200,7 +245,8 @@ pub async fn list_local_users(pool: &SqlitePool) -> anyhow::Result<Vec<LocalUser
     .await
     .context("list local users")?;
 
-    rows.into_iter()
+    let mut users = rows
+        .into_iter()
         .map(|row| {
             Ok(LocalUser {
                 username: row.try_get("username")?,
@@ -214,9 +260,16 @@ pub async fn list_local_users(pool: &SqlitePool) -> anyhow::Result<Vec<LocalUser
                     .filter(|label| !label.is_empty())
                     .map(str::to_owned)
                     .collect(),
+                app_passwords: Vec::new(),
             })
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    for user in &mut users {
+        user.app_passwords = list_local_app_passwords(pool, &user.username).await?;
+    }
+
+    Ok(users)
 }
 
 pub async fn local_user_exists(pool: &SqlitePool, username: &str) -> anyhow::Result<bool> {
@@ -278,7 +331,7 @@ pub async fn create_local_user(
     .await
     .with_context(|| format!("insert local user {username}"))?;
 
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO app_passwords(username, label, password_hash, created_at)
         VALUES(?1, ?2, ?3, ?4)
@@ -291,6 +344,7 @@ pub async fn create_local_user(
     .execute(&mut *tx)
     .await
     .with_context(|| format!("insert app password for {username}"))?;
+    insert_default_scope(&mut tx, result.last_insert_rowid(), now).await?;
 
     tx.commit()
         .await
@@ -302,6 +356,198 @@ pub async fn create_local_user(
         password_label: DEFAULT_APP_PASSWORD_LABEL.to_owned(),
         app_password: password,
     })
+}
+
+pub async fn list_local_app_passwords(
+    pool: &SqlitePool,
+    username: &str,
+) -> anyhow::Result<Vec<LocalAppPassword>> {
+    validate_username(username)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, label, created_at, last_used_at, expires_at
+        FROM app_passwords
+        WHERE username = ?1
+        ORDER BY label
+        "#,
+    )
+    .bind(username)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("list app passwords for {username}"))?;
+
+    let mut passwords = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: i64 = row.try_get("id")?;
+        passwords.push(LocalAppPassword {
+            id,
+            label: row.try_get("label")?,
+            created_at: row.try_get("created_at")?,
+            last_used_at: row.try_get("last_used_at")?,
+            expires_at: row.try_get("expires_at")?,
+            scopes: list_local_app_password_scopes(pool, id).await?,
+        });
+    }
+    Ok(passwords)
+}
+
+pub async fn create_local_app_password(
+    pool: &SqlitePool,
+    username: &str,
+    label: &str,
+    expires_at: Option<i64>,
+    scopes: &[AppPasswordScopeInput],
+) -> anyhow::Result<CreatedLocalAppPassword> {
+    validate_username(username)?;
+    let label = validate_app_password_label(label)?;
+    let normalized_scopes = normalize_scope_inputs(scopes)?;
+    let now = unix_timestamp();
+    let password = generate_app_password();
+    let password_hash = hash_password(&password).context("hash app password")?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin create app password transaction")?;
+
+    ensure_user_exists_tx(&mut tx, username).await?;
+    let result = sqlx::query(
+        r#"
+        INSERT INTO app_passwords(username, label, password_hash, created_at, expires_at)
+        VALUES(?1, ?2, ?3, ?4, ?5)
+        "#,
+    )
+    .bind(username)
+    .bind(label)
+    .bind(password_hash)
+    .bind(now)
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await
+    .with_context(|| format!("insert app password {label:?} for {username}"))?;
+    insert_scope_inputs(&mut tx, result.last_insert_rowid(), now, &normalized_scopes).await?;
+
+    tx.commit()
+        .await
+        .context("commit create app password transaction")?;
+
+    Ok(CreatedLocalAppPassword {
+        username: username.to_owned(),
+        password_label: label.to_owned(),
+        app_password: password,
+    })
+}
+
+pub async fn reset_local_app_password(
+    pool: &SqlitePool,
+    username: &str,
+    label: &str,
+) -> anyhow::Result<ResetLocalUserPassword> {
+    validate_username(username)?;
+    let label = validate_app_password_label(label)?;
+    let password = generate_app_password();
+    let password_hash = hash_password(&password).context("hash reset app password")?;
+    let result = sqlx::query(
+        r#"
+        UPDATE app_passwords
+        SET password_hash = ?1, last_used_at = NULL
+        WHERE username = ?2 AND label = ?3
+        "#,
+    )
+    .bind(password_hash)
+    .bind(username)
+    .bind(label)
+    .execute(pool)
+    .await
+    .with_context(|| format!("reset app password {label:?} for {username}"))?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("app password {label:?} for {username:?} does not exist");
+    }
+    Ok(ResetLocalUserPassword {
+        username: username.to_owned(),
+        password_label: label.to_owned(),
+        app_password: password,
+    })
+}
+
+pub async fn delete_local_app_password(
+    pool: &SqlitePool,
+    username: &str,
+    label: &str,
+) -> anyhow::Result<bool> {
+    validate_username(username)?;
+    let label = validate_app_password_label(label)?;
+    let result = sqlx::query("DELETE FROM app_passwords WHERE username = ?1 AND label = ?2")
+        .bind(username)
+        .bind(label)
+        .execute(pool)
+        .await
+        .with_context(|| format!("delete app password {label:?} for {username}"))?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_local_app_password_expiry(
+    pool: &SqlitePool,
+    username: &str,
+    label: &str,
+    expires_at: Option<i64>,
+) -> anyhow::Result<bool> {
+    validate_username(username)?;
+    let label = validate_app_password_label(label)?;
+    let result = sqlx::query(
+        r#"
+        UPDATE app_passwords
+        SET expires_at = ?1
+        WHERE username = ?2 AND label = ?3
+        "#,
+    )
+    .bind(expires_at)
+    .bind(username)
+    .bind(label)
+    .execute(pool)
+    .await
+    .with_context(|| format!("update app password expiry {label:?} for {username}"))?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn replace_local_app_password_scopes(
+    pool: &SqlitePool,
+    username: &str,
+    label: &str,
+    scopes: &[AppPasswordScopeInput],
+) -> anyhow::Result<bool> {
+    validate_username(username)?;
+    let label = validate_app_password_label(label)?;
+    let normalized_scopes = normalize_scope_inputs(scopes)?;
+    let now = unix_timestamp();
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin replace app password scopes transaction")?;
+    let app_password_id: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM app_passwords
+        WHERE username = ?1 AND label = ?2
+        "#,
+    )
+    .bind(username)
+    .bind(label)
+    .fetch_optional(&mut *tx)
+    .await
+    .with_context(|| format!("lookup app password {label:?} for {username}"))?;
+    let Some(app_password_id) = app_password_id else {
+        return Ok(false);
+    };
+    sqlx::query("DELETE FROM app_password_scopes WHERE app_password_id = ?1")
+        .bind(app_password_id)
+        .execute(&mut *tx)
+        .await
+        .context("delete old app password scopes")?;
+    insert_scope_inputs(&mut tx, app_password_id, now, &normalized_scopes).await?;
+    tx.commit()
+        .await
+        .context("commit replace app password scopes transaction")?;
+    Ok(true)
 }
 
 pub async fn delete_local_user(pool: &SqlitePool, username: &str) -> anyhow::Result<bool> {
@@ -316,6 +562,273 @@ pub async fn delete_local_user(pool: &SqlitePool, username: &str) -> anyhow::Res
         .await
         .with_context(|| format!("delete local user {username}"))?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_local_user_display_name(
+    pool: &SqlitePool,
+    username: &str,
+    display_name: &str,
+) -> anyhow::Result<bool> {
+    validate_username(username)?;
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        anyhow::bail!("display name cannot be empty");
+    }
+
+    let result = sqlx::query("UPDATE users SET display_name = ?1 WHERE username = ?2")
+        .bind(display_name)
+        .bind(username)
+        .execute(pool)
+        .await
+        .with_context(|| format!("update display name for {username}"))?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn set_local_user_enabled(
+    pool: &SqlitePool,
+    username: &str,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    validate_username(username)?;
+    let result = sqlx::query("UPDATE users SET enabled = ?1 WHERE username = ?2")
+        .bind(if enabled { 1 } else { 0 })
+        .bind(username)
+        .execute(pool)
+        .await
+        .with_context(|| format!("set enabled={enabled} for {username}"))?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn reset_local_user_app_password(
+    pool: &SqlitePool,
+    username: &str,
+) -> anyhow::Result<ResetLocalUserPassword> {
+    validate_username(username)?;
+    let user_exists: i64 = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM users
+            WHERE username = ?1
+        )
+        "#,
+    )
+    .bind(username)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("lookup local user {username}"))?;
+    if user_exists == 0 {
+        anyhow::bail!("local user {username:?} does not exist");
+    }
+
+    let now = unix_timestamp();
+    let password = generate_app_password();
+    let password_hash = hash_password(&password).context("hash reset app password")?;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin reset app password transaction")?;
+
+    sqlx::query("DELETE FROM app_passwords WHERE username = ?1")
+        .bind(username)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("delete old app passwords for {username}"))?;
+    let result = sqlx::query(
+        r#"
+        INSERT INTO app_passwords(username, label, password_hash, created_at)
+        VALUES(?1, ?2, ?3, ?4)
+        "#,
+    )
+    .bind(username)
+    .bind(DEFAULT_APP_PASSWORD_LABEL)
+    .bind(password_hash)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .with_context(|| format!("insert reset app password for {username}"))?;
+    insert_default_scope(&mut tx, result.last_insert_rowid(), now).await?;
+
+    tx.commit()
+        .await
+        .context("commit reset app password transaction")?;
+
+    Ok(ResetLocalUserPassword {
+        username: username.to_owned(),
+        password_label: DEFAULT_APP_PASSWORD_LABEL.to_owned(),
+        app_password: password,
+    })
+}
+
+pub async fn enabled_admin_count(pool: &SqlitePool, admin_users: &[String]) -> anyhow::Result<i64> {
+    let mut count = 0;
+    for username in admin_users {
+        validate_username(username)?;
+        let enabled: i64 = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM users
+                WHERE username = ?1 AND enabled = 1
+            )
+            "#,
+        )
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("lookup enabled admin user {username}"))?;
+        count += enabled;
+    }
+    Ok(count)
+}
+
+async fn list_local_app_password_scopes(
+    pool: &SqlitePool,
+    app_password_id: i64,
+) -> anyhow::Result<Vec<LocalAppPasswordScope>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, mount_path, storage_path, permission
+        FROM app_password_scopes
+        WHERE app_password_id = ?1
+        ORDER BY mount_path
+        "#,
+    )
+    .bind(app_password_id)
+    .fetch_all(pool)
+    .await
+    .context("list app password scopes")?;
+
+    if rows.is_empty() {
+        let default = permissions::default_scope();
+        return Ok(vec![LocalAppPasswordScope {
+            id: default.id,
+            mount_path: permissions::scope_path_to_db(&default.mount_path)?,
+            storage_path: permissions::scope_path_to_db(&default.storage_path)?,
+            permission: default.permission,
+        }]);
+    }
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(LocalAppPasswordScope {
+                id: row.try_get("id")?,
+                mount_path: row.try_get("mount_path")?,
+                storage_path: row.try_get("storage_path")?,
+                permission: PermissionLevel::parse(&row.try_get::<String, _>("permission")?)?,
+            })
+        })
+        .collect()
+}
+
+async fn insert_default_scope(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    app_password_id: i64,
+    now: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO app_password_scopes(app_password_id, mount_path, storage_path, permission, created_at)
+        VALUES(?1, '/', '/', 'full', ?2)
+        "#,
+    )
+    .bind(app_password_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .context("insert default app password scope")?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedScopeInput {
+    mount_path: String,
+    storage_path: String,
+    permission: PermissionLevel,
+}
+
+fn normalize_scope_inputs(
+    scopes: &[AppPasswordScopeInput],
+) -> anyhow::Result<Vec<NormalizedScopeInput>> {
+    let fallback;
+    let scopes = if scopes.is_empty() {
+        fallback = vec![AppPasswordScopeInput {
+            mount_path: "/".to_owned(),
+            storage_path: "/".to_owned(),
+            permission: PermissionLevel::Full,
+        }];
+        fallback.as_slice()
+    } else {
+        scopes
+    };
+
+    let mut normalized = Vec::with_capacity(scopes.len());
+    let mut scope_defs = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        let mount_path = permissions::normalize_scope_path(scope.mount_path.trim())?;
+        let storage_path = permissions::normalize_scope_path(scope.storage_path.trim())?;
+        scope_defs.push(permissions::AppPasswordScope {
+            id: 0,
+            mount_path: mount_path.clone(),
+            storage_path: storage_path.clone(),
+            permission: scope.permission,
+        });
+        normalized.push(NormalizedScopeInput {
+            mount_path: permissions::scope_path_to_db(&mount_path)?,
+            storage_path: permissions::scope_path_to_db(&storage_path)?,
+            permission: scope.permission,
+        });
+    }
+    permissions::validate_scope_set(&scope_defs)?;
+    Ok(normalized)
+}
+
+async fn insert_scope_inputs(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    app_password_id: i64,
+    now: i64,
+    scopes: &[NormalizedScopeInput],
+) -> anyhow::Result<()> {
+    for scope in scopes {
+        sqlx::query(
+            r#"
+            INSERT INTO app_password_scopes(app_password_id, mount_path, storage_path, permission, created_at)
+            VALUES(?1, ?2, ?3, ?4, ?5)
+            "#,
+        )
+        .bind(app_password_id)
+        .bind(&scope.mount_path)
+        .bind(&scope.storage_path)
+        .bind(scope.permission.as_str())
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .context("insert app password scope")?;
+    }
+    Ok(())
+}
+
+async fn ensure_user_exists_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    username: &str,
+) -> anyhow::Result<()> {
+    let exists: i64 = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM users
+            WHERE username = ?1
+        )
+        "#,
+    )
+    .bind(username)
+    .fetch_one(&mut **tx)
+    .await
+    .with_context(|| format!("lookup local user {username}"))?;
+    if exists == 0 {
+        anyhow::bail!("local user {username:?} does not exist");
+    }
+    Ok(())
 }
 
 pub fn validate_username(username: &str) -> anyhow::Result<()> {
@@ -337,6 +850,25 @@ pub fn validate_username(username: &str) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_app_password_label(label: &str) -> anyhow::Result<&str> {
+    let label = label.trim();
+    if label.is_empty() {
+        anyhow::bail!("app password label cannot be empty");
+    }
+    if label.len() > 64 {
+        anyhow::bail!("app password label is too long");
+    }
+    if !label
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        anyhow::bail!(
+            "app password label may only contain ASCII letters, numbers, dot, underscore, or dash"
+        );
+    }
+    Ok(label)
 }
 
 fn generate_app_password() -> String {
@@ -467,6 +999,25 @@ pub async fn delete_file_records(
     .context("delete dead property rows")?;
 
     Ok(())
+}
+
+pub async fn file_rel_path_by_id(
+    pool: &SqlitePool,
+    owner: &str,
+    file_id: i64,
+) -> anyhow::Result<Option<String>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT rel_path
+        FROM file_ids
+        WHERE owner = ?1 AND id = ?2
+        "#,
+    )
+    .bind(owner)
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await
+    .context("lookup file path by id")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1371,6 +1922,12 @@ mod tests {
             users[0].app_password_labels,
             vec![DEFAULT_APP_PASSWORD_LABEL.to_owned()]
         );
+        assert_eq!(users[0].app_passwords[0].scopes[0].mount_path, "/");
+        assert_eq!(users[0].app_passwords[0].scopes[0].storage_path, "/");
+        assert_eq!(
+            users[0].app_passwords[0].scopes[0].permission,
+            PermissionLevel::Full
+        );
 
         let store = SqliteUserStore::new(pool.clone());
         assert!(store
@@ -1390,6 +1947,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_password_admin_manages_scopes_expiry_and_single_resets() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let created = create_local_user(&pool, "alice", None)
+            .await
+            .expect("create alice");
+        let expires_at = unix_timestamp() + 3600;
+        let readonly = create_local_app_password(
+            &pool,
+            "alice",
+            "readonly",
+            Some(expires_at),
+            &[AppPasswordScopeInput {
+                mount_path: "/Docs".to_owned(),
+                storage_path: "/Projects".to_owned(),
+                permission: PermissionLevel::View,
+            }],
+        )
+        .await
+        .expect("create readonly app password");
+
+        let store = SqliteUserStore::new(pool.clone());
+        let readonly_principal = store
+            .verify("alice", &readonly.app_password)
+            .await
+            .expect("verify readonly")
+            .expect("readonly principal");
+        assert_eq!(readonly_principal.app_password_label, "readonly");
+        assert_eq!(readonly_principal.expires_at, Some(expires_at));
+        assert_eq!(readonly_principal.scopes[0].mount_path, Path::new("Docs"));
+        assert_eq!(
+            readonly_principal.scopes[0].storage_path,
+            Path::new("Projects")
+        );
+        assert_eq!(
+            readonly_principal.scopes[0].permission,
+            PermissionLevel::View
+        );
+
+        assert!(replace_local_app_password_scopes(
+            &pool,
+            "alice",
+            "readonly",
+            &[AppPasswordScopeInput {
+                mount_path: "/Upload".to_owned(),
+                storage_path: "/Inbox/Upload".to_owned(),
+                permission: PermissionLevel::Full,
+            }],
+        )
+        .await
+        .expect("replace scopes"));
+        assert!(
+            update_local_app_password_expiry(&pool, "alice", "readonly", None)
+                .await
+                .expect("clear expiry")
+        );
+
+        let reset = reset_local_app_password(&pool, "alice", "readonly")
+            .await
+            .expect("reset single password");
+        assert!(store
+            .verify("alice", &readonly.app_password)
+            .await
+            .expect("old readonly invalid")
+            .is_none());
+        let reset_principal = store
+            .verify("alice", &reset.app_password)
+            .await
+            .expect("reset readonly valid")
+            .expect("reset principal");
+        assert_eq!(
+            reset_principal.scopes[0].storage_path,
+            Path::new("Inbox/Upload")
+        );
+        assert_eq!(reset_principal.expires_at, None);
+        assert!(store
+            .verify("alice", &created.app_password)
+            .await
+            .expect("default password still valid")
+            .is_some());
+
+        assert!(delete_local_app_password(&pool, "alice", "readonly")
+            .await
+            .expect("delete readonly"));
+        let labels = list_local_app_passwords(&pool, "alice")
+            .await
+            .expect("list passwords")
+            .into_iter()
+            .map(|password| password.label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec![DEFAULT_APP_PASSWORD_LABEL.to_owned()]);
+    }
+
+    #[tokio::test]
     async fn local_user_admin_rejects_unsafe_and_bootstrap_deletes() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let pool = temp_pool(&temp).await;
@@ -1403,6 +2054,80 @@ mod tests {
         assert!(validate_username("../alice").is_err());
         assert!(validate_username("alice/bob").is_err());
         assert!(delete_local_user(&pool, BOOTSTRAP_USER).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn local_user_admin_updates_state_and_resets_passwords() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let created = create_local_user(&pool, "alice", Some("Alice Example"))
+            .await
+            .expect("create local user");
+        let store = SqliteUserStore::new(pool.clone());
+
+        assert!(
+            update_local_user_display_name(&pool, "alice", "Alice Renamed")
+                .await
+                .expect("update display name")
+        );
+        let users = list_local_users(&pool).await.expect("list local users");
+        assert_eq!(users[0].display_name, "Alice Renamed");
+
+        assert!(set_local_user_enabled(&pool, "alice", false)
+            .await
+            .expect("disable user"));
+        assert!(store
+            .verify("alice", &created.app_password)
+            .await
+            .expect("verify disabled user")
+            .is_none());
+
+        assert!(set_local_user_enabled(&pool, "alice", true)
+            .await
+            .expect("enable user"));
+        assert!(store
+            .verify("alice", &created.app_password)
+            .await
+            .expect("verify reenabled user")
+            .is_some());
+
+        let reset = reset_local_user_app_password(&pool, "alice")
+            .await
+            .expect("reset app password");
+        assert_eq!(reset.password_label, DEFAULT_APP_PASSWORD_LABEL);
+        assert!(store
+            .verify("alice", &created.app_password)
+            .await
+            .expect("old password invalid")
+            .is_none());
+        assert!(store
+            .verify("alice", &reset.app_password)
+            .await
+            .expect("new password valid")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn enabled_admin_count_counts_only_enabled_configured_users() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        create_local_user(&pool, "alice", None)
+            .await
+            .expect("create alice");
+        create_local_user(&pool, "bob", None)
+            .await
+            .expect("create bob");
+        set_local_user_enabled(&pool, "bob", false)
+            .await
+            .expect("disable bob");
+
+        let admins = vec!["alice".to_owned(), "bob".to_owned(), "missing".to_owned()];
+        assert_eq!(
+            enabled_admin_count(&pool, &admins)
+                .await
+                .expect("count enabled admins"),
+            1
+        );
     }
 
     #[tokio::test]

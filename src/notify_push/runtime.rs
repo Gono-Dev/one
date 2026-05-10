@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use rand::RngCore;
 use tokio::sync::broadcast;
 
-use crate::config::NotifyPushConfig;
+use crate::{auth::Principal, config::NotifyPushConfig};
 
 use super::{MessageType, PushMessage};
 
@@ -27,7 +27,7 @@ pub struct NotifyRuntime {
 
 #[derive(Debug, Clone)]
 struct PreAuthEntry {
-    user: String,
+    principal: Principal,
     created_at: Instant,
 }
 
@@ -101,23 +101,23 @@ impl NotifyRuntime {
         }
     }
 
-    pub fn issue_pre_auth(&self, user: impl Into<String>) -> String {
+    pub fn issue_pre_auth(&self, principal: Principal) -> String {
         self.cleanup_pre_auth();
         let token = random_token();
         self.pre_auth.insert(
             token.clone(),
             PreAuthEntry {
-                user: user.into(),
+                principal,
                 created_at: Instant::now(),
             },
         );
         token
     }
 
-    pub fn take_pre_auth(&self, token: &str) -> Option<String> {
+    pub fn take_pre_auth(&self, token: &str) -> Option<Principal> {
         self.cleanup_pre_auth();
         let (_, entry) = self.pre_auth.remove(token)?;
-        (entry.created_at.elapsed() <= self.pre_auth_ttl()).then_some(entry.user)
+        (entry.created_at.elapsed() <= self.pre_auth_ttl()).then_some(entry.principal)
     }
 
     pub fn subscribe(
@@ -280,16 +280,26 @@ fn random_token() -> String {
 mod tests {
     use std::{thread, time::Duration};
 
-    use crate::config::NotifyPushConfig;
+    use crate::{auth::Principal, config::NotifyPushConfig, permissions};
 
     use super::NotifyRuntime;
+
+    fn principal(username: &str) -> Principal {
+        Principal {
+            username: username.to_owned(),
+            app_password_id: 1,
+            app_password_label: "test".to_owned(),
+            expires_at: None,
+            scopes: vec![permissions::default_scope()],
+        }
+    }
 
     #[test]
     fn pre_auth_token_is_one_time() {
         let runtime = NotifyRuntime::new(NotifyPushConfig::default());
-        let token = runtime.issue_pre_auth("gono");
-        assert_eq!(runtime.take_pre_auth(&token), Some("gono".to_owned()));
-        assert_eq!(runtime.take_pre_auth(&token), None);
+        let token = runtime.issue_pre_auth(principal("gono"));
+        assert_eq!(runtime.take_pre_auth(&token).unwrap().username, "gono");
+        assert!(runtime.take_pre_auth(&token).is_none());
     }
 
     #[test]
@@ -297,8 +307,8 @@ mod tests {
         let mut config = NotifyPushConfig::default();
         config.pre_auth_ttl_secs = 0;
         let runtime = NotifyRuntime::new(config);
-        let token = runtime.issue_pre_auth("gono");
+        let token = runtime.issue_pre_auth(principal("gono"));
         thread::sleep(Duration::from_millis(1));
-        assert_eq!(runtime.take_pre_auth(&token), None);
+        assert!(runtime.take_pre_auth(&token).is_none());
     }
 }
