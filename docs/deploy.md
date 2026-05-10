@@ -102,9 +102,9 @@ example:
 
 ```text
 dist/gono-cloud-linux-x86_64.tar.gz
-dist/gono-cloud-0.1.0-linux-x86_64.tar.gz
+dist/gono-cloud-0.1.1-linux-x86_64.tar.gz
 dist/gono-cloud-linux-x86_64.tar.gz.sha256
-dist/gono-cloud-0.1.0-linux-x86_64.tar.gz.sha256
+dist/gono-cloud-0.1.1-linux-x86_64.tar.gz.sha256
 ```
 
 Cross-builds can pass Cargo and release target names explicitly:
@@ -130,12 +130,12 @@ https://github.com/Gono-Dev/cloud.server/releases/latest/download/gono-cloud-lin
 If a `.sha256` sidecar is present, the installer downloads it and verifies the archive
 automatically.
 
-Create the first GitHub Release from a clean `main` branch with:
+Create the GitHub Release from a clean `main` branch with:
 
 ```sh
 git push origin main
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
 ```
 
 Linux `armv7` and `armv6` remain installer-supported artifact names, but they require a separate
