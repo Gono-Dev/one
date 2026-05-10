@@ -341,6 +341,29 @@ class PathPool:
             return list(self.files)
 
 
+class SyncTokenTracker:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.token = "0"
+
+    def current(self) -> str:
+        with self.lock:
+            return self.token
+
+    def update_from_body(self, body: bytes) -> None:
+        tokens = [
+            int(match.group(1))
+            for match in re.finditer(
+                rb"<(?:[A-Za-z0-9_.-]+:)?sync-token>(\d+)</(?:[A-Za-z0-9_.-]+:)?sync-token>",
+                body,
+            )
+        ]
+        if not tokens:
+            return
+        with self.lock:
+            self.token = str(max(int(self.token), max(tokens)))
+
+
 class Sampler:
     def __init__(
         self,
@@ -490,12 +513,15 @@ def find_gono_cloud_pid() -> Optional[int]:
 
 
 def load_db_path(config_path: Optional[str]) -> Optional[str]:
-    if not config_path or tomllib is None:
+    if not config_path:
         return None
     try:
-        with open(config_path, "rb") as file:
-            data = tomllib.load(file)
-        db_path = data.get("db", {}).get("path")
+        if tomllib is not None:
+            with open(config_path, "rb") as file:
+                data = tomllib.load(file)
+            db_path = data.get("db", {}).get("path")
+        else:
+            db_path = load_toml_string(config_path, "db", "path")
         if not db_path:
             return None
         if os.path.isabs(db_path):
@@ -503,6 +529,32 @@ def load_db_path(config_path: Optional[str]) -> Optional[str]:
         return str(Path(config_path).parent / db_path)
     except Exception:
         return None
+
+
+def load_toml_string(config_path: str, section: str, key: str) -> Optional[str]:
+    in_section = False
+    section_header = f"[{section}]"
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.+?)\s*$")
+    with open(config_path, "r", encoding="utf-8") as file:
+        for raw_line in file:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                in_section = line == section_header
+                continue
+            if not in_section:
+                continue
+            match = key_pattern.match(raw_line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if "#" in value:
+                value = value.split("#", 1)[0].strip()
+            if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+                return value[1:-1]
+            return value
+    return None
 
 
 def make_payload(size_kb: int, seed: int = 1) -> bytes:
@@ -597,6 +649,28 @@ def record_request(
     return ok, status, data
 
 
+def sync_report(
+    recorder: Recorder,
+    scenario: str,
+    op: str,
+    client: HttpClient,
+    tracker: SyncTokenTracker,
+) -> None:
+    ok, _, data = record_request(
+        recorder,
+        scenario,
+        op,
+        client,
+        "REPORT",
+        "/remote.php/dav/",
+        sync_collection_body(tracker.current()),
+        {"Depth": "0", "Content-Type": "application/xml"},
+        {207},
+    )
+    if ok:
+        tracker.update_from_body(data)
+
+
 def run_baseline(client: HttpClient, recorder: Recorder, pool: PathPool, profile: Profile) -> None:
     ensure_perf_dirs(client, recorder, pool)
     payload = make_payload(profile.file_size_kb, 21)
@@ -689,6 +763,8 @@ def run_mixed_load(
         ("sync_report", 5),
     ]
     choices = [name for name, weight in weights for _ in range(weight)]
+    sync_tokens = SyncTokenTracker()
+    sync_report(recorder, scenario, "sync_report_warmup", client, sync_tokens)
 
     def worker(_: int) -> None:
         while time.time() < stop_at:
@@ -797,17 +873,7 @@ def run_mixed_load(
                 if ok:
                     pool.remove(path)
             elif op == "sync_report":
-                record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "REPORT",
-                    "/remote.php/dav/",
-                    sync_collection_body("0"),
-                    {"Depth": "0", "Content-Type": "application/xml"},
-                    {207, 403},
-                )
+                sync_report(recorder, scenario, op, client, sync_tokens)
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
         futures = [executor.submit(worker, i) for i in range(concurrency)]
