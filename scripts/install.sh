@@ -805,7 +805,7 @@ prompt_new_config_values() {
     ADMIN_USERS=""
   else
     ADMIN_ENABLED="true"
-    ADMIN_USERS="$(prompt_text "Admin users to create/grant admin, comma separated" "gono")"
+    ADMIN_USERS="gono"
   fi
 }
 
