@@ -1319,6 +1319,21 @@ def main() -> int:
     sampler.start()
     try:
         record_request(recorder, "preflight", "status", client, "GET", "/status.php")
+        auth_ok, _, _ = record_request(
+            recorder,
+            "preflight",
+            "auth_user",
+            client,
+            "GET",
+            "/ocs/v2.php/cloud/user",
+            expected={200},
+        )
+        if not auth_ok:
+            print(
+                "authenticated preflight failed; check GONO_PERF_USER and GONO_PERF_PASSWORD",
+                file=sys.stderr,
+            )
+            return write_summary(args, recorder, started_at, report_dir, db_path)
         ensure_perf_dirs(client, recorder, pool)
         if not args.skip_preseed and args.scenario in {"mixed", "chunking", "notify", "admin", "spike", "soak", "all"}:
             preseed_files(
