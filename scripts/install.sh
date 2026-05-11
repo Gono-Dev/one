@@ -829,19 +829,11 @@ prompt_new_config_values() {
 }
 
 configure_config_file() {
-  local backup_path
-
   if [[ -f "${CONFIG_FILE}" ]]; then
     log "existing config found: ${CONFIG_FILE}"
     if prompt_yes_no "Keep existing config during this install/upgrade?" "y"; then
       if ! validate_existing_config_for_preserve; then
-        if prompt_yes_no "Back up the existing config and write a fresh one?" "y"; then
-          backup_path="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-          cp -p "${CONFIG_FILE}" "${backup_path}"
-          log "backed up existing config to ${backup_path}"
-        else
-          die "fix ${CONFIG_FILE} and rerun the installer"
-        fi
+        die "existing config is invalid; fix ${CONFIG_FILE}, or rerun and choose not to keep the existing config"
       else
         PRESERVE_CONFIG="1"
         load_existing_config_defaults
@@ -900,6 +892,20 @@ max_connection_secs = 0
 EOF
   chown root:"${RUN_GROUP}" "${CONFIG_FILE}"
   chmod 0640 "${CONFIG_FILE}"
+}
+
+validate_preserved_config_with_binary() {
+  local output
+  [[ "${PRESERVE_CONFIG}" == "1" ]] || return 0
+
+  if output="$(GONE_CLOUD_CONFIG="${CONFIG_FILE}" "${BIN_PATH}" config-check 2>&1)"; then
+    log "validated existing config ${CONFIG_FILE}"
+    return 0
+  fi
+
+  warn "existing config failed validation with ${BIN_PATH} config-check"
+  printf '%s\n' "${output}" >&2
+  die "existing config is invalid; fix ${CONFIG_FILE}, or rerun and choose not to keep the existing config"
 }
 
 write_systemd_unit() {
@@ -1400,6 +1406,7 @@ install_service() {
   prepare_directories
   configure_config_file
   install_binary
+  validate_preserved_config_with_binary
   write_config
   write_service_definition
 

@@ -27,9 +27,13 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path =
         std::env::var("GONE_CLOUD_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
-    let config = Config::load_or_dev_default(&config_path)?;
+    let config = match command {
+        Command::ConfigCheck => Config::load(&config_path)?,
+        _ => Config::load_or_dev_default(&config_path)?,
+    };
     match command {
         Command::Serve => run_server(&config_path, config).await,
+        Command::ConfigCheck => run_config_check(&config_path, config).await,
         Command::ConsistencyCheck => run_consistency_check(config).await,
         Command::ConsistencyRepair(mode) => run_consistency_repair(config, mode).await,
         Command::UserList => run_user_list(config).await,
@@ -129,6 +133,11 @@ async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
     stop_upload_cleanup(upload_cleanup).await;
     server_result?;
 
+    Ok(())
+}
+
+async fn run_config_check(config_path: &str, _config: Config) -> anyhow::Result<()> {
+    println!("Config OK: {config_path}");
     Ok(())
 }
 
@@ -348,6 +357,7 @@ fn print_help() {
     println!(concat!(
         "Usage:\n",
         "  gono-cloud [serve]\n",
+        "  gono-cloud config-check\n",
         "  gono-cloud consistency-check\n",
         "  gono-cloud consistency-repair [--dry-run|--apply]\n",
         "  gono-cloud user-list\n",
@@ -367,6 +377,7 @@ fn print_help() {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Serve,
+    ConfigCheck,
     ConsistencyCheck,
     ConsistencyRepair(RepairMode),
     UserList,
@@ -416,6 +427,7 @@ impl Command {
         match args.as_slice() {
             [] => Ok(Self::Serve),
             [command] if command == "serve" => Ok(Self::Serve),
+            [command] if command == "config-check" => Ok(Self::ConfigCheck),
             [command] if command == "consistency-check" => Ok(Self::ConsistencyCheck),
             [command] if command == "consistency-repair" => {
                 Ok(Self::ConsistencyRepair(RepairMode::DryRun))
@@ -669,6 +681,10 @@ mod tests {
         assert_eq!(
             Command::parse(["serve".to_owned()]).unwrap(),
             Command::Serve
+        );
+        assert_eq!(
+            Command::parse(["config-check".to_owned()]).unwrap(),
+            Command::ConfigCheck
         );
         assert_eq!(
             Command::parse(["consistency-check".to_owned()]).unwrap(),
