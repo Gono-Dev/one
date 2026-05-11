@@ -1921,6 +1921,15 @@ async fn admin_users_page_requires_configured_admin() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("User Management"));
     assert!(body.contains("gono"));
+    let expiration_values = expiration_input_values(&body);
+    assert!(expiration_values.len() >= 2);
+    assert!(expiration_values.iter().all(|value| {
+        value.len() == 16
+            && value.as_bytes()[4] == b'-'
+            && value.as_bytes()[7] == b'-'
+            && value.as_bytes()[10] == b'T'
+            && value.as_bytes()[13] == b':'
+    }));
 }
 
 #[tokio::test]
@@ -2223,6 +2232,22 @@ fn settings_form_body(csrf: &str, base_url: &str, notify_path: &str, admin_users
         notify_path = notify_path,
         admin_users = admin_users,
     )
+}
+
+fn expiration_input_values(body: &str) -> Vec<String> {
+    let marker = r#"name="expires_at" type="text" value=""#;
+    let mut values = Vec::new();
+    let mut rest = body;
+    while let Some(index) = rest.find(marker) {
+        let value_start = index + marker.len();
+        let value_rest = &rest[value_start..];
+        let Some(value_end) = value_rest.find('"') else {
+            break;
+        };
+        values.push(value_rest[..value_end].to_owned());
+        rest = &value_rest[value_end..];
+    }
+    values
 }
 
 #[tokio::test]

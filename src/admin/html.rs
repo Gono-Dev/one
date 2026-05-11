@@ -113,6 +113,7 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
     if users.is_empty() {
         return String::new();
     }
+    let default_expiration = default_expiration_value();
     let options = users
         .iter()
         .map(|user| {
@@ -170,7 +171,7 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
           </div>
           <div class="field">
             <label for="create-password-expiry-input">Expiration time</label>
-            <input class="input" id="create-password-expiry-input" name="expires_at" type="text" placeholder="YYYY-MM-DDTHH:MM" autocomplete="off">
+            <input class="input" id="create-password-expiry-input" name="expires_at" type="text" value="{default_expiration}" placeholder="YYYY-MM-DDTHH:MM" autocomplete="off">
           </div>
         </div>
         <div class="modal-actions">
@@ -183,6 +184,7 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
   </form>
 </section>"#,
         csrf = escape_attr(csrf_token),
+        default_expiration = escape_attr(&default_expiration),
     )
 }
 
@@ -574,7 +576,7 @@ fn render_app_password_block(
         .expires_at
         .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
         .map(|value| value.format("%Y-%m-%dT%H:%M").to_string())
-        .unwrap_or_default();
+        .unwrap_or_else(default_expiration_value);
     let delete = if user.app_password_count <= 1 {
         r#"<button class="button button-danger button-mini" type="button" disabled>Delete</button>"#
             .to_owned()
@@ -691,6 +693,12 @@ fn format_timestamp(timestamp: i64) -> String {
     chrono::DateTime::from_timestamp(timestamp, 0)
         .map(|value| value.format("%Y-%m-%d %H:%M:%S UTC").to_string())
         .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn default_expiration_value() -> String {
+    (chrono::Utc::now() + chrono::Duration::days(30))
+        .format("%Y-%m-%dT%H:%M")
+        .to_string()
 }
 
 fn escape_html(value: &str) -> String {
