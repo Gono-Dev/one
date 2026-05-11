@@ -21,9 +21,8 @@ use crate::{
     storage,
 };
 
-pub const BOOTSTRAP_USER: &str = "gono";
-const BOOTSTRAP_LABEL: &str = "bootstrap";
 pub const DEFAULT_APP_PASSWORD_LABEL: &str = "default";
+pub const BOOTSTRAP_USER: &str = "gono";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapOutcome {
@@ -185,14 +184,15 @@ pub async fn ensure_bootstrap_user(pool: &SqlitePool) -> anyhow::Result<Bootstra
         "#,
     )
     .bind(BOOTSTRAP_USER)
-    .bind(BOOTSTRAP_LABEL)
+    .bind(DEFAULT_APP_PASSWORD_LABEL)
     .fetch_optional(&mut *tx)
     .await
-    .context("lookup bootstrap app password")?;
+    .context("lookup default bootstrap app password")?;
 
     let generated_password = if existing.is_none() {
         let password = generate_app_password();
-        let password_hash = hash_password(&password).context("hash bootstrap app password")?;
+        let password_hash =
+            hash_password(&password).context("hash default bootstrap app password")?;
 
         let result = sqlx::query(
             r#"
@@ -201,12 +201,12 @@ pub async fn ensure_bootstrap_user(pool: &SqlitePool) -> anyhow::Result<Bootstra
             "#,
         )
         .bind(BOOTSTRAP_USER)
-        .bind(BOOTSTRAP_LABEL)
+        .bind(DEFAULT_APP_PASSWORD_LABEL)
         .bind(password_hash)
         .bind(now)
         .execute(&mut *tx)
         .await
-        .context("insert bootstrap app password")?;
+        .context("insert default bootstrap app password")?;
         insert_default_scope(&mut tx, result.last_insert_rowid(), now).await?;
 
         Some(password)

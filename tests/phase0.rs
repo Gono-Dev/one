@@ -1763,6 +1763,11 @@ async fn bootstrap_password_is_generated_once_and_reused() {
         .is_some());
     assert!(first.state.instance_id.starts_with('i'));
     assert_ne!(first.state.instance_id, "phase1");
+    let bootstrap_passwords = db::list_local_app_passwords(&first.state.db, BOOTSTRAP_USER)
+        .await
+        .expect("list bootstrap app passwords");
+    assert_eq!(bootstrap_passwords.len(), 1);
+    assert_eq!(bootstrap_passwords[0].label, db::DEFAULT_APP_PASSWORD_LABEL);
 
     let second = AppState::initialize(config).await.expect("second init");
     assert_eq!(second.bootstrap.generated_password, None);
@@ -1851,10 +1856,24 @@ async fn wrong_basic_auth_password_is_rejected() {
 async fn admin_disabled_returns_not_found() {
     let (app, _temp, _password) = app_with_temp_root().await;
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
                 .uri("/admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1871,6 +1890,25 @@ async fn admin_users_page_requires_configured_admin() {
         config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
     })
     .await;
+
+    for uri in ["/admin", "/admin/"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/admin/users"
+        );
+    }
 
     let unauthenticated = app
         .clone()

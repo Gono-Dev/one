@@ -52,12 +52,14 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
     Router::new()
         .route("/admin", get(|| async { Redirect::to("/admin/users") }))
+        .route("/admin/", get(|| async { Redirect::to("/admin/users") }))
         .nest("/admin", protected)
 }
 
 pub fn disabled_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/admin", any(not_found))
+        .route("/admin/", any(not_found))
         .nest("/admin", Router::new().fallback(not_found))
 }
 
