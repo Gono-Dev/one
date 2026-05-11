@@ -5,4 +5,6 @@ mod runtime;
 mod websocket;
 
 pub use message::{MessageType, PushMessage, UpdatedFiles};
-pub use runtime::{NotifyConnectionSnapshot, NotifyMetricsSnapshot, NotifyRuntime};
+pub use runtime::{
+    NotifyClientInfo, NotifyConnectionSnapshot, NotifyMetricsSnapshot, NotifyRuntime,
+};

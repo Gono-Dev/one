@@ -11,7 +11,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
 use gono_cloud::{
     build_router, dav_handler::chunked_upload, db, db::BOOTSTRAP_USER,
-    permissions::PermissionLevel, AppState, Config,
+    notify_push::NotifyClientInfo, permissions::PermissionLevel, AppState, Config,
 };
 use tempfile::TempDir;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -36,7 +36,12 @@ async fn spawn_app_server(app: axum::Router) -> (String, tokio::task::JoinHandle
         .expect("bind test server");
     let addr = listener.local_addr().expect("test server addr");
     let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve test app");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test app");
     });
     (format!("http://{addr}"), handle)
 }
@@ -206,6 +211,8 @@ async fn capabilities_are_public() {
         assert!(body.contains("\"status\":\"ok\""));
         assert!(body.contains("\"chunking\":\"1.0\""));
         assert!(body.contains("\"notify_push\""));
+        assert!(body.contains("\"gono_cloud\""));
+        assert!(body.contains("\"notify_push_client_info\":{\"version\":1}"));
         assert!(body.contains("\"websocket\":\"wss://127.0.0.1:3000/push/ws\""));
         assert!(body.contains("\"pre_auth\":\"https://127.0.0.1:3000/apps/notify_push/pre_auth\""));
     }
@@ -655,6 +662,7 @@ async fn notify_push_can_be_disabled() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
     assert!(!body.contains("\"notify_push\""));
+    assert!(!body.contains("\"gono_cloud\""));
 }
 
 #[tokio::test]
@@ -983,6 +991,47 @@ async fn notify_push_websocket_basic_auth_success_and_failure() {
     let mut bad = login_ws(&base_url, BOOTSTRAP_USER, "wrong-password").await;
     assert!(next_ws_text(&mut bad).await.starts_with("err:"));
 
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn notify_push_websocket_accepts_gono_client_info() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let (base_url, server) = spawn_app_server(app).await;
+
+    let mut websocket = login_ws(&base_url, BOOTSTRAP_USER, &password).await;
+    assert_eq!(next_ws_text(&mut websocket).await, "authenticated");
+    websocket
+        .send(Message::Text("listen notify_file_id".into()))
+        .await
+        .expect("send listen mode");
+    websocket
+        .send(Message::Text(
+            r#"gono_client_info {"v":1,"device_name":"Test Mac","hostname":"test.local","client_name":"Gono Cloud Desktop","client_version":"0.1.0","platform":"macos","os":"macOS 15.5","device_id":"00000000-0000-4000-8000-000000000001"}"#.into(),
+        ))
+        .await
+        .expect("send client info");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let connections = state
+        .notify_push
+        .as_ref()
+        .expect("notify runtime")
+        .active_connections();
+    assert_eq!(connections.len(), 1);
+    assert_eq!(connections[0].user, BOOTSTRAP_USER);
+    assert!(connections[0].listen_file_id);
+    assert_eq!(
+        connections[0].client_info.device_name.as_deref(),
+        Some("Test Mac")
+    );
+    assert_eq!(
+        connections[0].client_info.client_name.as_deref(),
+        Some("Gono Cloud Desktop")
+    );
+
+    let _ = websocket.close(None).await;
     server.abort();
     let _ = server.await;
 }
@@ -2085,12 +2134,22 @@ async fn admin_status_page_shows_runtime_state() {
         config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
     })
     .await;
-    let _receiver = state
-        .notify_push
-        .as_ref()
-        .expect("notify runtime")
+    let runtime = state.notify_push.as_ref().expect("notify runtime");
+    let _receiver = runtime
         .subscribe(BOOTSTRAP_USER)
         .expect("subscribe notify client");
+    let connection_id = runtime.register_connection(
+        BOOTSTRAP_USER,
+        "127.0.0.1:49999".parse().expect("test peer addr"),
+    );
+    runtime.set_connection_listen_file_id(connection_id, true);
+    runtime.update_connection_client_info(
+        connection_id,
+        NotifyClientInfo::from_json(
+            r#"{"v":1,"device_name":"Test Mac","hostname":"test-mac.local","client_name":"Gono Cloud Desktop","client_version":"0.1.0","platform":"macos","os":"macOS 15.5","device_id":"00000000-0000-4000-8000-000000000001"}"#,
+        )
+        .expect("client info"),
+    );
     assert_eq!(
         state
             .auth_rate_limiter
@@ -2124,8 +2183,12 @@ async fn admin_status_page_shows_runtime_state() {
     assert!(body.contains("System Status"));
     assert!(body.contains("Notify Push"));
     assert!(body.contains("Active connections"));
-    assert!(body.contains("1 connection(s)"));
     assert!(body.contains("Notify Push Clients"));
+    assert!(body.contains("Test Mac"));
+    assert!(body.contains("test-mac.local"));
+    assert!(body.contains("Gono Cloud Desktop 0.1.0"));
+    assert!(body.contains("macos / macOS 15.5"));
+    assert!(body.contains("listen_file_id"));
     assert!(body.contains(BOOTSTRAP_USER));
     assert!(body.contains("Database"));
     assert!(body.contains("Storage"));

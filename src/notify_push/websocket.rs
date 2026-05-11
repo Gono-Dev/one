@@ -7,7 +7,9 @@ use tracing::{debug, info, warn};
 
 use crate::{auth::Principal, notify_push::runtime::SubscribeError, permissions, state::AppState};
 
-use super::{NotifyRuntime, PushMessage, UpdatedFiles};
+use super::{NotifyClientInfo, NotifyRuntime, PushMessage, UpdatedFiles};
+
+const CLIENT_INFO_PREFIX: &str = "gono_client_info ";
 
 pub async fn handle_socket(
     mut socket: WebSocket,
@@ -52,10 +54,11 @@ pub async fn handle_socket(
     };
 
     if socket.send(Message::text("authenticated")).await.is_err() {
-        runtime.disconnect(&user);
+        runtime.disconnect(&user, None);
         return;
     }
 
+    let connection_id = runtime.register_connection(&user, peer_addr);
     info!(%peer_addr, user, "notify_push websocket authenticated");
     debug!(user, "notify_push websocket authenticated");
     let (mut sender, mut inbound) = socket.split();
@@ -107,6 +110,12 @@ pub async fn handle_socket(
                         match message {
                             Message::Text(text) if text.as_str() == "listen notify_file_id" => {
                                 listen_file_id = true;
+                                runtime.set_connection_listen_file_id(connection_id, true);
+                            }
+                            Message::Text(text) => {
+                                if let Some(client_info) = parse_client_info_message(text.as_str()) {
+                                    runtime.update_connection_client_info(connection_id, client_info);
+                                }
                             }
                             Message::Close(_) => break,
                             _ => {}
@@ -132,9 +141,21 @@ pub async fn handle_socket(
     )
     .await;
     let _ = sender.close().await;
-    runtime.disconnect(&user);
+    runtime.disconnect(&user, Some(connection_id));
     info!(%peer_addr, user, "notify_push websocket disconnected");
     debug!(user, "notify_push websocket disconnected");
+}
+
+fn parse_client_info_message(text: &str) -> Option<NotifyClientInfo> {
+    let payload = text.strip_prefix(CLIENT_INFO_PREFIX)?;
+    let client_info = match NotifyClientInfo::from_json(payload) {
+        Ok(client_info) => client_info,
+        Err(err) => {
+            debug!(?err, "ignoring invalid notify_push client info message");
+            return None;
+        }
+    };
+    (!client_info.is_empty()).then_some(client_info)
 }
 
 async fn authenticate(

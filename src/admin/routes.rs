@@ -627,12 +627,9 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
     let (notify_rows, notify_connections) = if let Some(runtime) = &state.notify_push {
         let metrics = runtime.metrics();
         let connections = runtime
-            .active_connections_by_user()
+            .active_connections()
             .into_iter()
-            .map(|connection| html::StatusRow {
-                label: connection.user,
-                value: format!("{} connection(s)", connection.connections),
-            })
+            .map(notify_connection_row)
             .collect::<Vec<_>>();
         (
             vec![
@@ -743,6 +740,67 @@ fn status_row(label: impl ToString, value: impl ToString) -> html::StatusRow {
     html::StatusRow {
         label: label.to_string(),
         value: value.to_string(),
+    }
+}
+
+fn notify_connection_row(
+    connection: crate::notify_push::NotifyConnectionSnapshot,
+) -> html::StatusRow {
+    let info = &connection.client_info;
+    let label = info
+        .device_name
+        .as_ref()
+        .or(info.hostname.as_ref())
+        .unwrap_or(&connection.peer_addr)
+        .to_owned();
+    let mut details = vec![connection.user, connection.peer_addr.clone()];
+
+    if let Some(hostname) = &info.hostname {
+        if hostname != &label {
+            details.push(hostname.clone());
+        }
+    }
+
+    let client = match (&info.client_name, &info.client_version) {
+        (Some(name), Some(version)) => Some(format!("{name} {version}")),
+        (Some(name), None) => Some(name.clone()),
+        (None, Some(version)) => Some(format!("version {version}")),
+        (None, None) => None,
+    };
+    if let Some(client) = client {
+        details.push(client);
+    }
+
+    let platform = match (&info.platform, &info.os) {
+        (Some(platform), Some(os)) if platform != os => Some(format!("{platform} / {os}")),
+        (Some(platform), _) => Some(platform.clone()),
+        (_, Some(os)) => Some(os.clone()),
+        (None, None) => None,
+    };
+    if let Some(platform) = platform {
+        details.push(platform);
+    }
+
+    details.push(if connection.listen_file_id {
+        "listen_file_id".to_owned()
+    } else {
+        "notify_file".to_owned()
+    });
+    details.push(format!(
+        "connected {} ago",
+        format_duration(connection.connected_secs)
+    ));
+
+    status_row(label, details.join(" · "))
+}
+
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3600)
     }
 }
 

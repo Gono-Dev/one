@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
 };
 use quick_xml::{escape::escape, events::Event, Reader};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use crate::{
     auth::Principal,
@@ -54,13 +54,6 @@ async fn handle_inner(
     let report = parse_report_body(&body)?;
 
     if report.filter_files {
-        info!(
-            target: "gono_cloud::access",
-            user = %principal.username,
-            path = %request_path,
-            favorite_filter = ?report.favorite_filter,
-            "webdav report filter-files"
-        );
         return handle_filter_files(
             state,
             &principal,
@@ -73,13 +66,6 @@ async fn handle_inner(
     }
 
     if report.sync_collection {
-        info!(
-            target: "gono_cloud::access",
-            user = %principal.username,
-            path = %request_path,
-            since_token = report.sync_token.unwrap_or(0),
-            "webdav report sync-collection"
-        );
         return handle_sync_collection(state, &principal, &files_root, &href_prefix, &report).await;
     }
 

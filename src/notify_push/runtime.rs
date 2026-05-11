@@ -1,6 +1,7 @@
 use std::{
+    net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -9,6 +10,7 @@ use std::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use dashmap::DashMap;
 use rand::RngCore;
+use serde::Deserialize;
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -21,8 +23,10 @@ pub struct NotifyRuntime {
     config: NotifyPushConfig,
     channels: DashMap<String, broadcast::Sender<PushMessage>>,
     pre_auth: DashMap<String, PreAuthEntry>,
+    connections: DashMap<u64, NotifyConnectionRecord>,
     test_values: DashMap<String, String>,
     test_cookie: AtomicU32,
+    next_connection_id: AtomicU64,
     metrics: NotifyMetrics,
 }
 
@@ -30,6 +34,38 @@ pub struct NotifyRuntime {
 struct PreAuthEntry {
     principal: Principal,
     created_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct NotifyConnectionRecord {
+    user: String,
+    peer_addr: SocketAddr,
+    connected_at: Instant,
+    listen_file_id: bool,
+    client_info: NotifyClientInfo,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotifyClientInfo {
+    pub device_name: Option<String>,
+    pub hostname: Option<String>,
+    pub client_name: Option<String>,
+    pub client_version: Option<String>,
+    pub platform: Option<String>,
+    pub os: Option<String>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NotifyClientInfoWire {
+    v: u8,
+    device_name: Option<String>,
+    hostname: Option<String>,
+    client_name: Option<String>,
+    client_version: Option<String>,
+    platform: Option<String>,
+    os: Option<String>,
+    device_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -64,7 +100,10 @@ pub struct NotifyMetricsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyConnectionSnapshot {
     pub user: String,
-    pub connections: usize,
+    pub peer_addr: String,
+    pub connected_secs: u64,
+    pub listen_file_id: bool,
+    pub client_info: NotifyClientInfo,
 }
 
 impl NotifyRuntime {
@@ -73,8 +112,10 @@ impl NotifyRuntime {
             config,
             channels: DashMap::new(),
             pre_auth: DashMap::new(),
+            connections: DashMap::new(),
             test_values: DashMap::new(),
             test_cookie: AtomicU32::new(rand::random()),
+            next_connection_id: AtomicU64::new(1),
             metrics: NotifyMetrics::default(),
         });
         runtime.set_test_token(random_token());
@@ -145,7 +186,37 @@ impl NotifyRuntime {
         Ok(receiver)
     }
 
-    pub fn disconnect(&self, user: &str) {
+    pub fn register_connection(&self, user: &str, peer_addr: SocketAddr) -> u64 {
+        let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
+        self.connections.insert(
+            id,
+            NotifyConnectionRecord {
+                user: user.to_owned(),
+                peer_addr,
+                connected_at: Instant::now(),
+                listen_file_id: false,
+                client_info: NotifyClientInfo::default(),
+            },
+        );
+        id
+    }
+
+    pub fn set_connection_listen_file_id(&self, id: u64, listen_file_id: bool) {
+        if let Some(mut record) = self.connections.get_mut(&id) {
+            record.listen_file_id = listen_file_id;
+        }
+    }
+
+    pub fn update_connection_client_info(&self, id: u64, client_info: NotifyClientInfo) {
+        if let Some(mut record) = self.connections.get_mut(&id) {
+            record.client_info = client_info;
+        }
+    }
+
+    pub fn disconnect(&self, user: &str, connection_id: Option<u64>) {
+        if let Some(connection_id) = connection_id {
+            self.connections.remove(&connection_id);
+        }
         self.metrics.remove_connection();
         if let Some(sender) = self.channels.get(user) {
             if sender.receiver_count() <= 1 {
@@ -236,16 +307,36 @@ impl NotifyRuntime {
     }
 
     pub fn active_connections_by_user(&self) -> Vec<NotifyConnectionSnapshot> {
+        let mut connections = self.active_connections();
+        connections.sort_by(|left, right| {
+            left.user
+                .cmp(&right.user)
+                .then_with(|| left.peer_addr.cmp(&right.peer_addr))
+        });
+        connections
+    }
+
+    pub fn active_connections(&self) -> Vec<NotifyConnectionSnapshot> {
+        let now = Instant::now();
         let mut connections = self
-            .channels
+            .connections
             .iter()
-            .map(|entry| NotifyConnectionSnapshot {
-                user: entry.key().clone(),
-                connections: entry.value().receiver_count(),
+            .map(|entry| {
+                let record = entry.value();
+                NotifyConnectionSnapshot {
+                    user: record.user.clone(),
+                    peer_addr: record.peer_addr.to_string(),
+                    connected_secs: now.duration_since(record.connected_at).as_secs(),
+                    listen_file_id: record.listen_file_id,
+                    client_info: record.client_info.clone(),
+                }
             })
-            .filter(|entry| entry.connections > 0)
             .collect::<Vec<_>>();
-        connections.sort_by(|left, right| left.user.cmp(&right.user));
+        connections.sort_by(|left, right| {
+            display_name_for_connection(left)
+                .cmp(&display_name_for_connection(right))
+                .then_with(|| left.peer_addr.cmp(&right.peer_addr))
+        });
         connections
     }
 
@@ -274,6 +365,56 @@ impl NotifyRuntime {
         self.pre_auth
             .retain(|_, entry| entry.created_at.elapsed() <= ttl);
     }
+}
+
+impl NotifyClientInfo {
+    pub fn from_json(payload: &str) -> Result<Self, serde_json::Error> {
+        let wire = serde_json::from_str::<NotifyClientInfoWire>(payload)?;
+        if wire.v != 1 {
+            return Ok(Self::default());
+        }
+
+        Ok(Self {
+            device_name: sanitize_optional(wire.device_name, 80),
+            hostname: sanitize_optional(wire.hostname, 253),
+            client_name: sanitize_optional(wire.client_name, 80),
+            client_version: sanitize_optional(wire.client_version, 40),
+            platform: sanitize_optional(wire.platform, 20),
+            os: sanitize_optional(wire.os, 80),
+            device_id: sanitize_optional(wire.device_id, 80),
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.device_name.is_none()
+            && self.hostname.is_none()
+            && self.client_name.is_none()
+            && self.client_version.is_none()
+            && self.platform.is_none()
+            && self.os.is_none()
+            && self.device_id.is_none()
+    }
+}
+
+fn sanitize_optional(value: Option<String>, max_chars: usize) -> Option<String> {
+    let value = value?;
+    let cleaned = value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(max_chars)
+        .collect::<String>();
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn display_name_for_connection(connection: &NotifyConnectionSnapshot) -> String {
+    connection
+        .client_info
+        .device_name
+        .as_ref()
+        .or(connection.client_info.hostname.as_ref())
+        .unwrap_or(&connection.peer_addr)
+        .to_owned()
 }
 
 impl NotifyMetrics {
@@ -317,6 +458,7 @@ mod tests {
     use crate::{auth::Principal, config::NotifyPushConfig, permissions};
 
     use super::NotifyRuntime;
+    use super::{sanitize_optional, NotifyClientInfo};
 
     fn principal(username: &str) -> Principal {
         Principal {
@@ -344,5 +486,26 @@ mod tests {
         let token = runtime.issue_pre_auth(principal("gono"));
         thread::sleep(Duration::from_millis(1));
         assert!(runtime.take_pre_auth(&token).is_none());
+    }
+
+    #[test]
+    fn client_info_is_sanitized() {
+        let payload = r#"{
+            "v": 1,
+            "device_name": "  Test\nMac  ",
+            "hostname": "host.local",
+            "client_name": "Gono Cloud Desktop",
+            "client_version": "0.1.0",
+            "platform": "macos",
+            "os": "macOS 15.5",
+            "device_id": "00000000-0000-4000-8000-000000000001"
+        }"#;
+        let info = NotifyClientInfo::from_json(payload).expect("parse client info");
+        assert_eq!(info.device_name.as_deref(), Some("TestMac"));
+        assert_eq!(info.hostname.as_deref(), Some("host.local"));
+        assert_eq!(
+            sanitize_optional(Some("x".repeat(90)), 80).unwrap().len(),
+            80
+        );
     }
 }
