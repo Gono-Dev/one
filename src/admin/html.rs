@@ -158,7 +158,7 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
     </div>
     <div class="field">
       <label for="password-expiry">Expires</label>
-      <button class="button button-secondary" id="password-expiry" type="button" popovertarget="create-password-expiry">Save expiry</button>
+      <button class="button button-secondary" id="password-expiry" type="button" popovertarget="create-password-expiry">Set expiry</button>
       <div class="modal-popover" id="create-password-expiry" popover>
         <h4>Edit app password expiry</h4>
         <p>Set when the new app password expires, or keep it valid forever.</p>
@@ -599,7 +599,7 @@ fn render_app_password_block(
     };
     let expiry_popover_id = format!("expiry-{username_attr}-{label_attr}");
     let expiry_form = format!(
-        r#"<button class="button button-secondary button-mini" type="button" popovertarget="{expiry_popover_id}">Save expiry</button>
+        r#"<button class="button button-secondary button-mini" type="button" popovertarget="{expiry_popover_id}">Set expiry</button>
   <div class="modal-popover" id="{expiry_popover_id}" popover>
     <form method="post" action="/admin/users/{username_attr}/app-passwords/{label_attr}/expires-at">
       <input type="hidden" name="_csrf" value="{csrf}">
@@ -752,6 +752,7 @@ const STYLE: &str = r#"
   --radius: 8px;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   margin: 0;
   color: var(--text);

@@ -1941,6 +1941,9 @@ async fn admin_users_page_requires_configured_admin() {
     assert_eq!(hidden_expiration_field_count(&body), 2);
     assert_eq!(visible_expiration_field_count(&body), 1);
     assert!(body.contains("select.value !== 'at'"));
+    assert!(body.contains("[hidden] { display: none !important; }"));
+    assert!(body.contains("Set expiry"));
+    assert!(!body.contains("Save expiry"));
 }
 
 #[tokio::test]
