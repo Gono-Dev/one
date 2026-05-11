@@ -99,10 +99,8 @@ jobs:
           bash <(curl -sL https://run.gono.cloud)
           \`\`\`
 
-          **Important:** Gono Cloud listens only on the local machine interface(127.0.0.1:16102) by default. Use Nginx or another reverse proxy to expose it before accessing it from other machines.
+          **Important:** Gono Cloud listens only on the local machine interface(127.0.0.1:16102) by default. Use Nginx or another reverse proxy to expose it before accessing from other machines.
 
-          This release includes native Linux and macOS artifacts for x86_64 and aarch64, plus
-          sha256 sidecars.
           EOF
 
           assets=(release-assets/*)
