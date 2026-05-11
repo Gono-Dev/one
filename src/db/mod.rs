@@ -1593,8 +1593,7 @@ pub async fn upsert_upload_session(
         r#"
         INSERT INTO upload_sessions(upload_id, owner, target_path, total_size, created_at, updated_at, expires_at)
         VALUES(?1, ?2, ?3, ?4, ?5, ?5, ?6)
-        ON CONFLICT(upload_id) DO UPDATE SET
-            owner = excluded.owner,
+        ON CONFLICT(owner, upload_id) DO UPDATE SET
             target_path = excluded.target_path,
             total_size = excluded.total_size,
             updated_at = excluded.updated_at,
@@ -2108,6 +2107,62 @@ mod tests {
         let pool = connect(&config).await.expect("connect sqlite");
         migrate(&pool).await.expect("migrate sqlite");
         pool
+    }
+
+    #[tokio::test]
+    async fn upload_sessions_are_scoped_by_owner_and_upload_id() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+
+        let pk_rows = sqlx::query("PRAGMA table_info(upload_sessions)")
+            .fetch_all(&pool)
+            .await
+            .expect("inspect upload_sessions schema");
+        let mut owner_pk = 0_i64;
+        let mut upload_id_pk = 0_i64;
+        for row in pk_rows {
+            let name: String = row.try_get("name").expect("column name");
+            let pk: i64 = row.try_get("pk").expect("pk order");
+            match name.as_str() {
+                "owner" => owner_pk = pk,
+                "upload_id" => upload_id_pk = pk,
+                _ => {}
+            }
+        }
+        assert_eq!(owner_pk, 1);
+        assert_eq!(upload_id_pk, 2);
+
+        upsert_upload_session(&pool, "shared-upload", "gono", Path::new("gono.txt"), 5)
+            .await
+            .expect("insert gono upload session");
+        upsert_upload_session(&pool, "shared-upload", "alice", Path::new("alice.txt"), 7)
+            .await
+            .expect("insert alice upload session");
+
+        let gono = load_upload_session(&pool, "gono", "shared-upload")
+            .await
+            .expect("load gono upload session")
+            .expect("gono upload session exists");
+        let alice = load_upload_session(&pool, "alice", "shared-upload")
+            .await
+            .expect("load alice upload session")
+            .expect("alice upload session exists");
+        assert_eq!(gono.target_path, "gono.txt");
+        assert_eq!(gono.total_size, 5);
+        assert_eq!(alice.target_path, "alice.txt");
+        assert_eq!(alice.total_size, 7);
+
+        delete_upload_session(&pool, "gono", "shared-upload")
+            .await
+            .expect("delete gono upload session");
+        assert!(load_upload_session(&pool, "gono", "shared-upload")
+            .await
+            .expect("load deleted gono upload session")
+            .is_none());
+        assert!(load_upload_session(&pool, "alice", "shared-upload")
+            .await
+            .expect("load retained alice upload session")
+            .is_some());
     }
 
     #[tokio::test]

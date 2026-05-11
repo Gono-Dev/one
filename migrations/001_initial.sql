@@ -72,13 +72,14 @@ CREATE TABLE IF NOT EXISTS shares (
 );
 
 CREATE TABLE IF NOT EXISTS upload_sessions (
-    upload_id   TEXT    PRIMARY KEY,
+    upload_id   TEXT    NOT NULL,
     owner       TEXT    NOT NULL,
     target_path TEXT    NOT NULL,
     total_size  INTEGER NOT NULL,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
+    expires_at  INTEGER NOT NULL,
+    PRIMARY KEY(owner, upload_id)
 );
 
 CREATE TABLE IF NOT EXISTS dead_props (
