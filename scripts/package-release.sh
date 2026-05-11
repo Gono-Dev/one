@@ -6,7 +6,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${GONO_CLOUD_RELEASE_DIR:-${ROOT}/dist}"
 SKIP_BUILD="${GONO_CLOUD_SKIP_BUILD:-0}"
 CARGO_TARGET="${GONO_CLOUD_CARGO_TARGET:-}"
-PACKAGE_VERSION="${GONO_CLOUD_PACKAGE_VERSION:-}"
 RELEASE_TARGET="${GONO_CLOUD_RELEASE_TARGET:-}"
 BIN_PATH="${GONO_CLOUD_BIN:-}"
 
@@ -21,10 +20,6 @@ die() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
-}
-
-crate_version() {
-  sed -n 's/^version = "\(.*\)"/\1/p' "${ROOT}/Cargo.toml" | head -n 1
 }
 
 target_os() {
@@ -112,9 +107,8 @@ write_sha256() {
 
 package_binary() {
   local binary="$1"
-  local version="$2"
-  local release_target="$3"
-  local work_dir stage latest_name versioned_name latest_path versioned_path
+  local release_target="$2"
+  local work_dir stage latest_name latest_path
 
   [[ -x "${binary}" ]] || die "binary is not executable: ${binary}"
 
@@ -126,37 +120,26 @@ package_binary() {
   cp "${ROOT}/config.example.toml" "${stage}/config.example.toml"
 
   latest_name="${APP_NAME}-${release_target}.tar.gz"
-  versioned_name="${APP_NAME}-${version}-${release_target}.tar.gz"
   latest_path="${OUT_DIR}/${latest_name}"
-  versioned_path="${OUT_DIR}/${versioned_name}"
 
   tar -czf "${latest_path}" -C "${work_dir}" "$(basename "${stage}")"
-  cp "${latest_path}" "${versioned_path}"
   write_sha256 "${latest_path}"
-  write_sha256 "${versioned_path}"
 
   rm -rf "${work_dir}"
 
   log "wrote ${latest_path}"
-  log "wrote ${versioned_path}"
 }
 
 main() {
   require_cmd cargo
-  require_cmd sed
   require_cmd tar
-
-  if [[ -z "${PACKAGE_VERSION}" ]]; then
-    PACKAGE_VERSION="$(crate_version)"
-  fi
-  [[ -n "${PACKAGE_VERSION}" ]] || die "could not determine package version"
 
   if [[ -z "${RELEASE_TARGET}" ]]; then
     RELEASE_TARGET="$(default_release_target)"
   fi
 
   build_binary
-  package_binary "$(resolve_binary)" "${PACKAGE_VERSION}" "${RELEASE_TARGET}"
+  package_binary "$(resolve_binary)" "${RELEASE_TARGET}"
 }
 
 main "$@"

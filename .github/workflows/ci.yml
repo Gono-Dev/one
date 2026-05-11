@@ -112,6 +112,13 @@ jobs:
 
           if gh release view "${tag}" >/dev/null 2>&1; then
             gh release edit "${tag}" --title "Gono Cloud ${tag}" --notes-file "${notes_file}"
+            while IFS= read -r asset_name; do
+              case "${asset_name}" in
+                gono-cloud-[0-9]*-*.tar.gz|gono-cloud-[0-9]*-*.tar.gz.sha256)
+                  gh release delete-asset "${tag}" "${asset_name}" --yes
+                  ;;
+              esac
+            done < <(gh release view "${tag}" --json assets --jq '.assets[].name')
             gh release upload "${tag}" "${assets[@]}" --clobber
           else
             gh release create "${tag}" "${assets[@]}" \

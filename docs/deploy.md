@@ -97,14 +97,12 @@ Build a release archive for the current host with:
 scripts/package-release.sh
 ```
 
-The script writes both latest-style and versioned names to `dist/`, plus `.sha256` sidecars. For
-example:
+The script writes the installer-facing latest-style archive to `dist/`, plus a `.sha256` sidecar.
+For example:
 
 ```text
 dist/gono-cloud-linux-x86_64.tar.gz
-dist/gono-cloud-0.1.1-linux-x86_64.tar.gz
 dist/gono-cloud-linux-x86_64.tar.gz.sha256
-dist/gono-cloud-0.1.1-linux-x86_64.tar.gz.sha256
 ```
 
 Cross-builds can pass Cargo and release target names explicitly:
@@ -116,10 +114,11 @@ scripts/package-release.sh
 ```
 
 On `v*` tag builds, GitHub Actions packages native Linux/macOS artifacts for `x86_64` and
-`aarch64`, then creates or updates the matching GitHub Release with the `.tar.gz` files and
-`.sha256` sidecars. Manual GitHub Actions runs package the same artifacts and can also run the
-separate litmus compatibility job without creating a GitHub Release. Ordinary pushes and pull
-requests do not run the Rust check/smoke job in CI.
+`aarch64`, then creates or updates the matching GitHub Release with latest-style `.tar.gz` files and
+`.sha256` sidecars. Re-running a release job also removes old versioned asset names from the same
+tag. Manual GitHub Actions runs package the same artifacts and can also run the separate litmus
+compatibility job without creating a GitHub Release. Ordinary pushes and pull requests do not run
+the Rust check/smoke job in CI.
 
 The installer uses latest GitHub Release URLs:
 
