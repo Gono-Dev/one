@@ -12,6 +12,7 @@ pub mod router;
 pub mod settings;
 pub mod state;
 pub mod storage;
+pub mod webdav_clients;
 
 pub use config::Config;
 pub use router::build_router;

@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     convert::Infallible,
     io::Cursor,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
     task::{Context, Poll},
@@ -9,6 +10,7 @@ use std::{
 
 use axum::{
     body::{to_bytes, Body},
+    extract::connect_info::ConnectInfo,
     http::{
         header::{HeaderName, CONTENT_LENGTH},
         HeaderMap, HeaderValue, Method, Request, Response, StatusCode,
@@ -91,6 +93,13 @@ impl NcDavService {
         if let Err(response) = ensure_request_owner_path_matches(original_uri.path(), &owner) {
             return response;
         }
+        self.state.webdav_clients.observe_request(
+            &owner,
+            peer_addr_from_request(&request),
+            request.method(),
+            request.headers(),
+            default_protocol(&self.state.base_url),
+        );
         let files_root = match self.state.ensure_files_root_for_owner(&owner).await {
             Ok(files_root) => files_root,
             Err(err) => {
@@ -710,6 +719,17 @@ impl NcDavService {
         self.state.compact_change_log_for_owner(owner).await;
         Ok(sync_token)
     }
+}
+
+fn peer_addr_from_request(request: &Request<Body>) -> Option<SocketAddr> {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| *addr)
+}
+
+fn default_protocol(base_url: &str) -> Option<&str> {
+    base_url.split_once("://").map(|(scheme, _)| scheme)
 }
 
 impl Service<Request<Body>> for NcDavService {

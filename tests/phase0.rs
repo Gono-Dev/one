@@ -213,6 +213,7 @@ async fn capabilities_are_public() {
         assert!(body.contains("\"notify_push\""));
         assert!(body.contains("\"gono_cloud\""));
         assert!(body.contains("\"notify_push_client_info\":{\"version\":1}"));
+        assert!(body.contains("\"webdav_client_info\":{\"version\":1}"));
         assert!(body.contains("\"websocket\":\"wss://127.0.0.1:3000/push/ws\""));
         assert!(body.contains("\"pre_auth\":\"https://127.0.0.1:3000/apps/notify_push/pre_auth\""));
     }
@@ -662,7 +663,9 @@ async fn notify_push_can_be_disabled() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = std::str::from_utf8(&body).unwrap();
     assert!(!body.contains("\"notify_push\""));
-    assert!(!body.contains("\"gono_cloud\""));
+    assert!(body.contains("\"gono_cloud\""));
+    assert!(body.contains("\"webdav_client_info\":{\"version\":1}"));
+    assert!(!body.contains("\"notify_push_client_info\""));
 }
 
 #[tokio::test]
@@ -1810,6 +1813,50 @@ async fn propfind_depth_0_injects_nextcloud_props() {
 }
 
 #[tokio::test]
+async fn webdav_request_records_client_status() {
+    let (app, _temp, password, state) = app_with_state().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"PROPFIND").unwrap())
+                .uri("/remote.php/dav/")
+                .header("Depth", "0")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .header(header::USER_AGENT, "GonoCloudDesktop/0.1.0 (macOS 15.5)")
+                .header("x-forwarded-proto", "http")
+                .header("x-gono-device-name", "Test WebDAV Mac")
+                .header("x-gono-hostname", "test-webdav.local")
+                .header("x-gono-device-id", "00000000-0000-4000-8000-000000000002")
+                .body(Body::from(propfind_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let clients = state.webdav_clients.recent_clients();
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].user, BOOTSTRAP_USER);
+    assert_eq!(clients[0].last_method, "PROPFIND");
+    assert_eq!(clients[0].request_count, 1);
+    assert_eq!(clients[0].protocol.as_deref(), Some("http"));
+    assert_eq!(
+        clients[0].client_info.device_name.as_deref(),
+        Some("Test WebDAV Mac")
+    );
+    assert_eq!(
+        clients[0].client_info.hostname.as_deref(),
+        Some("test-webdav.local")
+    );
+    assert_eq!(
+        clients[0].client_info.client_name.as_deref(),
+        Some("Gono Cloud Desktop")
+    );
+    assert_eq!(clients[0].client_info.platform.as_deref(), Some("macos"));
+}
+
+#[tokio::test]
 async fn propfind_depth_1_lists_children() {
     let (app, _temp, password) = app_with_temp_root().await;
     let response = app
@@ -2150,6 +2197,22 @@ async fn admin_status_page_shows_runtime_state() {
         )
         .expect("client info"),
     );
+    let mut webdav_headers = axum::http::HeaderMap::new();
+    webdav_headers.insert(
+        header::USER_AGENT,
+        "Nextcloud-desktop/3.16.0".parse().unwrap(),
+    );
+    webdav_headers.insert("x-gono-device-name", "Status WebDAV Mac".parse().unwrap());
+    webdav_headers.insert("x-gono-hostname", "status-webdav.local".parse().unwrap());
+    webdav_headers.insert("x-gono-platform", "macos".parse().unwrap());
+    webdav_headers.insert("x-gono-os", "macOS 15.5".parse().unwrap());
+    state.webdav_clients.observe_request(
+        BOOTSTRAP_USER,
+        Some("127.0.0.1:49998".parse().expect("test peer addr")),
+        &Method::from_bytes(b"PROPFIND").unwrap(),
+        &webdav_headers,
+        Some("https"),
+    );
     assert_eq!(
         state
             .auth_rate_limiter
@@ -2183,6 +2246,11 @@ async fn admin_status_page_shows_runtime_state() {
     assert!(body.contains("System Status"));
     assert!(body.contains("Notify Push"));
     assert!(body.contains("Active connections"));
+    assert!(body.contains("WebDAV Clients"));
+    assert!(body.contains("Status WebDAV Mac"));
+    assert!(body.contains("status-webdav.local"));
+    assert!(body.contains("Nextcloud Desktop 3.16.0"));
+    assert!(body.contains("last PROPFIND"));
     assert!(body.contains("Notify Push Clients"));
     assert!(body.contains("Test Mac"));
     assert!(body.contains("test-mac.local"));

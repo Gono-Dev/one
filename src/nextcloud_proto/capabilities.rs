@@ -39,6 +39,12 @@ pub async fn handler(State(state): State<Arc<AppState>>) -> Json<Value> {
         }
     });
 
+    response["ocs"]["data"]["capabilities"]["gono_cloud"] = json!({
+        "webdav_client_info": {
+            "version": 1
+        }
+    });
+
     if let Some(runtime) = &state.notify_push {
         response["ocs"]["data"]["capabilities"]["notify_push"] = json!({
             "type": runtime.config().advertised_types.clone(),
@@ -47,10 +53,8 @@ pub async fn handler(State(state): State<Arc<AppState>>) -> Json<Value> {
                 "pre_auth": routes::pre_auth_endpoint(&state.base_url),
             }
         });
-        response["ocs"]["data"]["capabilities"]["gono_cloud"] = json!({
-            "notify_push_client_info": {
-                "version": 1
-            }
+        response["ocs"]["data"]["capabilities"]["gono_cloud"]["notify_push_client_info"] = json!({
+            "version": 1
         });
     }
 

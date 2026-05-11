@@ -25,6 +25,7 @@ pub struct OneTimePassword {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusPageData {
     pub sections: Vec<StatusSection>,
+    pub webdav_clients: Vec<StatusRow>,
     pub notify_connections: Vec<StatusRow>,
 }
 
@@ -393,7 +394,18 @@ pub fn render_status_page(
 ) -> String {
     let security_notice_html = render_http_security_notice(&config.server.base_url);
     let sections = render_status_sections(&status.sections);
-    let notify_connections = render_status_connection_section(&status.notify_connections);
+    let webdav_clients = render_status_client_section(
+        "status-webdav-clients",
+        "WebDAV Clients",
+        "No recent WebDAV clients.",
+        &status.webdav_clients,
+    );
+    let notify_connections = render_status_client_section(
+        "status-notify-clients",
+        "Notify Push Clients",
+        "No active notify_push clients.",
+        &status.notify_connections,
+    );
 
     format!(
         r#"<!doctype html>
@@ -428,6 +440,7 @@ pub fn render_status_page(
         </div>
         {security_notice_html}
         {sections}
+        {webdav_clients}
         {notify_connections}
       </main>
     </div>
@@ -436,6 +449,7 @@ pub fn render_status_page(
         principal = escape_html(principal_username),
         security_notice_html = security_notice_html,
         sections = sections,
+        webdav_clients = webdav_clients,
         notify_connections = notify_connections,
     )
 }
@@ -457,9 +471,14 @@ fn render_status_sections(sections: &[StatusSection]) -> String {
         .collect::<String>()
 }
 
-fn render_status_connection_section(rows: &[StatusRow]) -> String {
+fn render_status_client_section(
+    id: &str,
+    title: &str,
+    empty_text: &str,
+    rows: &[StatusRow],
+) -> String {
     let body = if rows.is_empty() {
-        r#"<p class="status-empty">No active notify_push clients.</p>"#.to_owned()
+        format!(r#"<p class="status-empty">{}</p>"#, escape_html(empty_text))
     } else {
         format!(
             r#"<div class="status-table">{}</div>"#,
@@ -467,10 +486,12 @@ fn render_status_connection_section(rows: &[StatusRow]) -> String {
         )
     };
     format!(
-        r#"<section class="card" aria-labelledby="status-notify-clients">
-  <div class="card-header"><h2 id="status-notify-clients">Notify Push Clients</h2></div>
+        r#"<section class="card" aria-labelledby="{id}">
+  <div class="card-header"><h2 id="{id}">{title}</h2></div>
   {body}
 </section>"#,
+        id = escape_attr(id),
+        title = escape_html(title),
         body = body,
     )
 }

@@ -623,6 +623,12 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
         ))
     })?;
     let auth_rate_limit = state.auth_rate_limiter.stats();
+    let webdav_clients = state
+        .webdav_clients
+        .recent_clients()
+        .into_iter()
+        .map(webdav_client_row)
+        .collect::<Vec<_>>();
 
     let (notify_rows, notify_connections) = if let Some(runtime) = &state.notify_push {
         let metrics = runtime.metrics();
@@ -717,6 +723,7 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                 rows: notify_rows,
             },
         ],
+        webdav_clients,
         notify_connections,
     })
 }
@@ -789,6 +796,63 @@ fn notify_connection_row(
     details.push(format!(
         "connected {} ago",
         format_duration(connection.connected_secs)
+    ));
+
+    status_row(label, details.join(" · "))
+}
+
+fn webdav_client_row(client: crate::webdav_clients::WebDavClientSnapshot) -> html::StatusRow {
+    let info = &client.client_info;
+    let label = info
+        .device_name
+        .as_ref()
+        .or(info.hostname.as_ref())
+        .or(info.client_name.as_ref())
+        .unwrap_or(&client.peer_addr)
+        .to_owned();
+    let mut details = vec![client.user, client.peer_addr.clone()];
+
+    if let Some(hostname) = &info.hostname {
+        if hostname != &label {
+            details.push(hostname.clone());
+        }
+    }
+
+    let client_name = match (&info.client_name, &info.client_version) {
+        (Some(name), Some(version)) => Some(format!("{name} {version}")),
+        (Some(name), None) => Some(name.clone()),
+        (None, Some(version)) => Some(format!("version {version}")),
+        (None, None) => None,
+    };
+    if let Some(client_name) = client_name {
+        if client_name != label {
+            details.push(client_name);
+        }
+    }
+
+    let platform = match (&info.platform, &info.os) {
+        (Some(platform), Some(os)) if platform != os => Some(format!("{platform} / {os}")),
+        (Some(platform), _) => Some(platform.clone()),
+        (_, Some(os)) => Some(os.clone()),
+        (None, None) => None,
+    };
+    if let Some(platform) = platform {
+        details.push(platform);
+    }
+
+    if let Some(protocol) = &client.protocol {
+        details.push(protocol.clone());
+    }
+
+    details.push(format!("last {}", client.last_method));
+    details.push(format!("{} request(s)", client.request_count));
+    details.push(format!(
+        "last seen {} ago",
+        format_duration(client.last_seen_secs)
+    ));
+    details.push(format!(
+        "first seen {} ago",
+        format_duration(client.first_seen_secs)
     ));
 
     status_row(label, details.join(" · "))

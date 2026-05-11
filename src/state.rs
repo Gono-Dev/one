@@ -13,6 +13,7 @@ use crate::{
     notify_push::NotifyRuntime,
     settings,
     storage::{self, StorageLayout},
+    webdav_clients::WebDavClientRegistry,
 };
 
 #[derive(Debug)]
@@ -33,6 +34,7 @@ pub struct AppState {
     pub sync_config: SyncConfig,
     pub notify_push_config: NotifyPushConfig,
     pub notify_push: Option<Arc<NotifyRuntime>>,
+    pub webdav_clients: WebDavClientRegistry,
     pub config: Config,
 }
 
@@ -87,6 +89,7 @@ impl AppState {
                 sync_config,
                 notify_push_config: config.notify_push,
                 notify_push,
+                webdav_clients: WebDavClientRegistry::default(),
                 config: state_config,
             }),
             bootstrap,
