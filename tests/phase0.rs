@@ -1139,6 +1139,12 @@ async fn notify_push_websocket_receives_file_id_then_sync_collection_lists_chang
         .send(Message::Text("listen notify_file_id".into()))
         .await
         .expect("send listen mode");
+    websocket
+        .send(Message::Text(
+            r#"gono_client_info {"v":1,"device_name":"Test Mac","client_name":"Gono Cloud Desktop","client_version":"0.1.0","platform":"macos","device_id":"00000000-0000-4000-8000-000000000001"}"#.into(),
+        ))
+        .await
+        .expect("send client info");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let put = app
@@ -1181,6 +1187,39 @@ async fn notify_push_websocket_receives_file_id_then_sync_collection_lists_chang
     assert!(body.contains("/remote.php/dav/ws-push.txt"));
     assert!(body.contains("<d:sync-token>1</d:sync-token>"));
 
+    let _ = websocket.close(None).await;
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn notify_push_official_client_gets_plain_file_notification() {
+    let (app, _temp, password, _state) = app_with_state().await;
+    let (base_url, server) = spawn_app_server(app.clone()).await;
+
+    let mut websocket = login_ws(&base_url, BOOTSTRAP_USER, &password).await;
+    assert_eq!(next_ws_text(&mut websocket).await, "authenticated");
+    websocket
+        .send(Message::Text("listen notify_file_id".into()))
+        .await
+        .expect("send listen mode");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let put = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/ws-plain-push.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::from("push me"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+    assert_eq!(next_ws_text(&mut websocket).await, "notify_file");
+
+    let _ = websocket.close(None).await;
     server.abort();
     let _ = server.await;
 }

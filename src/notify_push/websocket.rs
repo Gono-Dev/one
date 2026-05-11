@@ -70,6 +70,7 @@ pub async fn handle_socket(
         .max_connection_time()
         .map(|duration| Box::pin(time::sleep(duration)));
     let mut listen_file_id = false;
+    let mut gono_client_info_received = false;
     let mut pending: Option<PushMessage> = None;
 
     loop {
@@ -88,7 +89,8 @@ pub async fn handle_socket(
                 }
             }
             _ = flush.tick() => {
-                if !send_pending(&runtime, &mut sender, &mut pending, listen_file_id, &user, peer_addr).await {
+                let send_file_ids = listen_file_id && gono_client_info_received;
+                if !send_pending(&runtime, &mut sender, &mut pending, send_file_ids, &user, peer_addr).await {
                     break;
                 }
             }
@@ -115,6 +117,7 @@ pub async fn handle_socket(
                             Message::Text(text) => {
                                 if let Some(client_info) = parse_client_info_message(text.as_str()) {
                                     runtime.update_connection_client_info(connection_id, client_info);
+                                    gono_client_info_received = true;
                                 }
                             }
                             Message::Close(_) => break,
@@ -135,7 +138,7 @@ pub async fn handle_socket(
         &runtime,
         &mut sender,
         &mut pending,
-        listen_file_id,
+        listen_file_id && gono_client_info_received,
         &user,
         peer_addr,
     )
@@ -250,7 +253,7 @@ async fn send_pending(
     runtime: &NotifyRuntime,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     pending: &mut Option<PushMessage>,
-    listen_file_id: bool,
+    send_file_ids: bool,
     user: &str,
     peer_addr: SocketAddr,
 ) -> bool {
@@ -258,14 +261,14 @@ async fn send_pending(
         return true;
     };
     let ty = message.message_type();
-    let text = message.to_wire_text(listen_file_id);
+    let text = message.to_wire_text(send_file_ids);
     if sender.send(Message::text(text)).await.is_ok() {
         runtime.message_sent(ty);
         info!(
             %peer_addr,
             user,
-            listen_file_id,
-            message = %message.to_wire_text(listen_file_id),
+            send_file_ids,
+            message = %message.to_wire_text(send_file_ids),
             "notify_push websocket message sent"
         );
         true
@@ -273,7 +276,7 @@ async fn send_pending(
         warn!(
             %peer_addr,
             user,
-            listen_file_id,
+            send_file_ids,
             "failed to send notify_push websocket message"
         );
         false

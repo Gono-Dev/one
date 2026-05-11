@@ -788,8 +788,10 @@ fn notify_connection_row(
         details.push(platform);
     }
 
-    details.push(if connection.listen_file_id {
+    details.push(if connection.listen_file_id && !info.is_empty() {
         "listen_file_id".to_owned()
+    } else if connection.listen_file_id {
+        "listen_file_id -> notify_file".to_owned()
     } else {
         "notify_file".to_owned()
     });
