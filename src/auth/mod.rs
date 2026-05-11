@@ -7,10 +7,11 @@ use argon2::{
 };
 use axum::{
     body::Body,
+    extract::connect_info::ConnectInfo,
     extract::{Request, State},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
-        HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, StatusCode,
     },
     middleware::Next,
     response::{IntoResponse, Response},
@@ -18,6 +19,9 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use sqlx::{Row, SqlitePool};
 use tracing::error;
+
+mod rate_limit;
+pub use rate_limit::{AuthRateLimitStats, AuthRateLimiter};
 
 use crate::{
     db::unix_timestamp,
@@ -144,16 +148,24 @@ pub async fn require_basic_auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    let client_ip = client_ip(&request);
     let Some((username, password)) = parse_basic_auth(request.headers().get(AUTHORIZATION)) else {
         return unauthorized(&state.auth_realm);
     };
 
     match state.user_store.verify(&username, &password).await {
         Ok(Some(principal)) => {
+            state.auth_rate_limiter.clear(&client_ip, &username);
             request.extensions_mut().insert(principal);
             next.run(request).await
         }
-        Ok(None) => unauthorized(&state.auth_realm),
+        Ok(None) => {
+            let delay = state
+                .auth_rate_limiter
+                .register_failure(&client_ip, &username);
+            tokio::time::sleep(delay).await;
+            unauthorized(&state.auth_realm)
+        }
         Err(err) => {
             error!(?err, "Basic Auth verification failed");
             (
@@ -163,6 +175,34 @@ pub async fn require_basic_auth(
                 .into_response()
         }
     }
+}
+
+fn client_ip(request: &Request<Body>) -> String {
+    if let Some(ConnectInfo(addr)) = request
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+    {
+        return addr.ip().to_string();
+    }
+    client_ip_from_headers(request.headers()).unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
 }
 
 pub(crate) fn parse_basic_auth(header: Option<&HeaderValue>) -> Option<(String, String)> {

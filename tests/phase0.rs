@@ -2089,6 +2089,20 @@ async fn admin_status_page_shows_runtime_state() {
         .expect("notify runtime")
         .subscribe(BOOTSTRAP_USER)
         .expect("subscribe notify client");
+    assert_eq!(
+        state
+            .auth_rate_limiter
+            .register_failure("203.0.113.7", BOOTSTRAP_USER)
+            .as_secs(),
+        5
+    );
+    assert_eq!(
+        state
+            .auth_rate_limiter
+            .register_failure("203.0.113.7", BOOTSTRAP_USER)
+            .as_secs(),
+        10
+    );
 
     let response = app
         .oneshot(
@@ -2113,6 +2127,13 @@ async fn admin_status_page_shows_runtime_state() {
     assert!(body.contains(BOOTSTRAP_USER));
     assert!(body.contains("Database"));
     assert!(body.contains("Storage"));
+    assert!(body.contains("Auth Rate Limit"));
+    assert!(body.contains("Active throttled keys"));
+    assert!(body.contains("Total failed attempts"));
+    assert!(body.contains("Max response delay"));
+    assert!(body.contains(">1</strong>"));
+    assert!(body.contains(">2</strong>"));
+    assert!(body.contains(">10s</strong>"));
 }
 
 #[tokio::test]

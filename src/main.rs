@@ -114,7 +114,7 @@ async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
         let shutdown_task = spawn_axum_server_shutdown(handle.clone());
         let result = axum_server::bind_rustls(addr, tls)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .context("serve HTTPS");
         shutdown_task.abort();
@@ -122,10 +122,13 @@ async fn run_server(config_path: &str, config: Config) -> anyhow::Result<()> {
     } else {
         tracing::info!("gono-cloud listening on http://{addr}");
         match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal())
-                .await
-                .context("serve HTTP"),
+            Ok(listener) => axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .context("serve HTTP"),
             Err(err) => Err(err).context("bind HTTP listener"),
         }
     };

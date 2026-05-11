@@ -698,6 +698,7 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
         db::change_log_floor_token(&state.db, &state.owner, sync_token).await?;
     let storage_available = fs2::available_space(&state.data_root)?;
     let storage_total = fs2::total_space(&state.data_root)?;
+    let auth_rate_limit = state.auth_rate_limiter.stats();
 
     let (notify_rows, notify_connections) = if let Some(runtime) = &state.notify_push {
         let metrics = runtime.metrics();
@@ -786,6 +787,17 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                     status_row("Change log entries", change_log_entries),
                     status_row("Upload sessions", upload_sessions),
                     status_row("Expired upload sessions", expired_upload_sessions),
+                ],
+            },
+            html::StatusSection {
+                title: "Auth Rate Limit".to_owned(),
+                rows: vec![
+                    status_row("Active throttled keys", auth_rate_limit.active_keys),
+                    status_row("Total failed attempts", auth_rate_limit.total_failures),
+                    status_row(
+                        "Max response delay",
+                        format!("{}s", auth_rate_limit.max_delay_secs),
+                    ),
                 ],
             },
             html::StatusSection {

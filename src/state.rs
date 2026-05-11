@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 use tracing::{info, warn};
 
 use crate::{
-    auth::SqliteUserStore,
+    auth::{AuthRateLimiter, SqliteUserStore},
     config::{AdminConfig, Config, NotifyPushConfig, SyncConfig},
     db::{self, BootstrapOutcome, BOOTSTRAP_USER},
     notify_push::NotifyRuntime,
@@ -22,6 +22,7 @@ pub struct AppState {
     pub uploads_root: PathBuf,
     pub db: SqlitePool,
     pub user_store: Arc<SqliteUserStore>,
+    pub auth_rate_limiter: AuthRateLimiter,
     pub auth_realm: String,
     pub admin_config: AdminConfig,
     pub admin_csrf_token: String,
@@ -75,6 +76,7 @@ impl AppState {
                 uploads_root: storage.uploads_root,
                 db,
                 user_store,
+                auth_rate_limiter: AuthRateLimiter::new(),
                 auth_realm: config.auth.realm,
                 admin_config: config.admin,
                 admin_csrf_token: generate_csrf_token(),
