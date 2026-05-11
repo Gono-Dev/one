@@ -39,10 +39,10 @@ so add or edit `[admin]` manually when enabling admin on an existing installatio
 `/admin` through a reverse proxy, consider adding an IP allowlist or another network-level access
 control in front of it.
 
-The `/admin/settings` page can edit the restart-applied runtime settings stored in SQLite,
-including `server.base_url`, `auth.realm`, sync retention, notify push options, and admin access.
-Startup-only paths such as bind address, TLS files, storage directory, and database path remain
-read-only and continue to come from `config.toml`.
+Runtime configuration is read from `config.toml` at startup. The `/admin/settings` page is a
+read-only view of the effective config; it does not save changes. To change `server.base_url`,
+`auth.realm`, sync retention, notify push options, or admin access, edit `config.toml` and restart
+the service.
 
 Default Linux layout:
 

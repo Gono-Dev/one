@@ -20,7 +20,6 @@ use crate::{
     dav_handler::upload_space,
     db::{self, AppPasswordScopeInput, BOOTSTRAP_USER},
     permissions::PermissionLevel,
-    settings::{self, SettingsUpdate},
     state::AppState,
 };
 
@@ -28,7 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/users", get(users_page).post(create_user))
         .route("/status", get(status_page))
-        .route("/settings", get(settings_page).post(save_settings))
+        .route("/settings", get(settings_page))
         .route("/app-passwords", post(create_app_password))
         .route("/users/{username}/display-name", post(update_display_name))
         .route("/users/{username}/enable", post(enable_user))
@@ -107,27 +106,6 @@ struct CsrfForm {
     csrf: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct SettingsForm {
-    #[serde(rename = "_csrf")]
-    csrf: String,
-    server_base_url: String,
-    auth_realm: String,
-    sync_change_log_retention_days: String,
-    sync_change_log_min_entries: String,
-    notify_push_enabled: String,
-    notify_push_path: String,
-    notify_push_advertised_types: String,
-    notify_push_pre_auth_ttl_secs: String,
-    notify_push_user_connection_limit: String,
-    notify_push_max_debounce_secs: String,
-    notify_push_ping_interval_secs: String,
-    notify_push_auth_timeout_secs: String,
-    notify_push_max_connection_secs: String,
-    admin_enabled: String,
-    admin_users: String,
-}
-
 async fn users_page(
     State(state): State<Arc<AppState>>,
     Extension(principal): Extension<Principal>,
@@ -139,7 +117,7 @@ async fn settings_page(
     State(state): State<Arc<AppState>>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    render_settings(&state, &principal, None, false).await
+    render_settings(&state, &principal).await
 }
 
 async fn status_page(
@@ -158,43 +136,6 @@ async fn status_page(
             format!("Failed to load status: {err:#}"),
         )
             .into_response(),
-    }
-}
-
-async fn save_settings(
-    State(state): State<Arc<AppState>>,
-    Extension(principal): Extension<Principal>,
-    Form(form): Form<SettingsForm>,
-) -> Response {
-    if let Err(response) = validate_csrf(&state, &form.csrf) {
-        return response;
-    }
-
-    let update = match settings_update_from_form(form) {
-        Ok(update) => update,
-        Err(err) => return render_settings_error(&state, &principal, err).await,
-    };
-
-    match settings::save_settings_update(&state.db, &update, &principal.username).await {
-        Ok(()) => {
-            info!(admin = %principal.username, "admin updated settings");
-            let config = settings::apply_saved_settings(&state.db, state.config.clone())
-                .await
-                .unwrap_or_else(|_| state.config.clone());
-            Html(html::render_settings_page(
-                &principal.username,
-                &state.admin_csrf_token,
-                &config,
-                Some(&Notice {
-                    kind: NoticeKind::Success,
-                    text: "Settings saved. Restart gono-cloud for changes to take effect."
-                        .to_owned(),
-                }),
-                true,
-            ))
-            .into_response()
-        }
-        Err(err) => render_settings_error(&state, &principal, err).await,
     }
 }
 
@@ -644,36 +585,10 @@ async fn render_users(
     }
 }
 
-async fn render_settings(
-    state: &Arc<AppState>,
-    principal: &Principal,
-    notice: Option<Notice>,
-    pending_restart: bool,
-) -> Response {
+async fn render_settings(state: &Arc<AppState>, principal: &Principal) -> Response {
     Html(html::render_settings_page(
         &principal.username,
-        &state.admin_csrf_token,
         &state.config,
-        notice.as_ref(),
-        pending_restart,
-    ))
-    .into_response()
-}
-
-async fn render_settings_error(
-    state: &Arc<AppState>,
-    principal: &Principal,
-    err: anyhow::Error,
-) -> Response {
-    Html(html::render_settings_page(
-        &principal.username,
-        &state.admin_csrf_token,
-        &state.config,
-        Some(&Notice {
-            kind: NoticeKind::Error,
-            text: format!("{err:#}"),
-        }),
-        false,
     ))
     .into_response()
 }
@@ -904,81 +819,6 @@ async fn guard_last_admin(state: &Arc<AppState>, username: &str) -> Result<(), R
         )
             .into_response()),
     }
-}
-
-fn settings_update_from_form(form: SettingsForm) -> anyhow::Result<SettingsUpdate> {
-    Ok(SettingsUpdate {
-        server_base_url: form.server_base_url.trim().to_owned(),
-        auth_realm: form.auth_realm.trim().to_owned(),
-        sync_change_log_retention_days: parse_u64(
-            "sync.change_log_retention_days",
-            &form.sync_change_log_retention_days,
-        )?,
-        sync_change_log_min_entries: parse_usize(
-            "sync.change_log_min_entries",
-            &form.sync_change_log_min_entries,
-        )?,
-        notify_push_enabled: parse_bool("notify_push.enabled", &form.notify_push_enabled)?,
-        notify_push_path: form.notify_push_path.trim().to_owned(),
-        notify_push_advertised_types: parse_list(&form.notify_push_advertised_types),
-        notify_push_pre_auth_ttl_secs: parse_u64(
-            "notify_push.pre_auth_ttl_secs",
-            &form.notify_push_pre_auth_ttl_secs,
-        )?,
-        notify_push_user_connection_limit: parse_usize(
-            "notify_push.user_connection_limit",
-            &form.notify_push_user_connection_limit,
-        )?,
-        notify_push_max_debounce_secs: parse_u64(
-            "notify_push.max_debounce_secs",
-            &form.notify_push_max_debounce_secs,
-        )?,
-        notify_push_ping_interval_secs: parse_u64(
-            "notify_push.ping_interval_secs",
-            &form.notify_push_ping_interval_secs,
-        )?,
-        notify_push_auth_timeout_secs: parse_u64(
-            "notify_push.auth_timeout_secs",
-            &form.notify_push_auth_timeout_secs,
-        )?,
-        notify_push_max_connection_secs: parse_u64(
-            "notify_push.max_connection_secs",
-            &form.notify_push_max_connection_secs,
-        )?,
-        admin_enabled: parse_bool("admin.enabled", &form.admin_enabled)?,
-        admin_users: parse_list(&form.admin_users),
-    })
-}
-
-fn parse_bool(key: &str, value: &str) -> anyhow::Result<bool> {
-    match value.trim() {
-        "true" | "1" | "yes" => Ok(true),
-        "false" | "0" | "no" => Ok(false),
-        _ => anyhow::bail!("{key} must be true or false"),
-    }
-}
-
-fn parse_u64(key: &str, value: &str) -> anyhow::Result<u64> {
-    value
-        .trim()
-        .parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("{key} must be a non-negative integer"))
-}
-
-fn parse_usize(key: &str, value: &str) -> anyhow::Result<usize> {
-    value
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| anyhow::anyhow!("{key} must be a non-negative integer"))
-}
-
-fn parse_list(value: &str) -> Vec<String> {
-    value
-        .split(|ch: char| ch == ',' || ch == '\n' || ch == '\r')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 fn parse_expiry(mode: Option<&str>, raw: Option<&str>) -> anyhow::Result<Option<i64>> {

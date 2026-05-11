@@ -208,72 +208,60 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
     )
 }
 
-pub fn render_settings_page(
-    principal_username: &str,
-    csrf_token: &str,
-    config: &Config,
-    notice: Option<&Notice>,
-    pending_restart: bool,
-) -> String {
-    let notice_html = notice.map(render_notice).unwrap_or_default();
+pub fn render_settings_page(principal_username: &str, config: &Config) -> String {
     let security_notice_html = render_http_security_notice(&config.server.base_url);
-    let pending_html = if pending_restart {
-        r#"<div class="notice notice-success" role="status">Restart required before saved settings affect the running service.</div>"#
-            .to_owned()
-    } else {
-        String::new()
-    };
     let advertised_types = config.notify_push.advertised_types.join("\n");
     let admin_users = config.admin.users.join("\n");
-    let server_base_url = editable_text("server_base_url", "Base URL", &config.server.base_url);
+    let server_base_url =
+        readonly_input_text("server_base_url", "Base URL", &config.server.base_url);
     let server_bind = readonly_text("Bind", &config.server.bind);
     let server_cert_file = readonly_text("TLS cert file", &config.server.cert_file);
     let server_key_file = readonly_text("TLS key file", &config.server.key_file);
-    let auth_realm = editable_text("auth_realm", "Realm", &config.auth.realm);
-    let sync_retention = editable_number(
+    let auth_realm = readonly_input_text("auth_realm", "Realm", &config.auth.realm);
+    let sync_retention = readonly_input_number(
         "sync_change_log_retention_days",
         "Change log retention days",
         config.sync.change_log_retention_days,
     );
-    let sync_min_entries = editable_number(
+    let sync_min_entries = readonly_input_number(
         "sync_change_log_min_entries",
         "Change log min entries",
         config.sync.change_log_min_entries,
     );
     let notify_enabled =
-        editable_bool("notify_push_enabled", "Enabled", config.notify_push.enabled);
-    let notify_path = editable_text("notify_push_path", "Path", &config.notify_push.path);
-    let notify_pre_auth = editable_number(
+        readonly_input_bool("notify_push_enabled", "Enabled", config.notify_push.enabled);
+    let notify_path = readonly_input_text("notify_push_path", "Path", &config.notify_push.path);
+    let notify_pre_auth = readonly_input_number(
         "notify_push_pre_auth_ttl_secs",
         "Pre-auth TTL seconds",
         config.notify_push.pre_auth_ttl_secs,
     );
-    let notify_limit = editable_number(
+    let notify_limit = readonly_input_number(
         "notify_push_user_connection_limit",
         "User connection limit",
         config.notify_push.user_connection_limit,
     );
-    let notify_debounce = editable_number(
+    let notify_debounce = readonly_input_number(
         "notify_push_max_debounce_secs",
         "Max debounce seconds",
         config.notify_push.max_debounce_secs,
     );
-    let notify_ping = editable_number(
+    let notify_ping = readonly_input_number(
         "notify_push_ping_interval_secs",
         "Ping interval seconds",
         config.notify_push.ping_interval_secs,
     );
-    let notify_auth_timeout = editable_number(
+    let notify_auth_timeout = readonly_input_number(
         "notify_push_auth_timeout_secs",
         "Auth timeout seconds",
         config.notify_push.auth_timeout_secs,
     );
-    let notify_max_connection = editable_number(
+    let notify_max_connection = readonly_input_number(
         "notify_push_max_connection_secs",
         "Max connection seconds",
         config.notify_push.max_connection_secs,
     );
-    let admin_enabled = editable_bool("admin_enabled", "Enabled", config.admin.enabled);
+    let admin_enabled = readonly_input_bool("admin_enabled", "Enabled", config.admin.enabled);
     let storage_data_dir = readonly_text("Data dir", &config.storage.data_dir);
     let storage_xattr_ns = readonly_text("Xattr namespace", &config.storage.xattr_ns);
     let storage_upload_min_free_bytes = readonly_text(
@@ -311,7 +299,7 @@ pub fn render_settings_page(
           <a class="nav-item" href="/admin/status">Status</a>
           <a class="nav-item" href="/admin/settings" aria-current="page">Settings</a>
         </nav>
-        <p class="sidebar-note">Saved settings are stored in SQLite. Startup-only paths remain read-only.</p>
+        <p class="sidebar-note">Runtime configuration is read from config.toml when the service starts.</p>
       </aside>
       <main class="admin-main">
         <div class="page-header">
@@ -319,10 +307,8 @@ pub fn render_settings_page(
           <span>Admin: {principal}</span>
         </div>
         {security_notice_html}
-        {notice_html}
-        {pending_html}
-        <form method="post" action="/admin/settings" class="settings-form">
-          <input type="hidden" name="_csrf" value="{csrf}">
+        <div class="notice notice-info" role="status">Edit config.toml and restart gono-cloud to change these values.</div>
+        <div class="settings-form">
           <section class="card" aria-labelledby="server-settings-title">
             <div class="card-header"><h2 id="server-settings-title">Server</h2></div>
             <div class="settings-grid">
@@ -358,7 +344,7 @@ pub fn render_settings_page(
               {notify_max_connection}
               <div class="field field-wide">
                 <label for="notify_push_advertised_types">Advertised types</label>
-                <textarea class="input textarea" id="notify_push_advertised_types" name="notify_push_advertised_types" rows="3">{advertised_types}</textarea>
+                <textarea class="input textarea" id="notify_push_advertised_types" name="notify_push_advertised_types" rows="3" readonly aria-readonly="true">{advertised_types}</textarea>
               </div>
             </div>
           </section>
@@ -368,7 +354,7 @@ pub fn render_settings_page(
               {admin_enabled}
               <div class="field field-wide">
                 <label for="admin_users">Admin users</label>
-                <textarea class="input textarea" id="admin_users" name="admin_users" rows="3">{admin_users}</textarea>
+                <textarea class="input textarea" id="admin_users" name="admin_users" rows="3" readonly aria-readonly="true">{admin_users}</textarea>
               </div>
             </div>
           </section>
@@ -388,16 +374,12 @@ pub fn render_settings_page(
               {db_max_connections}
             </div>
           </section>
-          <div class="settings-actions">
-            <button class="button button-primary" type="submit">Save Settings</button>
-          </div>
-        </form>
+        </div>
       </main>
     </div>
   </body>
 </html>"#,
         principal = escape_html(principal_username),
-        csrf = escape_attr(csrf_token),
         security_notice_html = security_notice_html,
         advertised_types = escape_html(&advertised_types),
         admin_users = escape_html(&admin_users),
@@ -531,12 +513,12 @@ fn render_http_security_notice(base_url: &str) -> String {
     )
 }
 
-fn editable_text(name: &str, label: &str, value: impl ToString) -> String {
+fn readonly_input_text(name: &str, label: &str, value: impl ToString) -> String {
     let name_attr = escape_attr(name);
     format!(
         r#"<div class="field">
   <label for="{name}">{label}</label>
-  <input class="input" id="{name}" name="{name}" value="{value}" required>
+  <input class="input" id="{name}" name="{name}" value="{value}" readonly aria-readonly="true">
 </div>"#,
         name = name_attr,
         label = escape_html(label),
@@ -544,12 +526,12 @@ fn editable_text(name: &str, label: &str, value: impl ToString) -> String {
     )
 }
 
-fn editable_number(name: &str, label: &str, value: impl ToString) -> String {
+fn readonly_input_number(name: &str, label: &str, value: impl ToString) -> String {
     let name_attr = escape_attr(name);
     format!(
         r#"<div class="field">
   <label for="{name}">{label}</label>
-  <input class="input" id="{name}" name="{name}" type="number" min="0" value="{value}" required>
+  <input class="input" id="{name}" name="{name}" type="number" min="0" value="{value}" readonly aria-readonly="true">
 </div>"#,
         name = name_attr,
         label = escape_html(label),
@@ -557,14 +539,14 @@ fn editable_number(name: &str, label: &str, value: impl ToString) -> String {
     )
 }
 
-fn editable_bool(name: &str, label: &str, value: bool) -> String {
+fn readonly_input_bool(name: &str, label: &str, value: bool) -> String {
     let true_selected = if value { " selected" } else { "" };
     let false_selected = if value { "" } else { " selected" };
     let name_attr = escape_attr(name);
     format!(
         r#"<div class="field">
   <label for="{name}">{label}</label>
-  <select class="input" id="{name}" name="{name}">
+  <select class="input" id="{name}" name="{name}" disabled aria-disabled="true">
     <option value="true"{true_selected}>Enabled</option>
     <option value="false"{false_selected}>Disabled</option>
   </select>
@@ -1051,6 +1033,7 @@ label { color: var(--muted-strong); font-size: 12px; font-weight: 800; }
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 .notice-success { color: #14532d; background: #f0fdf4; border-color: #bbf7d0; }
+.notice-info { color: #164e63; background: #ecfeff; border-color: #a5f3fc; }
 .notice-warning { color: #854d0e; background: #fffbeb; border-color: #fde68a; }
 .notice-error { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
 .user-list { display: grid; }

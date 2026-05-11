@@ -2246,7 +2246,7 @@ async fn admin_create_user_requires_csrf_and_shows_one_time_password() {
 }
 
 #[tokio::test]
-async fn admin_settings_page_saves_editable_settings_with_restart_notice() {
+async fn admin_settings_page_is_read_only_config_view() {
     let (app, _temp, password, state) = app_with_config(|config| {
         config.admin.enabled = true;
         config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
@@ -2270,9 +2270,14 @@ async fn admin_settings_page_saves_editable_settings_with_restart_notice() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("Settings"));
     assert!(body.contains("server_base_url"));
+    assert!(body.contains("readonly aria-readonly=\"true\""));
+    assert!(body.contains("disabled aria-disabled=\"true\""));
+    assert!(body.contains("Edit config.toml and restart gono-cloud"));
+    assert!(!body.contains("Save Settings"));
+    assert!(!body.contains("method=\"post\" action=\"/admin/settings\""));
     assert!(body.contains("readonly-field"));
 
-    let invalid_csrf = app
+    let post = app
         .clone()
         .oneshot(
             Request::builder()
@@ -2280,133 +2285,23 @@ async fn admin_settings_page_saves_editable_settings_with_restart_notice() {
                 .uri("/admin/settings")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(settings_form_body(
-                    "wrong",
-                    "https://changed.example",
-                    "/push",
-                    BOOTSTRAP_USER,
-                )))
+                .body(Body::from(
+                    "_csrf=wrong&server_base_url=https://changed.example",
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(invalid_csrf.status(), StatusCode::FORBIDDEN);
-
-    let saved = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/admin/settings")
-                .header(header::AUTHORIZATION, auth_header(&password))
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(settings_form_body(
-                    &state.admin_csrf_token,
-                    "https://changed.example",
-                    "/push",
-                    BOOTSTRAP_USER,
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(saved.status(), StatusCode::OK);
-    let body = to_bytes(saved.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8(body.to_vec()).unwrap();
-    assert!(body.contains("Settings saved"));
-    assert!(body.contains("Restart required"));
-    assert!(body.contains("https://changed.example"));
+    assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert_ne!(state.base_url, "https://changed.example");
 
-    let value: String =
-        sqlx::query_scalar("SELECT value_json FROM settings WHERE key = 'server.base_url'")
-            .fetch_one(&state.db)
-            .await
-            .expect("load saved setting");
-    assert_eq!(value, "\"https://changed.example\"");
-}
-
-#[tokio::test]
-async fn admin_settings_rejects_invalid_values() {
-    let (app, _temp, password, state) = app_with_config(|config| {
-        config.admin.enabled = true;
-        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
-    })
-    .await;
-
-    let invalid_url = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/admin/settings")
-                .header(header::AUTHORIZATION, auth_header(&password))
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(settings_form_body(
-                    &state.admin_csrf_token,
-                    "ftp://wrong.example",
-                    "/push",
-                    BOOTSTRAP_USER,
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(invalid_url.status(), StatusCode::OK);
-    let body = to_bytes(invalid_url.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8(body.to_vec()).unwrap();
-    assert!(body.contains("server.base_url must start"));
-
-    let invalid_path = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/admin/settings")
-                .header(header::AUTHORIZATION, auth_header(&password))
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(settings_form_body(
-                    &state.admin_csrf_token,
-                    "https://changed.example",
-                    "push",
-                    BOOTSTRAP_USER,
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(invalid_path.status(), StatusCode::OK);
-    let body = to_bytes(invalid_path.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body = String::from_utf8(body.to_vec()).unwrap();
-    assert!(body.contains("notify_push.path must start"));
-}
-
-fn settings_form_body(csrf: &str, base_url: &str, notify_path: &str, admin_users: &str) -> String {
-    format!(
-        concat!(
-            "_csrf={csrf}",
-            "&server_base_url={base_url}",
-            "&auth_realm=Gono Cloud",
-            "&sync_change_log_retention_days=30",
-            "&sync_change_log_min_entries=10000",
-            "&notify_push_enabled=true",
-            "&notify_push_path={notify_path}",
-            "&notify_push_advertised_types=files,activities,notifications",
-            "&notify_push_pre_auth_ttl_secs=15",
-            "&notify_push_user_connection_limit=64",
-            "&notify_push_max_debounce_secs=15",
-            "&notify_push_ping_interval_secs=30",
-            "&notify_push_auth_timeout_secs=15",
-            "&notify_push_max_connection_secs=0",
-            "&admin_enabled=true",
-            "&admin_users={admin_users}",
-        ),
-        csrf = csrf,
-        base_url = base_url,
-        notify_path = notify_path,
-        admin_users = admin_users,
+    let legacy_value = sqlx::query_scalar::<_, String>(
+        "SELECT value_json FROM settings WHERE key = 'server.base_url'",
     )
+    .fetch_optional(&state.db)
+    .await
+    .expect("load legacy saved setting");
+    assert!(legacy_value.is_none());
 }
 
 fn expiration_input_values(body: &str) -> Vec<String> {
