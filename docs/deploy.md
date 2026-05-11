@@ -133,8 +133,8 @@ Create the GitHub Release from a clean `main` branch with:
 
 ```sh
 git push origin main
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
+git tag -a v0.1.2 -m "v0.1.2"
+git push origin v0.1.2
 ```
 
 Linux `armv7` and `armv6` remain installer-supported artifact names, but they require a separate
