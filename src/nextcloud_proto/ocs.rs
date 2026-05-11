@@ -170,26 +170,23 @@ fn v2_routes() -> Router<Arc<AppState>> {
         )
 }
 
-async fn list_users(State(state): State<Arc<AppState>>) -> Response {
-    let users = match db::list_local_users(&state.db).await {
-        Ok(users) => users
-            .into_iter()
-            .filter(|user| user.enabled)
-            .map(|user| user.username)
-            .collect::<Vec<_>>(),
-        Err(_) => return ocs_error(StatusCode::INTERNAL_SERVER_ERROR, 500, "List users failed"),
-    };
+async fn list_users(Extension(principal): Extension<Principal>) -> Response {
     ocs_ok(json!({
-        "users": users
+        "users": [principal.username]
     }))
 }
 
 async fn user_metadata(
     State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
     Path(user_id): Path<String>,
 ) -> Response {
+    if user_id != principal.username {
+        return ocs_error(StatusCode::FORBIDDEN, 403, "Forbidden");
+    }
+
     match db::local_user_exists(&state.db, &user_id).await {
-        Ok(true) => ocs_ok(user::user_data(&state, &user_id)),
+        Ok(true) => ocs_ok(user::user_data(&user_id)),
         Ok(false) => ocs_error(StatusCode::NOT_FOUND, 404, "User not found"),
         Err(_) => ocs_error(StatusCode::BAD_REQUEST, 400, "Invalid user id"),
     }

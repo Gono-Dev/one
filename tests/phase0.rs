@@ -211,7 +211,7 @@ async fn capabilities_are_public() {
 
 #[tokio::test]
 async fn ocs_user_endpoints_require_auth_and_return_profile() {
-    let (app, _temp, password) = app_with_temp_root().await;
+    let (app, _temp, password, state) = app_with_state().await;
 
     let unauthorized = app
         .clone()
@@ -247,7 +247,68 @@ async fn ocs_user_endpoints_require_auth_and_return_profile() {
         assert!(body.contains("\"id\":\"gono\""));
         assert!(body.contains("\"displayname\":\"gono\""));
         assert!(body.contains("\"quota\""));
+        assert!(body.contains("\"storageLocation\":\"/remote.php/dav/files/gono\""));
+        assert!(!body.contains(&state.files_root.to_string_lossy().into_owned()));
     }
+}
+
+#[tokio::test]
+async fn ocs_user_lookup_is_limited_to_current_user() {
+    let (app, _temp, _password, state) = app_with_state().await;
+    let alice = db::create_local_user(&state.db, "alice", None)
+        .await
+        .expect("create alice");
+    let alice_auth = auth_header_for("alice", &alice.app_password);
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ocs/v2.php/cloud/users")
+                .header(header::AUTHORIZATION, &alice_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("\"users\":[\"alice\"]"));
+    assert!(!body.contains("\"gono\""));
+
+    let forbidden = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ocs/v2.php/cloud/users/gono")
+                .header(header::AUTHORIZATION, &alice_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    let own = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ocs/v2.php/cloud/users/alice")
+                .header(header::AUTHORIZATION, &alice_auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(own.status(), StatusCode::OK);
+    let body = to_bytes(own.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("\"id\":\"alice\""));
+    assert!(body.contains("\"storageLocation\":\"/remote.php/dav/files/alice\""));
+    assert!(!body.contains(&state.data_root.to_string_lossy().into_owned()));
 }
 
 #[tokio::test]

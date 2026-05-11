@@ -3,17 +3,13 @@ use std::sync::Arc;
 use axum::{extract::State, Extension, Json};
 use serde_json::{json, Value};
 
-use crate::{auth::Principal, state::AppState};
+use crate::auth::Principal;
 
 pub async fn handler(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<crate::state::AppState>>,
     Extension(principal): Extension<Principal>,
 ) -> Json<Value> {
-    let user_id = if principal.username.is_empty() {
-        state.owner.clone()
-    } else {
-        principal.username
-    };
+    let user_id = principal.username;
 
     Json(json!({
         "ocs": {
@@ -22,22 +18,16 @@ pub async fn handler(
                 "statuscode": 100,
                 "message": "OK"
             },
-            "data": user_data(&state, &user_id)
+            "data": user_data(&user_id)
         }
     }))
 }
 
-pub(crate) fn user_data(state: &AppState, user_id: &str) -> Value {
-    let storage_location = state
-        .files_root_for_owner(user_id)
-        .unwrap_or_else(|_| state.files_root.clone())
-        .to_string_lossy()
-        .into_owned();
-
+pub(crate) fn user_data(user_id: &str) -> Value {
     json!({
         "id": user_id,
         "enabled": true,
-        "storageLocation": storage_location,
+        "storageLocation": format!("/remote.php/dav/files/{user_id}"),
         "lastLogin": 0,
         "backend": "Database",
         "subadmin": [],
