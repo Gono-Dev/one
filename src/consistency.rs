@@ -799,12 +799,17 @@ async fn refresh_file_metadata(
     let (mtime_ns, file_size) = storage::metadata_fingerprint(&abs_path)?;
     let etag = derive_etag(mtime_ns, file_size);
     let permissions = record.permissions.unwrap_or(0x3f);
-    let favorite = if record.favorite { "1" } else { "0" };
 
-    write_string_xattr(&abs_path, xattr_ns, "fileid", &record.id.to_string())?;
-    write_string_xattr(&abs_path, xattr_ns, "etag", &etag)?;
-    write_string_xattr(&abs_path, xattr_ns, "favorite", favorite)?;
-    write_string_xattr(&abs_path, xattr_ns, "perms", &permissions.to_string())?;
+    write_file_metadata_xattrs(
+        &abs_path,
+        xattr_ns,
+        FileMetadataXattrs {
+            file_id: record.id,
+            etag: &etag,
+            favorite: record.favorite,
+            permissions,
+        },
+    )?;
 
     sqlx::query(
         r#"
@@ -1070,4 +1075,28 @@ fn parse_i64_xattr(value: Option<&str>) -> Result<Option<i64>> {
 
 fn derive_etag(mtime_ns: i64, file_size: i64) -> String {
     format!("{file_size:x}-{mtime_ns:x}")
+}
+
+struct FileMetadataXattrs<'a> {
+    file_id: i64,
+    etag: &'a str,
+    favorite: bool,
+    permissions: i64,
+}
+
+fn write_file_metadata_xattrs(
+    path: &Path,
+    namespace: &str,
+    values: FileMetadataXattrs<'_>,
+) -> Result<()> {
+    write_string_xattr(path, namespace, "fileid", &values.file_id.to_string())?;
+    write_string_xattr(path, namespace, "etag", values.etag)?;
+    write_string_xattr(
+        path,
+        namespace,
+        "favorite",
+        if values.favorite { "1" } else { "0" },
+    )?;
+    write_string_xattr(path, namespace, "perms", &values.permissions.to_string())?;
+    Ok(())
 }

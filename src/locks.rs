@@ -1,9 +1,10 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
+use dashmap::DashMap;
 use dav_server::{
     davpath::DavPath,
     ls::{DavLock, DavLockSystem, LsFuture},
@@ -28,16 +29,17 @@ impl SqliteLs {
     pub fn new(pool: SqlitePool) -> Box<Self> {
         Box::new(Self {
             pool,
-            gate: Arc::new(Mutex::new(())),
+            gate: shared_gate(None),
             principal_scope: None,
         })
     }
 
     pub fn for_principal(pool: SqlitePool, principal: impl Into<String>) -> Box<Self> {
+        let principal = principal.into();
         Box::new(Self {
             pool,
-            gate: Arc::new(Mutex::new(())),
-            principal_scope: Some(principal.into()),
+            gate: shared_gate(Some(&principal)),
+            principal_scope: Some(principal),
         })
     }
 
@@ -290,6 +292,18 @@ impl SqliteLs {
             .context("prune expired WebDAV locks")?;
         Ok(())
     }
+}
+
+fn shared_gate(principal_scope: Option<&str>) -> Arc<Mutex<()>> {
+    static GATES: OnceLock<DashMap<String, Arc<Mutex<()>>>> = OnceLock::new();
+    let key = principal_scope
+        .map(|principal| format!("principal:{principal}"))
+        .unwrap_or_else(|| "global".to_owned());
+    GATES
+        .get_or_init(DashMap::new)
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 impl DavLockSystem for SqliteLs {
@@ -622,6 +636,24 @@ mod tests {
             .check(&path, Some("gono"), false, false, &[])
             .await
             .expect("lock removed");
+    }
+
+    #[tokio::test]
+    async fn locksystem_instances_share_gate_by_principal_scope() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+
+        let global_a = SqliteLs::new(pool.clone());
+        let global_b = SqliteLs::new(pool.clone());
+        assert!(Arc::ptr_eq(&global_a.gate, &global_b.gate));
+
+        let alice_a = SqliteLs::for_principal(pool.clone(), "alice");
+        let alice_b = SqliteLs::for_principal(pool.clone(), "alice");
+        let bob = SqliteLs::for_principal(pool, "bob");
+
+        assert!(Arc::ptr_eq(&alice_a.gate, &alice_b.gate));
+        assert!(!Arc::ptr_eq(&alice_a.gate, &bob.gate));
+        assert!(!Arc::ptr_eq(&global_a.gate, &alice_a.gate));
     }
 
     #[tokio::test]

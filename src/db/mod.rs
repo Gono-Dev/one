@@ -1703,19 +1703,15 @@ async fn upsert_file_record(
             .unwrap_or(0x3f)
     };
 
-    write_xattr(input.abs_path, input.xattr_ns, "fileid", &id.to_string())?;
-    write_xattr(input.abs_path, input.xattr_ns, "etag", &etag)?;
-    write_xattr(
+    write_file_metadata_xattrs(
         input.abs_path,
         input.xattr_ns,
-        "favorite",
-        if favorite { "1" } else { "0" },
-    )?;
-    write_xattr(
-        input.abs_path,
-        input.xattr_ns,
-        "perms",
-        &permissions.to_string(),
+        FileMetadataXattrs {
+            file_id: id,
+            etag: &etag,
+            favorite,
+            permissions,
+        },
     )?;
 
     sqlx::query(
@@ -1777,12 +1773,7 @@ pub async fn set_favorite(
     .await?;
     let rel_path = storage::rel_path_string(rel_path)?;
 
-    write_xattr(
-        abs_path,
-        xattr_ns,
-        "favorite",
-        if favorite { "1" } else { "0" },
-    )?;
+    write_favorite_xattr(abs_path, xattr_ns, favorite)?;
     sqlx::query(
         r#"
         UPDATE file_ids
@@ -1947,6 +1938,34 @@ impl FileRecordRow {
 
 fn derive_etag(mtime_ns: i64, file_size: i64) -> String {
     format!("{file_size:x}-{mtime_ns:x}")
+}
+
+struct FileMetadataXattrs<'a> {
+    file_id: i64,
+    etag: &'a str,
+    favorite: bool,
+    permissions: i64,
+}
+
+fn write_file_metadata_xattrs(
+    path: &Path,
+    namespace: &str,
+    values: FileMetadataXattrs<'_>,
+) -> anyhow::Result<()> {
+    write_xattr(path, namespace, "fileid", &values.file_id.to_string())?;
+    write_xattr(path, namespace, "etag", values.etag)?;
+    write_favorite_xattr(path, namespace, values.favorite)?;
+    write_xattr(path, namespace, "perms", &values.permissions.to_string())?;
+    Ok(())
+}
+
+fn write_favorite_xattr(path: &Path, namespace: &str, favorite: bool) -> anyhow::Result<()> {
+    write_xattr(
+        path,
+        namespace,
+        "favorite",
+        if favorite { "1" } else { "0" },
+    )
 }
 
 fn xattr_key(namespace: &str, name: &str) -> String {
