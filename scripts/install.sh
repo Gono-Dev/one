@@ -1390,6 +1390,8 @@ install_service() {
   log "local health: ${url}"
   log "public base URL: ${BASE_URL}"
   log "webdav URL: ${BASE_URL}/remote.php/dav"
+  warn "important: ${APP_NAME} listens only on the local machine interface after installation"
+  warn "use Nginx or another reverse proxy to expose ${BASE_URL} before accessing it from other machines"
   if [[ "${ADMIN_ENABLED}" == "true" ]]; then
     log "admin URL: ${BASE_URL}/admin"
   fi
@@ -1400,7 +1402,7 @@ install_service() {
   else
     log "no new bootstrap password was printed; existing database/password was preserved"
   fi
-  log "configure HTTPS reverse proxy, including WebSocket upgrade for ${BASE_URL}/push/ws, to forward to http://${BIND}"
+  log "reverse proxy target: http://${BIND} (include WebSocket upgrade for ${BASE_URL}/push/ws)"
 }
 
 dispatch_action() {
