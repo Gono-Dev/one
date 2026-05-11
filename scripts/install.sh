@@ -798,7 +798,6 @@ prompt_base_url() {
 prompt_new_config_values() {
   prompt_base_url
   BIND="$(prompt_text "Local bind address" "${BIND}")"
-  AUTH_REALM="$(prompt_text "Auth realm" "${AUTH_REALM}")"
 
   if prompt_yes_no "Disable Web admin at ${BASE_URL}/admin?" "y"; then
     ADMIN_ENABLED="false"
