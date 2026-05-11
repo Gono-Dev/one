@@ -18,8 +18,8 @@ use tracing::{error, info, warn};
 use crate::{
     auth::Principal,
     dav_handler::{
-        dispatch::{parse_rel_path, parse_rel_path_for_owner},
         fs::permissions_string,
+        pathmap::{parse_rel_path, parse_rel_path_for_owner},
     },
     db,
     permissions::{self, PermissionLevel},

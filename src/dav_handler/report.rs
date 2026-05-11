@@ -15,10 +15,8 @@ use tracing::{debug, error};
 
 use crate::{
     auth::Principal,
-    dav_handler::dispatch::{
-        mount_prefix_for_path, original_request_uri, parse_rel_path_for_owner,
-    },
     dav_handler::fs::permissions_string,
+    dav_handler::pathmap::{mount_prefix_for_path, original_request_uri, parse_rel_path_for_owner},
     db, permissions,
     state::AppState,
     storage,
