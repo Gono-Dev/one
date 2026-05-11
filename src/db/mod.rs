@@ -148,6 +148,10 @@ async fn ensure_runtime_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await
         .context("create webdav_locks timeout index")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_file_ids_owner_favorite_path ON file_ids(owner, favorite, rel_path)")
+        .execute(pool)
+        .await
+        .context("create file_ids favorite lookup index")?;
     Ok(())
 }
 
@@ -1019,6 +1023,12 @@ pub struct FileRecord {
     pub file_size: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedFileRecord {
+    pub rel_path: String,
+    pub record: FileRecord,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileRecordInput<'a> {
     pub owner: &'a str,
@@ -1131,6 +1141,77 @@ pub async fn file_rel_path_by_id(
     .fetch_optional(pool)
     .await
     .context("lookup file path by id")
+}
+
+pub async fn indexed_file_record_by_id(
+    pool: &SqlitePool,
+    owner: &str,
+    file_id: i64,
+    instance_id: &str,
+) -> anyhow::Result<Option<IndexedFileRecord>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, rel_path, etag, permissions, favorite, mtime_ns, file_size
+        FROM file_ids
+        WHERE owner = ?1 AND id = ?2
+        "#,
+    )
+    .bind(owner)
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await
+    .context("lookup indexed file record by id")?;
+
+    row.map(|row| indexed_file_record_from_row(row, instance_id))
+        .transpose()
+}
+
+pub async fn indexed_file_records_by_favorite(
+    pool: &SqlitePool,
+    owner: &str,
+    favorite: bool,
+    scope_rel_path: &Path,
+    instance_id: &str,
+) -> anyhow::Result<Vec<IndexedFileRecord>> {
+    let scope_rel = storage::rel_path_string(scope_rel_path)?;
+    let rows = if scope_rel.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT id, rel_path, etag, permissions, favorite, mtime_ns, file_size
+            FROM file_ids
+            WHERE owner = ?1 AND favorite = ?2
+            ORDER BY rel_path
+            "#,
+        )
+        .bind(owner)
+        .bind(if favorite { 1 } else { 0 })
+        .fetch_all(pool)
+        .await
+        .context("list indexed favorite file records")?
+    } else {
+        let child_prefix = format!("{}/%", escape_like(&scope_rel));
+        sqlx::query(
+            r#"
+            SELECT id, rel_path, etag, permissions, favorite, mtime_ns, file_size
+            FROM file_ids
+            WHERE owner = ?1
+              AND favorite = ?2
+              AND (rel_path = ?3 OR rel_path LIKE ?4 ESCAPE '\')
+            ORDER BY rel_path
+            "#,
+        )
+        .bind(owner)
+        .bind(if favorite { 1 } else { 0 })
+        .bind(&scope_rel)
+        .bind(child_prefix)
+        .fetch_all(pool)
+        .await
+        .context("list indexed favorite file records in scope")?
+    };
+
+    rows.into_iter()
+        .map(|row| indexed_file_record_from_row(row, instance_id))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1936,8 +2017,28 @@ impl FileRecordRow {
     }
 }
 
+fn indexed_file_record_from_row(
+    row: sqlx::sqlite::SqliteRow,
+    instance_id: &str,
+) -> anyhow::Result<IndexedFileRecord> {
+    let rel_path = row.try_get("rel_path")?;
+    let record = FileRecordRow::try_from_row(row)?.to_file_record(instance_id);
+    Ok(IndexedFileRecord { rel_path, record })
+}
+
 fn derive_etag(mtime_ns: i64, file_size: i64) -> String {
     format!("{file_size:x}-{mtime_ns:x}")
+}
+
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 struct FileMetadataXattrs<'a> {

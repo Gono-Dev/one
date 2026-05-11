@@ -235,6 +235,51 @@ async fn append_filter_matches(
     favorite: bool,
 ) -> anyhow::Result<()> {
     let owner = &principal.username;
+    if favorite {
+        let indexed = db::indexed_file_records_by_favorite(
+            &state.db,
+            owner,
+            true,
+            &scope_rel,
+            &state.instance_id,
+        )
+        .await?;
+        for candidate in indexed {
+            let rel_path = Path::new(&candidate.rel_path);
+            let Ok(abs_path) = storage::safe_existing_path(files_root, rel_path) else {
+                continue;
+            };
+            let metadata = std::fs::metadata(&abs_path).with_context(|| {
+                format!(
+                    "read metadata for indexed filter path {}",
+                    abs_path.display()
+                )
+            })?;
+            let record = db::ensure_file_record(
+                &state.db,
+                db::FileRecordInput {
+                    owner,
+                    rel_path,
+                    abs_path: &abs_path,
+                    instance_id: &state.instance_id,
+                    xattr_ns: &state.xattr_ns,
+                },
+            )
+            .await?;
+            if !record.favorite {
+                continue;
+            }
+            let Some(client_rel_path) =
+                permissions::storage_path_to_client_path(principal, rel_path)?
+            else {
+                continue;
+            };
+            let href_rel_path = storage::rel_path_string(&client_rel_path)?;
+            append_resource_response(xml, href_prefix, &href_rel_path, &record, metadata.is_dir());
+        }
+        return Ok(());
+    }
+
     let mut stack = vec![(scope_rel, scope_abs)];
 
     while let Some((rel_path, abs_path)) = stack.pop() {

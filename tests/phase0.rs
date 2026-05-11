@@ -3480,6 +3480,67 @@ async fn report_filter_files_lists_favorites_in_scope_recursively() {
 }
 
 #[tokio::test]
+async fn report_filter_files_skips_deleted_index_rows() {
+    let (app, _temp, password, state) = app_with_state().await;
+
+    for (uri, body) in [
+        ("/remote.php/dav/live-favorite.txt", "live"),
+        ("/remote.php/dav/deleted-favorite.txt", "deleted"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body(Body::from(proppatch_favorite_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    std::fs::remove_file(state.files_root.join("deleted-favorite.txt"))
+        .expect("remove indexed favorite file");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"REPORT").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(filter_files_favorites_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/live-favorite.txt"));
+    assert!(!body.contains("/remote.php/dav/deleted-favorite.txt"));
+}
+
+#[tokio::test]
 async fn search_by_file_id_returns_exact_match() {
     let (app, _temp, password) = app_with_temp_root().await;
     let target = app
@@ -3654,6 +3715,67 @@ async fn search_by_favorite_respects_scope() {
     assert!(body.contains("/remote.php/dav/search-scope/starred.txt"));
     assert!(!body.contains("/remote.php/dav/search-scope/plain.txt"));
     assert!(!body.contains("/remote.php/dav/search-outside-starred.txt"));
+}
+
+#[tokio::test]
+async fn search_by_favorite_skips_deleted_index_rows() {
+    let (app, _temp, password, state) = app_with_state().await;
+
+    for (uri, body) in [
+        ("/remote.php/dav/live-search-favorite.txt", "live"),
+        ("/remote.php/dav/deleted-search-favorite.txt", "deleted"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::from_bytes(b"PROPPATCH").unwrap())
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body(Body::from(proppatch_favorite_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+    }
+
+    std::fs::remove_file(state.files_root.join("deleted-search-favorite.txt"))
+        .expect("remove indexed search favorite file");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"SEARCH").unwrap())
+                .uri("/remote.php/dav/")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(Body::from(search_favorite_body("/files/gono")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("/remote.php/dav/live-search-favorite.txt"));
+    assert!(!body.contains("/remote.php/dav/deleted-search-favorite.txt"));
 }
 
 #[tokio::test]

@@ -100,6 +100,47 @@ async fn append_search_matches(
     filters: &[SearchFilter],
 ) -> anyhow::Result<()> {
     let owner = &principal.username;
+    if let Some(indexed) = indexed_search_candidates(state, owner, &scope_rel, filters).await? {
+        for candidate in indexed {
+            let rel_path = Path::new(&candidate.rel_path);
+            if !rel_path_is_within_depth(&scope_rel, rel_path, depth)? {
+                continue;
+            }
+            let Ok(abs_path) = storage::safe_existing_path(files_root, rel_path) else {
+                continue;
+            };
+            let metadata = std::fs::metadata(&abs_path).with_context(|| {
+                format!(
+                    "read metadata for indexed search path {}",
+                    abs_path.display()
+                )
+            })?;
+            let record = db::ensure_file_record(
+                &state.db,
+                db::FileRecordInput {
+                    owner,
+                    rel_path,
+                    abs_path: &abs_path,
+                    instance_id: &state.instance_id,
+                    xattr_ns: &state.xattr_ns,
+                },
+            )
+            .await?;
+
+            if !matches_filters(&record, filters) {
+                continue;
+            }
+            let Some(client_rel_path) =
+                permissions::storage_path_to_client_path(principal, rel_path)?
+            else {
+                continue;
+            };
+            let rel_path = storage::rel_path_string(&client_rel_path)?;
+            append_resource_response(xml, href_prefix, &rel_path, &record, metadata.is_dir());
+        }
+        return Ok(());
+    }
+
     let mut stack = vec![(scope_rel, scope_abs, 0_usize)];
 
     while let Some((rel_path, abs_path, level)) = stack.pop() {
@@ -143,6 +184,82 @@ async fn append_search_matches(
     }
 
     Ok(())
+}
+
+async fn indexed_search_candidates(
+    state: &AppState,
+    owner: &str,
+    scope_rel: &Path,
+    filters: &[SearchFilter],
+) -> anyhow::Result<Option<Vec<db::IndexedFileRecord>>> {
+    let file_id = filters.iter().find_map(|filter| match filter {
+        SearchFilter::FileId(value) => file_id_literal_to_numeric(value),
+        SearchFilter::Favorite(_) => None,
+    });
+    if filters
+        .iter()
+        .any(|filter| matches!(filter, SearchFilter::FileId(_)))
+    {
+        let Some(file_id) = file_id else {
+            return Ok(Some(Vec::new()));
+        };
+        let candidate =
+            db::indexed_file_record_by_id(&state.db, owner, file_id, &state.instance_id).await?;
+        return Ok(Some(candidate.into_iter().collect()));
+    }
+
+    let favorite = filters.iter().find_map(|filter| match filter {
+        SearchFilter::Favorite(value) => Some(*value),
+        SearchFilter::FileId(_) => None,
+    });
+    if favorite == Some(true) {
+        let indexed = db::indexed_file_records_by_favorite(
+            &state.db,
+            owner,
+            favorite.unwrap(),
+            scope_rel,
+            &state.instance_id,
+        )
+        .await?;
+        return Ok(Some(indexed));
+    }
+
+    Ok(None)
+}
+
+fn file_id_literal_to_numeric(value: &str) -> Option<i64> {
+    let digits: String = value.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn rel_path_is_within_depth(
+    scope_rel: &Path,
+    candidate_rel: &Path,
+    depth: SearchDepth,
+) -> anyhow::Result<bool> {
+    let scope_rel = storage::normalize_rel_path(scope_rel)?;
+    let candidate_rel = storage::normalize_rel_path(candidate_rel)?;
+    if !path_contains(&scope_rel, &candidate_rel) {
+        return Ok(false);
+    }
+
+    let scope_depth = scope_rel.components().count();
+    let candidate_depth = candidate_rel.components().count();
+    Ok(match depth {
+        SearchDepth::Zero => candidate_depth == scope_depth,
+        SearchDepth::One => candidate_depth <= scope_depth + 1,
+        SearchDepth::Infinity => true,
+    })
+}
+
+fn path_contains(parent: &Path, child: &Path) -> bool {
+    parent == child
+        || (parent.as_os_str().is_empty() && child.is_relative())
+        || child.starts_with(parent)
 }
 
 fn matches_filters(record: &db::FileRecord, filters: &[SearchFilter]) -> bool {
