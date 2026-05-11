@@ -58,6 +58,18 @@ sudo GONO_PERF_CREATE_PASSWORD=1 GONO_PERF_PROFILE=quick scripts/perf-gate.sh ba
 - 300 HTTP workers and 2,000 WebSocket connections during spike.
 - 8 hour soak with 100 HTTP workers and 1,000 WebSocket connections.
 
+The Python runner raises its own open-file limit when the platform allows it. The medium `all`
+profile currently targets at least 4,096 open files so the spike phase can hold WebSocket
+connections, HTTP workers, metrics sampling, and report files at the same time. If the runner prints
+an open-file warning, start the shell with a higher limit before running the gate:
+
+```sh
+ulimit -n 4096
+```
+
+If WebSocket scenarios fail from the service side with too many open files, raise the service
+manager's open-file limit as well before starting Gono Cloud.
+
 Override any size or duration from the command line, for example:
 
 ```sh

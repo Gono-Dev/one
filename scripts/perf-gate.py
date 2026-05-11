@@ -28,6 +28,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
+try:
+    import resource
+except ModuleNotFoundError:  # pragma: no cover
+    resource = None
+
 
 PROPFIND_BODY = b"""<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
@@ -385,6 +390,7 @@ class Sampler:
         self.thread = threading.Thread(target=self._run, name="perf-sampler", daemon=True)
         self.system_file = recorder.report_dir / "system.csv"
         self.metrics_file = recorder.report_dir / "metrics.prom"
+        self.metrics_handle = None
 
     def start(self) -> None:
         self.thread.start()
@@ -394,29 +400,35 @@ class Sampler:
 
     def _run(self) -> None:
         next_metrics = 0.0
-        with self.system_file.open("a", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(
-                file,
-                fieldnames=[
-                    "ts",
-                    "pid",
-                    "rss_kb",
-                    "cpu_percent",
-                    "fd_count",
-                    "db_bytes",
-                    "wal_bytes",
-                    "shm_bytes",
-                ],
-            )
-            writer.writeheader()
-            while not self.stop.stopped():
-                writer.writerow(self._sample_system())
-                file.flush()
-                now = time.time()
-                if now >= next_metrics:
-                    self._sample_metrics()
-                    next_metrics = now + self.metrics_interval
-                self.stop.wait(self.interval)
+        try:
+            with self.system_file.open("a", newline="", encoding="utf-8") as file, self.metrics_file.open(
+                "ab"
+            ) as metrics_file:
+                self.metrics_handle = metrics_file
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=[
+                        "ts",
+                        "pid",
+                        "rss_kb",
+                        "cpu_percent",
+                        "fd_count",
+                        "db_bytes",
+                        "wal_bytes",
+                        "shm_bytes",
+                    ],
+                )
+                writer.writeheader()
+                while not self.stop.stopped():
+                    writer.writerow(self._sample_system())
+                    file.flush()
+                    now = time.time()
+                    if now >= next_metrics:
+                        self._sample_metrics()
+                        next_metrics = now + self.metrics_interval
+                    self.stop.wait(self.interval)
+        finally:
+            self.metrics_handle = None
 
     def _sample_system(self) -> dict:
         pid = self.pid or find_gono_cloud_pid()
@@ -471,12 +483,12 @@ class Sampler:
             bytes_read=len(data),
             error=error,
         )
-        if ok:
-            with self.metrics_file.open("ab") as file:
-                file.write(f"# scrape_ts {time.time()}\n".encode("ascii"))
-                file.write(data)
-                if not data.endswith(b"\n"):
-                    file.write(b"\n")
+        if ok and self.metrics_handle is not None:
+            self.metrics_handle.write(f"# scrape_ts {time.time()}\n".encode("ascii"))
+            self.metrics_handle.write(data)
+            if not data.endswith(b"\n"):
+                self.metrics_handle.write(b"\n")
+            self.metrics_handle.flush()
 
 
 def percentile(sorted_values: List[float], pct: int) -> float:
@@ -557,6 +569,53 @@ def load_toml_string(config_path: str, section: str, key: str) -> Optional[str]:
     return None
 
 
+def required_open_files(scenario: str, profile: Profile) -> int:
+    requirements = {
+        "baseline": 128,
+        "mixed": profile.mixed_concurrency + 128,
+        "chunking": profile.chunk_concurrency + 128,
+        "notify": profile.ws_connections + 128,
+        "admin": profile.admin_concurrency + 128,
+        "spike": profile.spike_ws + profile.spike_http + 256,
+        "soak": profile.soak_ws + profile.soak_http + 256,
+    }
+    if scenario == "all":
+        required = max(requirements.values())
+    else:
+        required = requirements.get(scenario, 1024)
+    target = max(1024, required + 512)
+    return 1 << (target - 1).bit_length()
+
+
+def raise_open_file_limit(min_open_files: int) -> None:
+    if resource is None:
+        print("warning: unable to inspect open file limit on this platform", file=sys.stderr)
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except Exception as err:
+        print(f"warning: unable to inspect open file limit: {err}", file=sys.stderr)
+        return
+    if hard == resource.RLIM_INFINITY:
+        target = max(soft, min_open_files)
+    else:
+        target = min(max(soft, min_open_files), hard)
+    if target > soft:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        except Exception as err:
+            print(
+                f"warning: unable to raise open file limit from {soft} to {target}: {err}",
+                file=sys.stderr,
+            )
+    if soft < min_open_files:
+        print(
+            f"warning: open file limit is {soft}, recommended at least {min_open_files} for this run",
+            file=sys.stderr,
+        )
+
+
 def make_payload(size_kb: int, seed: int = 1) -> bytes:
     unit = hashlib.sha256(f"gono-cloud-perf-{seed}".encode("ascii")).digest()
     size = max(1, size_kb) * 1024
@@ -597,26 +656,29 @@ def preseed_files(
     needed = count - existing
 
     def put_one(_: int) -> None:
-        path = pool.next_path()
-        status, data, latency, ok, error = client.request(
-            "PUT",
-            path,
-            body=payload,
-            headers={"Content-Type": "application/octet-stream"},
-            expected={201, 204},
-        )
-        recorder.record(
-            "setup",
-            "seed_put",
-            status,
-            latency,
-            ok,
-            bytes_read=len(data),
-            bytes_written=len(payload),
-            error=error,
-        )
-        if ok:
-            pool.add(path)
+        try:
+            path = pool.next_path()
+            status, data, latency, ok, error = client.request(
+                "PUT",
+                path,
+                body=payload,
+                headers={"Content-Type": "application/octet-stream"},
+                expected={201, 204},
+            )
+            recorder.record(
+                "setup",
+                "seed_put",
+                status,
+                latency,
+                ok,
+                bytes_read=len(data),
+                bytes_written=len(payload),
+                error=error,
+            )
+            if ok:
+                pool.add(path)
+        finally:
+            client.close_thread_connection()
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
         futures = [executor.submit(put_one, i) for i in range(needed)]
@@ -767,113 +829,116 @@ def run_mixed_load(
     sync_report(recorder, scenario, "sync_report_warmup", client, sync_tokens)
 
     def worker(_: int) -> None:
-        while time.time() < stop_at:
-            op = random.choice(choices)
-            path = pool.sample()
-            if op in {"propfind0", "head", "get", "copy", "move", "delete"} and path is None:
-                time.sleep(0.01)
-                continue
-            if op == "propfind0":
-                record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "PROPFIND",
-                    path or pool.base_path,
-                    PROPFIND_BODY,
-                    {"Depth": "0", "Content-Type": "application/xml"},
-                    {207, 404},
-                )
-            elif op == "propfind1":
-                record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "PROPFIND",
-                    f"{pool.base_path}/d{random.randrange(100):03d}/",
-                    PROPFIND_BODY,
-                    {"Depth": "1", "Content-Type": "application/xml"},
-                    {207},
-                )
-            elif op == "head":
-                record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "HEAD",
-                    path or pool.base_path,
-                    expected={200, 404},
-                )
-            elif op == "get":
-                record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "GET",
-                    path or pool.base_path,
-                    expected={200, 404},
-                )
-            elif op == "put_small":
-                new_path = pool.next_path()
-                ok, status, _ = record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "PUT",
-                    new_path,
-                    payload,
-                    {"Content-Type": "application/octet-stream"},
-                    {201, 204},
-                )
-                if ok and status in {201, 204}:
-                    pool.add(new_path)
-            elif op == "copy" and path:
-                new_path = pool.next_path()
-                ok, status, _ = record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "COPY",
-                    path,
-                    headers={"Destination": client.absolute_url(new_path)},
-                    expected={201, 204, 404},
-                )
-                if ok and status in {201, 204}:
-                    pool.add(new_path)
-            elif op == "move" and path:
-                new_path = pool.next_path()
-                ok, status, _ = record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "MOVE",
-                    path,
-                    headers={"Destination": client.absolute_url(new_path)},
-                    expected={201, 204, 404},
-                )
-                if ok and status in {201, 204}:
-                    pool.replace(path, new_path)
-            elif op == "delete" and path:
-                ok, _, _ = record_request(
-                    recorder,
-                    scenario,
-                    op,
-                    client,
-                    "DELETE",
-                    path,
-                    expected={204, 404},
-                )
-                if ok:
-                    pool.remove(path)
-            elif op == "sync_report":
-                sync_report(recorder, scenario, op, client, sync_tokens)
+        try:
+            while time.time() < stop_at:
+                op = random.choice(choices)
+                path = pool.sample()
+                if op in {"propfind0", "head", "get", "copy", "move", "delete"} and path is None:
+                    time.sleep(0.01)
+                    continue
+                if op == "propfind0":
+                    record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "PROPFIND",
+                        path or pool.base_path,
+                        PROPFIND_BODY,
+                        {"Depth": "0", "Content-Type": "application/xml"},
+                        {207, 404},
+                    )
+                elif op == "propfind1":
+                    record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "PROPFIND",
+                        f"{pool.base_path}/d{random.randrange(100):03d}/",
+                        PROPFIND_BODY,
+                        {"Depth": "1", "Content-Type": "application/xml"},
+                        {207},
+                    )
+                elif op == "head":
+                    record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "HEAD",
+                        path or pool.base_path,
+                        expected={200, 404},
+                    )
+                elif op == "get":
+                    record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "GET",
+                        path or pool.base_path,
+                        expected={200, 404},
+                    )
+                elif op == "put_small":
+                    new_path = pool.next_path()
+                    ok, status, _ = record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "PUT",
+                        new_path,
+                        payload,
+                        {"Content-Type": "application/octet-stream"},
+                        {201, 204},
+                    )
+                    if ok and status in {201, 204}:
+                        pool.add(new_path)
+                elif op == "copy" and path:
+                    new_path = pool.next_path()
+                    ok, status, _ = record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "COPY",
+                        path,
+                        headers={"Destination": client.absolute_url(new_path)},
+                        expected={201, 204, 404},
+                    )
+                    if ok and status in {201, 204}:
+                        pool.add(new_path)
+                elif op == "move" and path:
+                    new_path = pool.next_path()
+                    ok, status, _ = record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "MOVE",
+                        path,
+                        headers={"Destination": client.absolute_url(new_path)},
+                        expected={201, 204, 404},
+                    )
+                    if ok and status in {201, 204}:
+                        pool.replace(path, new_path)
+                elif op == "delete" and path:
+                    ok, _, _ = record_request(
+                        recorder,
+                        scenario,
+                        op,
+                        client,
+                        "DELETE",
+                        path,
+                        expected={204, 404},
+                    )
+                    if ok:
+                        pool.remove(path)
+                elif op == "sync_report":
+                    sync_report(recorder, scenario, op, client, sync_tokens)
+        finally:
+            client.close_thread_connection()
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
         futures = [executor.submit(worker, i) for i in range(concurrency)]
@@ -957,8 +1022,11 @@ def run_chunking(
     stop_at = time.time() + duration
 
     def worker(_: int) -> None:
-        while time.time() < stop_at:
-            run_one_chunk_upload(client, recorder, pool, "chunking", file_mb, piece_mb)
+        try:
+            while time.time() < stop_at:
+                run_one_chunk_upload(client, recorder, pool, "chunking", file_mb, piece_mb)
+        finally:
+            client.close_thread_connection()
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
         futures = [executor.submit(worker, i) for i in range(concurrency)]
@@ -1126,6 +1194,7 @@ def run_notify(
                 pool.add(path)
             time.sleep(interval)
     finally:
+        client.close_thread_connection()
         stop.stop()
         for future in as_completed(ws_futures):
             future.result()
@@ -1141,9 +1210,12 @@ def run_admin_read(
     stop_at = time.time() + duration
 
     def worker(_: int) -> None:
-        while time.time() < stop_at:
-            record_request(recorder, "admin", "admin_users", client, "GET", "/admin/users", expected={200, 403, 404})
-            record_request(recorder, "admin", "admin_settings", client, "GET", "/admin/settings", expected={200, 403, 404})
+        try:
+            while time.time() < stop_at:
+                record_request(recorder, "admin", "admin_users", client, "GET", "/admin/users", expected={200, 403, 404})
+                record_request(recorder, "admin", "admin_settings", client, "GET", "/admin/settings", expected={200, 403, 404})
+        finally:
+            client.close_thread_connection()
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
         futures = [executor.submit(worker, i) for i in range(concurrency)]
@@ -1380,6 +1452,7 @@ def override_profile(profile: Profile, args: argparse.Namespace) -> Profile:
 def main() -> int:
     args = parse_args()
     profile = override_profile(PROFILES[args.profile], args)
+    raise_open_file_limit(required_open_files(args.scenario, profile))
     started_at = time.time()
     report_dir = Path(args.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -1453,6 +1526,7 @@ def main() -> int:
     finally:
         stop.stop()
         sampler.join()
+        client.close_thread_connection()
         recorder.close()
     return write_summary(args, recorder, started_at, report_dir, db_path)
 
