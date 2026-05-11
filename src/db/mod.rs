@@ -1143,29 +1143,6 @@ pub async fn file_rel_path_by_id(
     .context("lookup file path by id")
 }
 
-pub async fn indexed_file_record_by_id(
-    pool: &SqlitePool,
-    owner: &str,
-    file_id: i64,
-    instance_id: &str,
-) -> anyhow::Result<Option<IndexedFileRecord>> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, rel_path, etag, permissions, favorite, mtime_ns, file_size
-        FROM file_ids
-        WHERE owner = ?1 AND id = ?2
-        "#,
-    )
-    .bind(owner)
-    .bind(file_id)
-    .fetch_optional(pool)
-    .await
-    .context("lookup indexed file record by id")?;
-
-    row.map(|row| indexed_file_record_from_row(row, instance_id))
-        .transpose()
-}
-
 pub async fn indexed_file_records_by_favorite(
     pool: &SqlitePool,
     owner: &str,

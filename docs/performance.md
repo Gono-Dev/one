@@ -55,12 +55,10 @@ The service keeps WebDAV metadata in xattrs and uses SQLite as an index/read-thr
 query behavior is:
 
 - `OC-FileId` uses the SQLite `file_ids.id` plus the persisted `settings["instance.id"]` suffix.
-- `SEARCH` by numeric `oc:fileid` reads the matching `file_ids` row directly.
-- `SEARCH` by `oc:favorite = 1` and `REPORT oc:filter-files` for favorites use the
-  `file_ids(owner, favorite, rel_path)` runtime index first, then verify each candidate through
-  `safe_existing_path`, scope filtering, and a metadata refresh.
-- Non-favorite broad searches still fall back to filesystem traversal so uncached files are not
-  silently omitted.
+- WebDAV `SEARCH` is disabled and returns a friendly `501 Not Implemented` response.
+- `REPORT oc:filter-files` for favorites uses the `file_ids(owner, favorite, rel_path)` runtime
+  index first, then verifies each candidate through `safe_existing_path`, scope filtering, and a
+  metadata refresh.
 - `change_log` pruning runs per enabled local user at startup and per owner after writes.
 - WebDAV locks are stored in SQLite and guarded by a process-local gate shared by principal scope.
 

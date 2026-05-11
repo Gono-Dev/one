@@ -263,8 +263,10 @@ Before calling the deployment complete:
 - WebDAV locks are persisted in SQLite. A normal restart preserves active locks until they expire
   or the client sends `UNLOCK`; run a single service instance for now so lock conflict checks stay
   serialized through the process-local lock guard shared by principal scope.
-- Favorite `SEARCH` and `oc:filter-files` use SQLite indexed candidates before touching the
-  filesystem. External deletes are still filtered out by path canonicalization and metadata refresh;
-  run consistency repair after manual filesystem maintenance to remove stale index rows.
+- WebDAV `SEARCH` is disabled and returns `501 Not Implemented`; use `PROPFIND`,
+  `sync-collection REPORT`, or `oc:filter-files REPORT` instead. Favorite `oc:filter-files` still
+  uses SQLite indexed candidates before touching the filesystem. External deletes are filtered out
+  by path canonicalization and metadata refresh; run consistency repair after manual filesystem
+  maintenance to remove stale index rows.
 - Linux service status: `systemctl status gono-cloud`.
 - macOS service status: `launchctl print system/cloud.gono.gono-cloud`.

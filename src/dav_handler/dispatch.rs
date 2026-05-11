@@ -32,7 +32,7 @@ use crate::{
             path_for_rel_path, path_for_request_style, path_part, reject_parent_segments,
             request_target_has_fragment, uri_with_replaced_path,
         },
-        report, search,
+        report,
     },
     db,
     locks::SqliteLs,
@@ -105,7 +105,7 @@ impl NcDavService {
 
         match request.method().as_str() {
             "REPORT" => report::handle(self.state.clone(), principal, files_root, request).await,
-            "SEARCH" => search::handle(self.state.clone(), principal, files_root, request).await,
+            "SEARCH" => search_not_implemented_response(),
             "MKCOL" | "PUT" | "MOVE" | "DELETE" if is_chunking_path(request.uri().path()) => {
                 chunked_upload::handle(self.state.clone(), principal, files_root, request).await
             }
@@ -1263,6 +1263,23 @@ fn metadata_error_response() -> Response<Body> {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         "Failed to persist file metadata",
+    )
+        .into_response()
+}
+
+fn search_not_implemented_response() -> Response<Body> {
+    let xml = concat!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<d:error xmlns:d=\"DAV:\" xmlns:g=\"https://gono.cloud/ns\">",
+        "<d:supported-method/>",
+        "<g:message>WebDAV SEARCH is not enabled on this server. ",
+        "Use PROPFIND, sync-collection REPORT, or oc:filter-files REPORT instead.</g:message>",
+        "</d:error>"
+    );
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        [("content-type", "application/xml; charset=utf-8")],
+        xml,
     )
         .into_response()
 }
