@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use axum::{
     extract::{Extension, Form, Path, State},
@@ -612,10 +612,16 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
     let sync_token = db::current_sync_token(&state.db, &state.owner).await?;
     let change_log_floor_token =
         db::change_log_floor_token(&state.db, &state.owner, sync_token).await?;
-    let storage_available = fs2::available_space(&state.data_root)?;
-    let storage_total = fs2::total_space(&state.data_root)?;
-    let upload_reserved =
-        upload_space::reserved_space_threshold(storage_total, &state.config.storage);
+    let (storage_available, storage_available_ms) =
+        measure_elapsed_ms(|| Ok(fs2::available_space(&state.data_root)?))?;
+    let (storage_total, storage_total_ms) =
+        measure_elapsed_ms(|| Ok(fs2::total_space(&state.data_root)?))?;
+    let (upload_reserved, upload_reserved_ms) = measure_elapsed_ms(|| {
+        Ok::<_, anyhow::Error>(upload_space::reserved_space_threshold(
+            storage_total,
+            &state.config.storage,
+        ))
+    })?;
     let auth_rate_limit = state.auth_rate_limiter.stats();
 
     let (notify_rows, notify_connections) = if let Some(runtime) = &state.notify_push {
@@ -664,9 +670,18 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                     status_row("Data root", state.data_root.display()),
                     status_row("Files root", state.files_root.display()),
                     status_row("Uploads root", state.uploads_root.display()),
-                    status_row("Available space", format_bytes(storage_available)),
-                    status_row("Total space", format_bytes(storage_total)),
-                    status_row("Upload minimum free space", format_bytes(upload_reserved)),
+                    status_row(
+                        "Available space",
+                        format_timed_value(format_bytes(storage_available), storage_available_ms),
+                    ),
+                    status_row(
+                        "Total space",
+                        format_timed_value(format_bytes(storage_total), storage_total_ms),
+                    ),
+                    status_row(
+                        "Upload minimum free space",
+                        format_timed_value(format_bytes(upload_reserved), upload_reserved_ms),
+                    ),
                 ],
             },
             html::StatusSection {
@@ -729,6 +744,18 @@ fn status_row(label: impl ToString, value: impl ToString) -> html::StatusRow {
         label: label.to_string(),
         value: value.to_string(),
     }
+}
+
+fn measure_elapsed_ms<T>(
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<(T, u128)> {
+    let started = Instant::now();
+    let value = operation()?;
+    Ok((value, started.elapsed().as_millis()))
+}
+
+fn format_timed_value(value: String, elapsed_ms: u128) -> String {
+    format!("{value} ({elapsed_ms} ms)")
 }
 
 fn format_bytes(bytes: u64) -> String {
