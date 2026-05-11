@@ -10,6 +10,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use dashmap::DashMap;
 use rand::RngCore;
 use tokio::sync::broadcast;
+use tracing::info;
 
 use crate::{auth::Principal, config::NotifyPushConfig};
 
@@ -251,7 +252,20 @@ impl NotifyRuntime {
     fn send_to_user(&self, user: &str, message: PushMessage) {
         self.metrics.events_received.fetch_add(1, Ordering::Relaxed);
         if let Some(sender) = self.channels.get(user) {
+            let receiver_count = sender.receiver_count();
+            info!(
+                user,
+                receiver_count,
+                message = ?message,
+                "notify_push file event queued"
+            );
             let _ = sender.send(message);
+        } else {
+            info!(
+                user,
+                message = ?message,
+                "notify_push file event dropped because user has no active subscribers"
+            );
         }
     }
 

@@ -1,7 +1,10 @@
-use std::{net::IpAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{connect_info::ConnectInfo, Path, State, WebSocketUpgrade},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -32,11 +35,15 @@ pub fn router(path: &str) -> Router<Arc<AppState>> {
         .route("/push/test/trigger/{kind}", post(test_trigger))
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+) -> Response {
     let Some(runtime) = state.notify_push.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    ws.on_upgrade(move |socket| websocket::handle_socket(socket, state, runtime))
+    ws.on_upgrade(move |socket| websocket::handle_socket(socket, state, runtime, peer_addr))
 }
 
 async fn pre_auth(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {

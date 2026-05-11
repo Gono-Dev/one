@@ -1,9 +1,9 @@
-use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{sync::broadcast, time};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{auth::Principal, notify_push::runtime::SubscribeError, permissions, state::AppState};
 
@@ -13,6 +13,7 @@ pub async fn handle_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
     runtime: Arc<NotifyRuntime>,
+    peer_addr: SocketAddr,
 ) {
     let principal = match time::timeout(
         runtime.auth_timeout(),
@@ -23,11 +24,13 @@ pub async fn handle_socket(
         Ok(Ok(user)) => user,
         Ok(Err(message)) => {
             runtime.auth_failed();
+            warn!(%peer_addr, message, "notify_push websocket authentication failed");
             let _ = socket.send(Message::text(format!("err: {message}"))).await;
             return;
         }
         Err(_) => {
             runtime.auth_failed();
+            warn!(%peer_addr, "notify_push websocket authentication timed out");
             let _ = socket
                 .send(Message::text("err: Authentication timeout"))
                 .await;
@@ -40,6 +43,7 @@ pub async fn handle_socket(
         Ok(receiver) => receiver,
         Err(SubscribeError::LimitExceeded) => {
             runtime.auth_failed();
+            warn!(%peer_addr, user, "notify_push websocket connection limit exceeded");
             let _ = socket
                 .send(Message::text("err: Too many connections"))
                 .await;
@@ -52,6 +56,7 @@ pub async fn handle_socket(
         return;
     }
 
+    info!(%peer_addr, user, "notify_push websocket authenticated");
     debug!(user, "notify_push websocket authenticated");
     let (mut sender, mut inbound) = socket.split();
     let mut ping = time::interval(runtime.ping_interval());
@@ -80,7 +85,7 @@ pub async fn handle_socket(
                 }
             }
             _ = flush.tick() => {
-                if !send_pending(&runtime, &mut sender, &mut pending, listen_file_id).await {
+                if !send_pending(&runtime, &mut sender, &mut pending, listen_file_id, &user, peer_addr).await {
                     break;
                 }
             }
@@ -108,7 +113,7 @@ pub async fn handle_socket(
                         }
                     }
                     Some(Err(err)) => {
-                        warn!(?err, user, "notify_push websocket receive error");
+                        warn!(?err, %peer_addr, user, "notify_push websocket receive error");
                         break;
                     }
                     None => break,
@@ -117,9 +122,18 @@ pub async fn handle_socket(
         }
     }
 
-    let _ = send_pending(&runtime, &mut sender, &mut pending, listen_file_id).await;
+    let _ = send_pending(
+        &runtime,
+        &mut sender,
+        &mut pending,
+        listen_file_id,
+        &user,
+        peer_addr,
+    )
+    .await;
     let _ = sender.close().await;
     runtime.disconnect(&user);
+    info!(%peer_addr, user, "notify_push websocket disconnected");
     debug!(user, "notify_push websocket disconnected");
 }
 
@@ -216,6 +230,8 @@ async fn send_pending(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     pending: &mut Option<PushMessage>,
     listen_file_id: bool,
+    user: &str,
+    peer_addr: SocketAddr,
 ) -> bool {
     let Some(message) = pending.take() else {
         return true;
@@ -224,8 +240,21 @@ async fn send_pending(
     let text = message.to_wire_text(listen_file_id);
     if sender.send(Message::text(text)).await.is_ok() {
         runtime.message_sent(ty);
+        info!(
+            %peer_addr,
+            user,
+            listen_file_id,
+            message = %message.to_wire_text(listen_file_id),
+            "notify_push websocket message sent"
+        );
         true
     } else {
+        warn!(
+            %peer_addr,
+            user,
+            listen_file_id,
+            "failed to send notify_push websocket message"
+        );
         false
     }
 }
