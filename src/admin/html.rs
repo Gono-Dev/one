@@ -25,6 +25,7 @@ pub struct OneTimePassword {
 pub fn render_users_page(
     principal_username: &str,
     csrf_token: &str,
+    config: &Config,
     users: &[LocalUser],
     notice: Option<&Notice>,
     one_time_password: Option<&OneTimePassword>,
@@ -35,6 +36,7 @@ pub fn render_users_page(
     }
 
     let notice_html = notice.map(render_notice).unwrap_or_default();
+    let security_notice_html = render_http_security_notice(&config.server.base_url);
     let secret_html = one_time_password.map(render_secret).unwrap_or_default();
     let user_count = users.len();
 
@@ -69,6 +71,7 @@ pub fn render_users_page(
           <span>Admin: {principal}</span>
         </div>
         {secret_html}
+        {security_notice_html}
         {notice_html}
         <section class="card" aria-labelledby="create-user-title">
           <div class="card-header">
@@ -101,6 +104,7 @@ pub fn render_users_page(
 </html>"#,
         principal = escape_html(principal_username),
         csrf = escape_attr(csrf_token),
+        security_notice_html = security_notice_html,
         create_password_html = render_create_app_password_card(users, csrf_token),
     )
 }
@@ -190,6 +194,7 @@ pub fn render_settings_page(
     pending_restart: bool,
 ) -> String {
     let notice_html = notice.map(render_notice).unwrap_or_default();
+    let security_notice_html = render_http_security_notice(&config.server.base_url);
     let pending_html = if pending_restart {
         r#"<div class="notice notice-success" role="status">Restart required before saved settings affect the running service.</div>"#
             .to_owned()
@@ -282,6 +287,7 @@ pub fn render_settings_page(
           <h1>Settings</h1>
           <span>Admin: {principal}</span>
         </div>
+        {security_notice_html}
         {notice_html}
         {pending_html}
         <form method="post" action="/admin/settings" class="settings-form">
@@ -359,8 +365,20 @@ pub fn render_settings_page(
 </html>"#,
         principal = escape_html(principal_username),
         csrf = escape_attr(csrf_token),
+        security_notice_html = security_notice_html,
         advertised_types = escape_html(&advertised_types),
         admin_users = escape_html(&admin_users),
+    )
+}
+
+fn render_http_security_notice(base_url: &str) -> String {
+    if !base_url.trim_start().starts_with("http://") {
+        return String::new();
+    }
+
+    format!(
+        r#"<div class="notice notice-warning" role="status">Admin is configured with an HTTP base URL: <strong>{base_url}</strong>. Basic Auth credentials and app passwords can be exposed over plain HTTP; use HTTPS through Nginx or another reverse proxy before accessing this page from other machines.</div>"#,
+        base_url = escape_html(base_url)
     )
 }
 
@@ -857,6 +875,7 @@ label { color: var(--muted-strong); font-size: 12px; font-weight: 800; }
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 .notice-success { color: #14532d; background: #f0fdf4; border-color: #bbf7d0; }
+.notice-warning { color: #854d0e; background: #fffbeb; border-color: #fde68a; }
 .notice-error { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
 .user-list { display: grid; }
 .user-row { display: grid; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--border); }

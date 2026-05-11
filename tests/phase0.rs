@@ -1924,6 +1924,37 @@ async fn admin_users_page_requires_configured_admin() {
 }
 
 #[tokio::test]
+async fn admin_pages_warn_when_base_url_uses_http() {
+    let (app, _temp, password, _state) = app_with_config(|config| {
+        config.server.base_url = "http://files.example.test".to_owned();
+        config.admin.enabled = true;
+        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
+    })
+    .await;
+
+    for uri in ["/admin/users", "/admin/settings"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, auth_header(&password))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Admin is configured with an HTTP base URL"));
+        assert!(body.contains("http://files.example.test"));
+        assert!(body.contains("use HTTPS through Nginx or another reverse proxy"));
+    }
+}
+
+#[tokio::test]
 async fn configured_admin_user_is_created_for_admin_access() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = test_config(&temp);

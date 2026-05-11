@@ -607,6 +607,7 @@ async fn render_users(
         Ok(users) => Html(html::render_users_page(
             &principal.username,
             &state.admin_csrf_token,
+            &state.config,
             &users,
             notice.as_ref(),
             one_time_password.as_ref(),
