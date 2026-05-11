@@ -113,7 +113,7 @@ pub async fn connect(config: &DbConfig) -> anyhow::Result<SqlitePool> {
 }
 
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
-    sqlx::migrate!("./migrations")
+    sqlx::migrate!("./src/db/migrations")
         .run(pool)
         .await
         .context("run SQLite migrations")?;
