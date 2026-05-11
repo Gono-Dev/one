@@ -9,6 +9,8 @@ use tempfile::TempDir;
 fn test_config(temp: &TempDir) -> Config {
     let mut config = Config::dev_default();
     config.storage.data_dir = temp.path().join("data").to_string_lossy().into_owned();
+    config.storage.upload_min_free_bytes = 0;
+    config.storage.upload_min_free_percent = 0;
     config.db.path = temp
         .path()
         .join("gono-cloud.db")

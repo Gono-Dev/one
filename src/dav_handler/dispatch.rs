@@ -32,7 +32,7 @@ use crate::{
             path_for_rel_path, path_for_request_style, path_part, reject_parent_segments,
             request_target_has_fragment, uri_with_replaced_path,
         },
-        report,
+        report, upload_space,
     },
     db,
     locks::SqliteLs,
@@ -268,6 +268,19 @@ impl NcDavService {
                 .ensure_auto_mkcol_parents(&owner, &files_root, &request_path)
                 .await
             {
+                return response;
+            }
+        }
+        if method == Method::PUT {
+            let content_length = match upload_space::content_length(request.headers()) {
+                Ok(content_length) => content_length,
+                Err(response) => return response,
+            };
+            if let Err(response) = upload_space::ensure_upload_space(
+                &files_root,
+                content_length,
+                &self.state.config.storage,
+            ) {
                 return response;
             }
         }

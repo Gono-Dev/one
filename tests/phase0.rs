@@ -124,6 +124,8 @@ async fn app_with_config(
 fn test_config(temp: &TempDir) -> Config {
     let mut config = Config::dev_default();
     config.storage.data_dir = temp.path().join("data").to_string_lossy().into_owned();
+    config.storage.upload_min_free_bytes = 0;
+    config.storage.upload_min_free_percent = 0;
     config.db.path = temp
         .path()
         .join("gono-cloud.db")
@@ -2691,6 +2693,37 @@ async fn put_without_auto_mkcol_still_rejects_missing_parents() {
 }
 
 #[tokio::test]
+async fn put_rejects_when_upload_space_reserve_would_be_exhausted() {
+    let (app, temp, password, _state) = app_with_config(|config| {
+        config.storage.upload_min_free_bytes = u64::MAX;
+    })
+    .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/no-space.txt")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_LENGTH, "5")
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("quota-not-exceeded"));
+    assert!(body.contains("Insufficient storage for upload"));
+    assert!(!temp
+        .path()
+        .join("data/users/gono/files/no-space.txt")
+        .exists());
+}
+
+#[tokio::test]
 async fn copy_allocates_a_new_file_id() {
     let (app, _temp, password) = app_with_temp_root().await;
     let put_response = app
@@ -3980,6 +4013,72 @@ async fn chunking_v2_rejects_impossible_total_length() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+}
+
+#[tokio::test]
+async fn chunking_v2_mkcol_rejects_when_upload_space_reserve_would_be_exhausted() {
+    let (app, _temp, password, _state) = app_with_config(|config| {
+        config.storage.upload_min_free_bytes = u64::MAX;
+    })
+    .await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MKCOL").unwrap())
+                .uri("/remote.php/dav/uploads/gono/upload-no-space")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/no-space.bin")
+                .header("OC-Total-Length", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("Insufficient storage for upload"));
+}
+
+#[tokio::test]
+async fn chunking_v2_move_rechecks_upload_space_before_merge() {
+    let (app, temp, password, state) = app_with_config(|config| {
+        config.storage.upload_min_free_bytes = u64::MAX;
+    })
+    .await;
+    let upload_id = "upload-move-no-space";
+    let session_dir = state.uploads_root.join(BOOTSTRAP_USER).join(upload_id);
+    std::fs::create_dir_all(&session_dir).expect("create upload session dir");
+    std::fs::write(session_dir.join("1"), "hello").expect("write upload chunk");
+    db::upsert_upload_session(
+        &state.db,
+        upload_id,
+        BOOTSTRAP_USER,
+        std::path::Path::new("no-space-chunked.txt"),
+        5,
+    )
+    .await
+    .expect("insert upload session");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::from_bytes(b"MOVE").unwrap())
+                .uri(format!("/remote.php/dav/uploads/gono/{upload_id}/.file"))
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header("Destination", "/remote.php/dav/no-space-chunked.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    assert!(!temp
+        .path()
+        .join("data/users/gono/files/no-space-chunked.txt")
+        .exists());
 }
 
 #[tokio::test]

@@ -238,6 +238,8 @@ base_url = "${BASE_URL}"
 [storage]
 data_dir = "${WORK_DIR}/data"
 xattr_ns = "user.nc"
+upload_min_free_bytes = 0
+upload_min_free_percent = 0
 
 [db]
 path = "${WORK_DIR}/gono-cloud.db"

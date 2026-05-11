@@ -17,6 +17,7 @@ use crate::{
         html::{self, Notice, NoticeKind, OneTimePassword},
     },
     auth::Principal,
+    dav_handler::upload_space,
     db::{self, AppPasswordScopeInput, BOOTSTRAP_USER},
     permissions::PermissionLevel,
     settings::{self, SettingsUpdate},
@@ -698,6 +699,8 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
         db::change_log_floor_token(&state.db, &state.owner, sync_token).await?;
     let storage_available = fs2::available_space(&state.data_root)?;
     let storage_total = fs2::total_space(&state.data_root)?;
+    let upload_reserved =
+        upload_space::reserved_space_threshold(storage_total, &state.config.storage);
     let auth_rate_limit = state.auth_rate_limiter.stats();
 
     let (notify_rows, notify_connections) = if let Some(runtime) = &state.notify_push {
@@ -773,6 +776,11 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                     status_row("Xattr namespace", &state.xattr_ns),
                     status_row("Available space", format_bytes(storage_available)),
                     status_row("Total space", format_bytes(storage_total)),
+                    status_row("Upload minimum free space", format_bytes(upload_reserved)),
+                    status_row(
+                        "Upload minimum free percent",
+                        format!("{}%", state.config.storage.upload_min_free_percent.min(100)),
+                    ),
                 ],
             },
             html::StatusSection {

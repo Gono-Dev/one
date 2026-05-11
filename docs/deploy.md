@@ -260,6 +260,10 @@ Before calling the deployment complete:
   `DAV:valid-sync-token` and must do a full resync.
 - Keep `data/users/gono/files` and `data/uploads` on the same partition. Startup rejects split partitions,
   validates the xattr namespace, and probes xattr writes before accepting traffic.
+- Configure `[storage] upload_min_free_bytes` to reserve disk space before accepting uploads. The
+  default is 1 GiB; `[storage] upload_min_free_percent` can add a percentage-based reserve, and the
+  stricter threshold wins. Uploads that would cross the reserve return WebDAV
+  `507 Insufficient Storage`.
 - WebDAV locks are persisted in SQLite. A normal restart preserves active locks until they expire
   or the client sends `UNLOCK`; run a single service instance for now so lock conflict checks stay
   serialized through the process-local lock guard shared by principal scope.

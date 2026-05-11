@@ -61,6 +61,8 @@ query behavior is:
   metadata refresh.
 - `change_log` pruning runs per enabled local user at startup and per owner after writes.
 - WebDAV locks are stored in SQLite and guarded by a process-local gate shared by principal scope.
+- Uploads run a `statvfs`-style free-space preflight before ordinary `PUT`, chunking `MKCOL`, chunk
+  writes, and final `MOVE .file`; failures return WebDAV `507 Insufficient Storage`.
 
 ## Medium Defaults
 

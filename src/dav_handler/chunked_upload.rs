@@ -20,6 +20,7 @@ use crate::{
     dav_handler::{
         fs::permissions_string,
         pathmap::{parse_rel_path, parse_rel_path_for_owner},
+        upload_space,
     },
     db,
     permissions::{self, PermissionLevel},
@@ -120,7 +121,11 @@ async fn mkcol_session(
     let target_rel = destination_rel_path(request.headers(), principal)?;
     validate_target_path(files_root, &target_rel)?;
     let total_size = parse_total_length(request.headers())?.unwrap_or(0);
-    check_available_space(files_root, total_size)?;
+    upload_space::ensure_upload_space(
+        files_root,
+        nonzero_i64_to_u64(total_size),
+        &state.config.storage,
+    )?;
 
     let owner_dir = safe_upload_create_path(&state, Path::new(&upload_path.owner))?;
     tokio::fs::create_dir_all(&owner_dir)
@@ -161,9 +166,8 @@ async fn put_chunk(
     parse_chunk_name(chunk_name)?;
 
     let total_size = parse_total_length(request.headers())?;
-    if let Some(total_size) = total_size {
-        check_available_space(files_root, total_size)?;
-    }
+    let chunk_size = upload_space::content_length(request.headers())?;
+    upload_space::ensure_upload_space(files_root, chunk_size, &state.config.storage)?;
     let destination = destination_rel_path(request.headers(), principal)?;
     let session = require_session(&state, &upload_path).await?;
     ensure_destination_matches(&destination, &session.target_path)?;
@@ -217,6 +221,11 @@ async fn move_file(
     let target_existed = std::fs::symlink_metadata(&target_abs).is_ok();
     let temp_target = temp_target_path(&target_abs, &upload_path.upload_id)?;
     let session_dir = session_existing_path(&state, &upload_path)?;
+    let required_size = match nonzero_i64_to_u64(session.total_size) {
+        Some(total_size) => Some(total_size),
+        None => Some(uploaded_chunk_bytes(&session_dir).await?),
+    };
+    upload_space::ensure_upload_space(files_root, required_size, &state.config.storage)?;
 
     merge_chunks(&session_dir, &temp_target).await?;
     if let Some(mtime) = parse_mtime(request.headers())? {
@@ -375,6 +384,32 @@ async fn merge_chunks(session_dir: &Path, target: &Path) -> ChunkResult<()> {
     Ok(())
 }
 
+async fn uploaded_chunk_bytes(session_dir: &Path) -> ChunkResult<u64> {
+    let mut total = 0_u64;
+    let mut entries = tokio::fs::read_dir(session_dir)
+        .await
+        .map_err(|err| internal_error(err, "read upload session directory"))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|err| internal_error(err, "read upload chunk entry"))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|err| internal_error(err, "read upload chunk file type"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .await
+            .map_err(|err| internal_error(err, "read upload chunk metadata"))?;
+        total = total.saturating_add(metadata.len());
+    }
+    Ok(total)
+}
+
 pub async fn cleanup_expired_sessions(state: &AppState) -> anyhow::Result<usize> {
     let cutoff = db::unix_timestamp() - CLEANUP_GRACE_SECS;
     let sessions = db::list_expired_upload_sessions(&state.db, cutoff)
@@ -490,22 +525,6 @@ fn parse_total_length(headers: &HeaderMap) -> ChunkResult<Option<i64>> {
     Ok(Some(total))
 }
 
-fn check_available_space(files_root: &Path, total_size: i64) -> ChunkResult<()> {
-    if total_size == 0 {
-        return Ok(());
-    }
-    let available = fs2::available_space(files_root)
-        .map_err(|err| internal_error(err, "check available storage"))?;
-    if total_size as u64 > available {
-        Err(text_response(
-            StatusCode::INSUFFICIENT_STORAGE,
-            "Insufficient storage for upload",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 fn parse_mtime(headers: &HeaderMap) -> ChunkResult<Option<FileTime>> {
     let Some(value) = headers.get(X_OC_MTIME) else {
         return Ok(None);
@@ -526,6 +545,10 @@ fn parse_mtime(headers: &HeaderMap) -> ChunkResult<Option<FileTime>> {
         .checked_add(Duration::from_secs(secs as u64))
         .ok_or_else(|| text_response(StatusCode::BAD_REQUEST, "Invalid X-OC-MTime header"))?;
     Ok(Some(FileTime::from_unix_time(secs, 0)))
+}
+
+fn nonzero_i64_to_u64(value: i64) -> Option<u64> {
+    u64::try_from(value).ok().filter(|value| *value > 0)
 }
 
 fn parse_chunk_name(name: &str) -> ChunkResult<u16> {

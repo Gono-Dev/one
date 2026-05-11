@@ -276,6 +276,14 @@ pub fn render_settings_page(
     let admin_enabled = editable_bool("admin_enabled", "Enabled", config.admin.enabled);
     let storage_data_dir = readonly_text("Data dir", &config.storage.data_dir);
     let storage_xattr_ns = readonly_text("Xattr namespace", &config.storage.xattr_ns);
+    let storage_upload_min_free_bytes = readonly_text(
+        "Upload minimum free bytes",
+        config.storage.upload_min_free_bytes,
+    );
+    let storage_upload_min_free_percent = readonly_text(
+        "Upload minimum free percent",
+        format!("{}%", config.storage.upload_min_free_percent.min(100)),
+    );
     let db_path = readonly_text("Path", &config.db.path);
     let db_max_connections = readonly_text("Max connections", config.db.max_connections);
 
@@ -369,6 +377,8 @@ pub fn render_settings_page(
             <div class="settings-grid">
               {storage_data_dir}
               {storage_xattr_ns}
+              {storage_upload_min_free_bytes}
+              {storage_upload_min_free_percent}
             </div>
           </section>
           <section class="card" aria-labelledby="db-settings-title">

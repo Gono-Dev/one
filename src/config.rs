@@ -29,6 +29,10 @@ pub struct ServerConfig {
 pub struct StorageConfig {
     pub data_dir: String,
     pub xattr_ns: String,
+    #[serde(default = "StorageConfig::default_upload_min_free_bytes")]
+    pub upload_min_free_bytes: u64,
+    #[serde(default)]
+    pub upload_min_free_percent: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,6 +174,12 @@ impl NotifyPushConfig {
     }
 }
 
+impl StorageConfig {
+    pub fn default_upload_min_free_bytes() -> u64 {
+        1024 * 1024 * 1024
+    }
+}
+
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
@@ -198,6 +208,8 @@ impl Config {
             storage: StorageConfig {
                 data_dir: "data".to_owned(),
                 xattr_ns: "user.nc".to_owned(),
+                upload_min_free_bytes: StorageConfig::default_upload_min_free_bytes(),
+                upload_min_free_percent: 0,
             },
             db: DbConfig {
                 path: "data/gono-cloud.db".to_owned(),

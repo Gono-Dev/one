@@ -863,6 +863,8 @@ base_url = "$(toml_escape "${BASE_URL}")"
 [storage]
 data_dir = "$(toml_escape "${DATA_DIR}")"
 xattr_ns = "$(toml_escape "${XATTR_NS}")"
+upload_min_free_bytes = 1073741824
+upload_min_free_percent = 0
 
 [db]
 path = "$(toml_escape "${DB_PATH}")"
