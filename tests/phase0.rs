@@ -1888,6 +1888,14 @@ async fn admin_users_page_requires_configured_admin() {
     let alice = db::create_local_user(&state.db, "alice", None)
         .await
         .expect("create non-admin user");
+    db::update_local_app_password_expiry(
+        &state.db,
+        "alice",
+        db::DEFAULT_APP_PASSWORD_LABEL,
+        Some(db::unix_timestamp() + 86_400),
+    )
+    .await
+    .expect("set expiring app password");
     let forbidden = app
         .clone()
         .oneshot(
@@ -1930,6 +1938,9 @@ async fn admin_users_page_requires_configured_admin() {
             && value.as_bytes()[10] == b'T'
             && value.as_bytes()[13] == b':'
     }));
+    assert_eq!(hidden_expiration_field_count(&body), 2);
+    assert_eq!(visible_expiration_field_count(&body), 1);
+    assert!(body.contains("select.value !== 'at'"));
 }
 
 #[tokio::test]
@@ -2248,6 +2259,16 @@ fn expiration_input_values(body: &str) -> Vec<String> {
         rest = &value_rest[value_end..];
     }
     values
+}
+
+fn hidden_expiration_field_count(body: &str) -> usize {
+    body.matches(r#"<div class="field" data-expiry-time-field hidden>"#)
+        .count()
+}
+
+fn visible_expiration_field_count(body: &str) -> usize {
+    body.matches(r#"<div class="field" data-expiry-time-field>"#)
+        .count()
 }
 
 #[tokio::test]

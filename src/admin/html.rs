@@ -100,6 +100,7 @@ pub fn render_users_page(
         </section>
       </main>
     </div>
+    <script>{EXPIRY_SCRIPT}</script>
   </body>
 </html>"#,
         principal = escape_html(principal_username),
@@ -169,7 +170,7 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
               <option value="at">At time</option>
             </select>
           </div>
-          <div class="field">
+          <div class="field" data-expiry-time-field hidden>
             <label for="create-password-expiry-input">Expiration time</label>
             <input class="input" id="create-password-expiry-input" name="expires_at" type="text" value="{default_expiration}" placeholder="YYYY-MM-DDTHH:MM" autocomplete="off">
           </div>
@@ -577,6 +578,11 @@ fn render_app_password_block(
         .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
         .map(|value| value.format("%Y-%m-%dT%H:%M").to_string())
         .unwrap_or_else(default_expiration_value);
+    let expires_time_hidden = if password.expires_at.is_none() {
+        " hidden"
+    } else {
+        ""
+    };
     let delete = if user.app_password_count <= 1 {
         r#"<button class="button button-danger button-mini" type="button" disabled>Delete</button>"#
             .to_owned()
@@ -607,7 +613,7 @@ fn render_app_password_block(
             <option value="at"{at_selected}>At time</option>
           </select>
         </div>
-        <div class="field">
+        <div class="field" data-expiry-time-field{expires_time_hidden}>
           <label for="{expiry_popover_id}-input">Expiration time</label>
           <input class="input" id="{expiry_popover_id}-input" name="expires_at" type="text" value="{expires_value}" placeholder="YYYY-MM-DDTHH:MM" autocomplete="off">
         </div>
@@ -624,6 +630,7 @@ fn render_app_password_block(
         expiry_popover_id = expiry_popover_id,
         csrf = escape_attr(csrf_token),
         expires_value = escape_attr(&expires_value),
+        expires_time_hidden = expires_time_hidden,
         never_selected = if password.expires_at.is_none() {
             " selected"
         } else {
@@ -713,6 +720,20 @@ fn escape_html(value: &str) -> String {
 fn escape_attr(value: &str) -> String {
     escape_html(value)
 }
+
+const EXPIRY_SCRIPT: &str = r#"
+document.querySelectorAll('select[name="expires_at_mode"]').forEach((select) => {
+  const syncExpiryField = () => {
+    const fields = select.closest('.modal-fields');
+    const timeField = fields && fields.querySelector('[data-expiry-time-field]');
+    if (timeField) {
+      timeField.hidden = select.value !== 'at';
+    }
+  };
+  select.addEventListener('change', syncExpiryField);
+  syncExpiryField();
+});
+"#;
 
 const STYLE: &str = r#"
 :root {
