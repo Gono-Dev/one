@@ -1390,8 +1390,7 @@ install_service() {
   log "local health: ${url}"
   log "public base URL: ${BASE_URL}"
   log "webdav URL: ${BASE_URL}/remote.php/dav"
-  warn "important: ${APP_NAME} listens only on the local machine interface after installation"
-  warn "use Nginx or another reverse proxy to expose ${BASE_URL} before accessing it from other machines"
+  warn "Important: Gono Cloud listens only on the local machine interface(127.0.0.1:16102) by default. Use Nginx or another reverse proxy to expose it before accessing it from other machines."
   if [[ "${ADMIN_ENABLED}" == "true" ]]; then
     log "admin URL: ${BASE_URL}/admin"
   fi
