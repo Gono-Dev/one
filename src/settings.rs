@@ -49,6 +49,7 @@ pub struct SettingsUpdate {
 
 pub async fn load_effective_config(pool: &SqlitePool, base: Config) -> anyhow::Result<Config> {
     seed_missing_settings(pool, &base).await?;
+    refresh_config_backed_settings(pool, &base).await?;
     apply_saved_settings(pool, base).await
 }
 
@@ -157,6 +158,32 @@ async fn seed_missing_settings(pool: &SqlitePool, config: &Config) -> anyhow::Re
         .context("seed setting")?;
     }
     tx.commit().await.context("commit settings seed")?;
+    Ok(())
+}
+
+async fn refresh_config_backed_settings(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
+    let values = config_values(config)?;
+    let now = unix_timestamp();
+    let mut tx = pool.begin().await.context("begin settings refresh")?;
+    for (key, value) in values {
+        sqlx::query(
+            r#"
+            UPDATE settings
+            SET value_json = ?1,
+                updated_at = ?2
+            WHERE key = ?3
+              AND updated_by = 'config.toml'
+              AND value_json != ?1
+            "#,
+        )
+        .bind(serde_json::to_string(&value)?)
+        .bind(now)
+        .bind(key)
+        .execute(&mut *tx)
+        .await
+        .context("refresh config-backed setting")?;
+    }
+    tx.commit().await.context("commit settings refresh")?;
     Ok(())
 }
 
@@ -458,7 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_seed_once_and_apply_overrides() {
+    async fn config_backed_settings_follow_config_until_admin_save() {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let pool = temp_pool(&temp).await;
         let mut config = Config::dev_default();
@@ -479,7 +506,22 @@ mod tests {
         changed_config.server.base_url = "https://new-config.example".to_owned();
         let effective = load_effective_config(&pool, changed_config)
             .await
+            .expect("refresh config-backed setting");
+        assert_eq!(effective.server.base_url, "https://new-config.example");
+
+        sqlx::query(
+            "UPDATE settings SET value_json = ?1, updated_by = 'admin' WHERE key = 'server.base_url'",
+        )
+        .bind("\"https://from-admin.example\"")
+        .execute(&pool)
+        .await
+        .expect("admin update setting");
+
+        let mut changed_config = Config::dev_default();
+        changed_config.server.base_url = "https://ignored-config.example".to_owned();
+        let effective = load_effective_config(&pool, changed_config)
+            .await
             .expect("load existing settings");
-        assert_eq!(effective.server.base_url, "https://from-db.example");
+        assert_eq!(effective.server.base_url, "https://from-admin.example");
     }
 }
