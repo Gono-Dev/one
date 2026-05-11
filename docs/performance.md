@@ -49,6 +49,21 @@ sudo GONO_PERF_CREATE_PASSWORD=1 GONO_PERF_PROFILE=quick scripts/perf-gate.sh ba
 - `soak`: long mixed load; optionally pass `GONO_PERF_RESTART_COMMAND` to restart mid-run.
 - `all`: runs every scenario in order.
 
+## Current Hot Paths
+
+The service keeps WebDAV metadata in xattrs and uses SQLite as an index/read-through cache. Current
+query behavior is:
+
+- `OC-FileId` uses the SQLite `file_ids.id` plus the persisted `settings["instance.id"]` suffix.
+- `SEARCH` by numeric `oc:fileid` reads the matching `file_ids` row directly.
+- `SEARCH` by `oc:favorite = 1` and `REPORT oc:filter-files` for favorites use the
+  `file_ids(owner, favorite, rel_path)` runtime index first, then verify each candidate through
+  `safe_existing_path`, scope filtering, and a metadata refresh.
+- Non-favorite broad searches still fall back to filesystem traversal so uncached files are not
+  silently omitted.
+- `change_log` pruning runs per enabled local user at startup and per owner after writes.
+- WebDAV locks are stored in SQLite and guarded by a process-local gate shared by principal scope.
+
 ## Medium Defaults
 
 - 20,000 seeded hot files.

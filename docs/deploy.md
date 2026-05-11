@@ -243,20 +243,29 @@ Before calling the deployment complete:
 ## Operational Notes
 
 - Back up SQLite, `data/users`, and xattrs from the same point in time.
+- `OC-FileId` is stable across ordinary restarts because the instance suffix is stored in SQLite
+  settings as `instance.id`. Preserve the database when restoring file data, otherwise clients will
+  see a new instance identity.
 - Run `GONE_CLOUD_CONFIG=/etc/gono-cloud/config.toml gono-cloud consistency-check` after restores or
   manual filesystem maintenance. It is read-only and reports SQLite/file/xattr mismatches, orphan
   `file_id` rows, and orphan dead props.
 - Run `GONE_CLOUD_CONFIG=/etc/gono-cloud/config.toml gono-cloud consistency-repair` first to preview safe
   fixes. Only run `gono-cloud consistency-repair --apply` after a backup; it can create missing
   `file_ids`, rewrite missing or stale xattrs/cache, and remove orphan `file_ids`/dead props.
+- There is no `metadata-prune` command in the current binary. Metadata cleanup is handled by
+  `consistency-check`, `consistency-repair`, normal write finalization, and `change_log` retention.
 - Configure `[sync] change_log_retention_days` and `change_log_min_entries` for the deployment's
-  sync history window. Rows older than the retention window are pruned only when they fall outside
-  the minimum retained row count; clients with a token older than the retained floor receive
+  sync history window. Startup prunes every enabled local user, and writes also prune the current
+  owner. Rows older than the retention window are pruned only when they fall outside the minimum
+  retained row count; clients with a token older than the retained floor receive
   `DAV:valid-sync-token` and must do a full resync.
 - Keep `data/users/gono/files` and `data/uploads` on the same partition. Startup rejects split partitions,
   validates the xattr namespace, and probes xattr writes before accepting traffic.
 - WebDAV locks are persisted in SQLite. A normal restart preserves active locks until they expire
   or the client sends `UNLOCK`; run a single service instance for now so lock conflict checks stay
-  serialized through the process-local lock guard.
+  serialized through the process-local lock guard shared by principal scope.
+- Favorite `SEARCH` and `oc:filter-files` use SQLite indexed candidates before touching the
+  filesystem. External deletes are still filtered out by path canonicalization and metadata refresh;
+  run consistency repair after manual filesystem maintenance to remove stale index rows.
 - Linux service status: `systemctl status gono-cloud`.
 - macOS service status: `launchctl print system/cloud.gono.gono-cloud`.

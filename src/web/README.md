@@ -15,6 +15,10 @@ The visual direction follows the logged-in `seek.li` management pages:
 The prototype is static on purpose. The Rust implementation should render equivalent markup directly
 from `src/admin/html.rs` and may inline `admin.css` or serve it as a small static asset.
 
+Current implementation note: `/admin/settings` edits only restart-applied runtime settings stored
+in SQLite `settings`. Non-editable values such as storage paths, database path, bind address, TLS
+files, and the generated `instance.id` stay outside the form.
+
 ## Files
 
 - `admin-users.html`: target markup for the user list, create-user form, app-password scope forms,

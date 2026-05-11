@@ -115,5 +115,8 @@ a reverse proxy, provide `cert_file` and `key_file` instead of using insecure HT
   and chunked uploads.
 - Notify Push uses WebSocket at `/push/ws` by default. If `[notify_push].path` is changed, update the
   exact WebSocket location to match, for example `location = /custom/ws`.
+- The service also exposes WebDAV through `/remote.php/dav`, `/remote.php/webdav`, the standard
+  `/remote.php/dav/files/{owner}` mount, and the root fallback. Keep all paths routed to the same
+  upstream; do not strip prefixes in Nginx.
 - `/metrics` is proxied by this site and still requires Basic Auth from the service.
 - After changing the file, run `nginx -t` before reloading Nginx.

@@ -14,9 +14,12 @@ The script creates a temporary config and data directory, starts `gono-cloud` ov
 
 - `/status.php`
 - capabilities
+- OCS user endpoints and v1 compatibility aliases
+- OCS v2 compatibility placeholders for shares, notifications, user status, direct editing, and translation probes
 - Basic Auth failure
 - `PROPFIND`
 - root path WebDAV compatibility
+- standard `/remote.php/dav/files/gono/` WebDAV compatibility
 - `PUT`, `GET`, `COPY`, `MOVE`, `DELETE`
 - Nextcloud chunking v2 `MKCOL + PUT chunks + MOVE .file`
 - notify_push capabilities and WebSocket authentication
@@ -57,6 +60,8 @@ Current compatibility status with litmus 0.17:
 - `basic`, `copymove`, `props`, `locks`, and `http` pass.
 - Dead property removals return explicit `404 Not Found` propstat entries.
 - Persisted lock discovery preserves the client-supplied owner value.
+- Locks are persisted in SQLite and conflict checks are serialized per principal scope inside one
+  service process.
 - The only remaining warning is `delete_fragment`: neon/litmus and the HTTP stack normalize `#fragment` before the request reaches the WebDAV service, so the handler cannot reliably distinguish `/frag/` from `/frag/#ment`. If a lower layer exposes `#` in the request target, `gono-cloud` rejects it before dispatch.
 
 ## Gono Cloud Desktop Smoke
