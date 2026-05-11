@@ -58,22 +58,9 @@ impl AppState {
             bootstrap.generated_admin_users =
                 db::ensure_configured_admin_users(&db, &config.admin.users).await?;
         }
+        let instance_id = settings::get_or_create_instance_id(&db).await?;
         let sync_config = config.sync.clone();
-        let prune = db::prune_change_log(
-            &db,
-            BOOTSTRAP_USER,
-            sync_config.change_log_retention_days,
-            sync_config.change_log_min_entries,
-        )
-        .await?;
-        if prune.deleted_rows > 0 {
-            info!(
-                deleted_rows = prune.deleted_rows,
-                floor_token = prune.floor_token,
-                current_token = prune.current_token,
-                "pruned change_log during startup"
-            );
-        }
+        prune_startup_change_logs(&db, &sync_config).await?;
         let user_store = Arc::new(SqliteUserStore::new(db.clone()));
         let notify_push = config
             .notify_push
@@ -93,7 +80,7 @@ impl AppState {
                 admin_csrf_token: generate_csrf_token(),
                 owner: BOOTSTRAP_USER.to_owned(),
                 base_url: config.server.base_url,
-                instance_id: "phase1".to_owned(),
+                instance_id,
                 xattr_ns: config.storage.xattr_ns,
                 sync_config,
                 notify_push_config: config.notify_push,
@@ -161,4 +148,33 @@ fn generate_csrf_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+async fn prune_startup_change_logs(
+    pool: &SqlitePool,
+    sync_config: &SyncConfig,
+) -> anyhow::Result<()> {
+    for user in db::list_local_users(pool)
+        .await?
+        .into_iter()
+        .filter(|user| user.enabled)
+    {
+        let prune = db::prune_change_log(
+            pool,
+            &user.username,
+            sync_config.change_log_retention_days,
+            sync_config.change_log_min_entries,
+        )
+        .await?;
+        if prune.deleted_rows > 0 {
+            info!(
+                owner = %user.username,
+                deleted_rows = prune.deleted_rows,
+                floor_token = prune.floor_token,
+                current_token = prune.current_token,
+                "pruned change_log during startup"
+            );
+        }
+    }
+    Ok(())
 }

@@ -12,7 +12,7 @@ use sqlx::{
 use crate::{
     config::Config,
     db::{self, BOOTSTRAP_USER},
-    storage,
+    settings, storage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,6 +698,7 @@ async fn apply_repair_actions(
     actions: Vec<RepairAction>,
 ) -> Result<Vec<RepairAction>> {
     let mut applied = Vec::with_capacity(actions.len());
+    let instance_id = settings::get_or_create_instance_id(pool).await?;
 
     for mut action in actions {
         match action.kind {
@@ -706,7 +707,15 @@ async fn apply_repair_actions(
                 action.applied = true;
             }
             RepairActionKind::EnsureFileRecord => {
-                ensure_file_record(pool, roots, xattr_ns, &action.owner, &action.rel_path).await?;
+                ensure_file_record(
+                    pool,
+                    roots,
+                    xattr_ns,
+                    &instance_id,
+                    &action.owner,
+                    &action.rel_path,
+                )
+                .await?;
                 action.applied = true;
             }
             RepairActionKind::RefreshFileMetadata => {
@@ -750,6 +759,7 @@ async fn ensure_file_record(
     pool: &SqlitePool,
     roots: &ExistingStorageRoots,
     xattr_ns: &str,
+    instance_id: &str,
     owner: &str,
     rel_path: &str,
 ) -> Result<()> {
@@ -763,7 +773,7 @@ async fn ensure_file_record(
             owner,
             rel_path: &rel_path_buf,
             abs_path: &abs_path,
-            instance_id: "phase1",
+            instance_id,
             xattr_ns,
         },
     )

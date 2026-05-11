@@ -1,4 +1,6 @@
 use anyhow::{bail, Context};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rand::{rngs::OsRng, RngCore};
 use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 
@@ -24,6 +26,7 @@ const EDITABLE_KEYS: &[&str] = &[
     "admin.enabled",
     "admin.users",
 ];
+const INSTANCE_ID_KEY: &str = "instance.id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsUpdate {
@@ -47,6 +50,32 @@ pub struct SettingsUpdate {
 pub async fn load_effective_config(pool: &SqlitePool, base: Config) -> anyhow::Result<Config> {
     seed_missing_settings(pool, &base).await?;
     apply_saved_settings(pool, base).await
+}
+
+pub async fn get_or_create_instance_id(pool: &SqlitePool) -> anyhow::Result<String> {
+    if let Some(instance_id) = load_instance_id(pool).await? {
+        return Ok(instance_id);
+    }
+
+    let instance_id = generate_instance_id();
+    let now = unix_timestamp();
+    sqlx::query(
+        r#"
+        INSERT INTO settings(key, value_json, updated_at, updated_by)
+        VALUES(?1, ?2, ?3, 'system')
+        ON CONFLICT(key) DO NOTHING
+        "#,
+    )
+    .bind(INSTANCE_ID_KEY)
+    .bind(serde_json::to_string(&instance_id)?)
+    .bind(now)
+    .execute(pool)
+    .await
+    .context("persist instance id")?;
+
+    load_instance_id(pool)
+        .await?
+        .context("instance id missing after creation")
 }
 
 pub async fn apply_saved_settings(pool: &SqlitePool, mut config: Config) -> anyhow::Result<Config> {
@@ -164,6 +193,50 @@ fn validate_config_subset(config: &Config) -> anyhow::Result<()> {
     }
     for username in &config.admin.users {
         db::validate_username(username)?;
+    }
+    Ok(())
+}
+
+async fn load_instance_id(pool: &SqlitePool) -> anyhow::Result<Option<String>> {
+    let Some(value_json) = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT value_json
+        FROM settings
+        WHERE key = ?1
+        "#,
+    )
+    .bind(INSTANCE_ID_KEY)
+    .fetch_optional(pool)
+    .await
+    .context("load instance id")?
+    else {
+        return Ok(None);
+    };
+
+    let instance_id: String =
+        serde_json::from_str(&value_json).context("parse instance id setting JSON")?;
+    validate_instance_id(&instance_id)?;
+    Ok(Some(instance_id))
+}
+
+fn generate_instance_id() -> String {
+    let mut bytes = [0_u8; 12];
+    OsRng.fill_bytes(&mut bytes);
+    format!("i{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn validate_instance_id(value: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        bail!("instance id cannot be empty");
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("instance id contains unsupported characters");
+    }
+    if !value.as_bytes()[0].is_ascii_alphabetic() {
+        bail!("instance id must start with an ASCII letter");
     }
     Ok(())
 }

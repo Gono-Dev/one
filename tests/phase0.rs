@@ -1761,9 +1761,12 @@ async fn bootstrap_password_is_generated_once_and_reused() {
         .await
         .expect("verify generated password")
         .is_some());
+    assert!(first.state.instance_id.starts_with('i'));
+    assert_ne!(first.state.instance_id, "phase1");
 
     let second = AppState::initialize(config).await.expect("second init");
     assert_eq!(second.bootstrap.generated_password, None);
+    assert_eq!(second.state.instance_id, first.state.instance_id);
     assert!(second
         .state
         .user_store
@@ -1771,6 +1774,58 @@ async fn bootstrap_password_is_generated_once_and_reused() {
         .await
         .expect("old password still works")
         .is_some());
+}
+
+#[tokio::test]
+async fn startup_prunes_change_log_for_all_enabled_users() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut config = test_config(&temp);
+    config.sync.change_log_retention_days = 0;
+    config.sync.change_log_min_entries = 1;
+
+    let initialized = AppState::initialize(config.clone())
+        .await
+        .expect("first init");
+    db::create_local_user(&initialized.state.db, "alice", Some("Alice"))
+        .await
+        .expect("create alice");
+
+    for (owner, file_id) in [(BOOTSTRAP_USER, 1_i64), ("alice", 2_i64)] {
+        for index in 0..3 {
+            let rel_path = format!("{owner}-{index}.txt");
+            db::record_change(
+                &initialized.state.db,
+                owner,
+                file_id,
+                std::path::Path::new(&rel_path),
+                "create",
+            )
+            .await
+            .expect("record change");
+        }
+    }
+    sqlx::query("UPDATE change_log SET changed_at = ?1")
+        .bind(db::unix_timestamp() - 86_400)
+        .execute(&initialized.state.db)
+        .await
+        .expect("age change log rows");
+    drop(initialized);
+
+    let restarted = AppState::initialize(config)
+        .await
+        .expect("second init prunes all users");
+
+    for owner in [BOOTSTRAP_USER, "alice"] {
+        let changes = db::list_change_log(&restarted.state.db, owner)
+            .await
+            .expect("list changes");
+        assert_eq!(changes.len(), 1, "{owner}");
+        assert_eq!(changes[0].sync_token, 3, "{owner}");
+        let floor = db::change_log_floor_token(&restarted.state.db, owner, 3)
+            .await
+            .expect("floor token");
+        assert_eq!(floor, 2, "{owner}");
+    }
 }
 
 #[tokio::test]
