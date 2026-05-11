@@ -2132,7 +2132,7 @@ async fn admin_status_page_shows_runtime_state() {
     assert!(body.contains("Available space"));
     assert!(body.contains("Total space"));
     assert!(body.contains("Upload minimum free space"));
-    assert!(body.contains(" ms)"));
+    assert!(body.contains(".") && body.contains(" ms)"));
     assert!(body.contains("Auth Rate Limit"));
     assert!(body.contains("Active throttled keys"));
     assert!(body.contains("Total failed attempts"));

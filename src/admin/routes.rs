@@ -613,10 +613,10 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
     let change_log_floor_token =
         db::change_log_floor_token(&state.db, &state.owner, sync_token).await?;
     let (storage_available, storage_available_ms) =
-        measure_elapsed_ms(|| Ok(fs2::available_space(&state.data_root)?))?;
+        measure_elapsed_millis(|| Ok(fs2::available_space(&state.data_root)?))?;
     let (storage_total, storage_total_ms) =
-        measure_elapsed_ms(|| Ok(fs2::total_space(&state.data_root)?))?;
-    let (upload_reserved, upload_reserved_ms) = measure_elapsed_ms(|| {
+        measure_elapsed_millis(|| Ok(fs2::total_space(&state.data_root)?))?;
+    let (upload_reserved, upload_reserved_ms) = measure_elapsed_millis(|| {
         Ok::<_, anyhow::Error>(upload_space::reserved_space_threshold(
             storage_total,
             &state.config.storage,
@@ -746,16 +746,16 @@ fn status_row(label: impl ToString, value: impl ToString) -> html::StatusRow {
     }
 }
 
-fn measure_elapsed_ms<T>(
+fn measure_elapsed_millis<T>(
     operation: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<(T, u128)> {
+) -> anyhow::Result<(T, f64)> {
     let started = Instant::now();
     let value = operation()?;
-    Ok((value, started.elapsed().as_millis()))
+    Ok((value, started.elapsed().as_secs_f64() * 1000.0))
 }
 
-fn format_timed_value(value: String, elapsed_ms: u128) -> String {
-    format!("{value} ({elapsed_ms} ms)")
+fn format_timed_value(value: String, elapsed_ms: f64) -> String {
+    format!("{value} ({elapsed_ms:.3} ms)")
 }
 
 fn format_bytes(bytes: u64) -> String {
