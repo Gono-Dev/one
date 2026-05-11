@@ -397,6 +397,26 @@ load_existing_config_defaults() {
   [[ -n "${value}" ]] && ADMIN_ENABLED="${value}"
 }
 
+inline_table_header_lines() {
+  local file="$1"
+  awk '
+    /^[[:space:]]*\[[^]]+\][[:space:]]+[^#[:space:]]/ {
+      printf "%s:%s\n", NR, $0
+    }
+  ' "${file}"
+}
+
+validate_existing_config_for_preserve() {
+  local invalid_lines
+  invalid_lines="$(inline_table_header_lines "${CONFIG_FILE}")"
+  if [[ -n "${invalid_lines}" ]]; then
+    warn "existing config is not valid TOML; table headers such as [server] must be on their own line"
+    printf '%s\n' "${invalid_lines}" >&2
+    return 1
+  fi
+  return 0
+}
+
 set_platform_defaults() {
   PLATFORM="$(detect_platform)"
 
@@ -809,12 +829,24 @@ prompt_new_config_values() {
 }
 
 configure_config_file() {
+  local backup_path
+
   if [[ -f "${CONFIG_FILE}" ]]; then
     log "existing config found: ${CONFIG_FILE}"
     if prompt_yes_no "Keep existing config during this install/upgrade?" "y"; then
-      PRESERVE_CONFIG="1"
-      load_existing_config_defaults
-      return
+      if ! validate_existing_config_for_preserve; then
+        if prompt_yes_no "Back up the existing config and write a fresh one?" "y"; then
+          backup_path="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+          cp -p "${CONFIG_FILE}" "${backup_path}"
+          log "backed up existing config to ${backup_path}"
+        else
+          die "fix ${CONFIG_FILE} and rerun the installer"
+        fi
+      else
+        PRESERVE_CONFIG="1"
+        load_existing_config_defaults
+        return
+      fi
     fi
   fi
 
