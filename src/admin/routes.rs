@@ -631,15 +631,6 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
         (
             vec![
                 status_row("Runtime", "Enabled"),
-                status_row("WebSocket path", &state.notify_push_config.path),
-                status_row(
-                    "Advertised types",
-                    &state.notify_push_config.advertised_types.join(", "),
-                ),
-                status_row(
-                    "User connection limit",
-                    state.notify_push_config.user_connection_limit,
-                ),
                 status_row("Active connections", metrics.active_connections),
                 status_row("Active users", metrics.active_users),
                 status_row("Total connections", metrics.total_connections),
@@ -658,29 +649,14 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
             connections,
         )
     } else {
-        (
-            vec![
-                status_row("Runtime", "Disabled"),
-                status_row("Configured path", &state.notify_push_config.path),
-                status_row(
-                    "Advertised types",
-                    &state.notify_push_config.advertised_types.join(", "),
-                ),
-            ],
-            Vec::new(),
-        )
+        (vec![status_row("Runtime", "Disabled")], Vec::new())
     };
 
     Ok(html::StatusPageData {
         sections: vec![
             html::StatusSection {
                 title: "Server".to_owned(),
-                rows: vec![
-                    status_row("Base URL", &state.base_url),
-                    status_row("Bind", &state.config.server.bind),
-                    status_row("Instance ID", &state.instance_id),
-                    status_row("Admin enabled", enabled_label(state.admin_config.enabled)),
-                ],
+                rows: vec![status_row("Instance ID", &state.instance_id)],
             },
             html::StatusSection {
                 title: "Storage".to_owned(),
@@ -688,21 +664,14 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                     status_row("Data root", state.data_root.display()),
                     status_row("Files root", state.files_root.display()),
                     status_row("Uploads root", state.uploads_root.display()),
-                    status_row("Xattr namespace", &state.xattr_ns),
                     status_row("Available space", format_bytes(storage_available)),
                     status_row("Total space", format_bytes(storage_total)),
                     status_row("Upload minimum free space", format_bytes(upload_reserved)),
-                    status_row(
-                        "Upload minimum free percent",
-                        format!("{}%", state.config.storage.upload_min_free_percent.min(100)),
-                    ),
                 ],
             },
             html::StatusSection {
                 title: "Database".to_owned(),
                 rows: vec![
-                    status_row("Path", &state.config.db.path),
-                    status_row("Max connections", state.config.db.max_connections),
                     status_row("Local users", users.len()),
                     status_row("Enabled users", enabled_users),
                     status_row("App passwords", app_passwords),
@@ -729,14 +698,6 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                     status_row("Owner", &state.owner),
                     status_row("Current sync token", sync_token),
                     status_row("Change log floor token", change_log_floor_token),
-                    status_row(
-                        "Change log retention days",
-                        state.sync_config.change_log_retention_days,
-                    ),
-                    status_row(
-                        "Change log min entries",
-                        state.sync_config.change_log_min_entries,
-                    ),
                 ],
             },
             html::StatusSection {
@@ -767,14 +728,6 @@ fn status_row(label: impl ToString, value: impl ToString) -> html::StatusRow {
     html::StatusRow {
         label: label.to_string(),
         value: value.to_string(),
-    }
-}
-
-fn enabled_label(enabled: bool) -> &'static str {
-    if enabled {
-        "Enabled"
-    } else {
-        "Disabled"
     }
 }
 
