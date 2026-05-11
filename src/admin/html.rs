@@ -999,6 +999,17 @@ label { color: var(--muted-strong); font-size: 12px; font-weight: 800; }
   font-size: 12px;
   line-height: 1.45;
 }
+.input[readonly],
+.input:disabled,
+.textarea[readonly] {
+  color: var(--muted-strong);
+  background: #edf3f8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 1;
+  -webkit-text-fill-color: var(--muted-strong);
+}
 .compact-input { min-height: 32px; }
 .button {
   min-height: 34px;
