@@ -22,6 +22,24 @@ pub struct OneTimePassword {
     pub password: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusPageData {
+    pub sections: Vec<StatusSection>,
+    pub notify_connections: Vec<StatusRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusSection {
+    pub title: String,
+    pub rows: Vec<StatusRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusRow {
+    pub label: String,
+    pub value: String,
+}
+
 pub fn render_users_page(
     principal_username: &str,
     csrf_token: &str,
@@ -61,6 +79,7 @@ pub fn render_users_page(
         </div>
         <nav class="nav-list">
           <a class="nav-item" href="/admin/users" aria-current="page">Users</a>
+          <a class="nav-item" href="/admin/status">Status</a>
           <a class="nav-item" href="/admin/settings">Settings</a>
         </nav>
         <p class="sidebar-note">Signed in with Basic Auth. To switch users, clear browser credentials for this site.</p>
@@ -281,6 +300,7 @@ pub fn render_settings_page(
         </div>
         <nav class="nav-list">
           <a class="nav-item" href="/admin/users">Users</a>
+          <a class="nav-item" href="/admin/status">Status</a>
           <a class="nav-item" href="/admin/settings" aria-current="page">Settings</a>
         </nav>
         <p class="sidebar-note">Saved settings are stored in SQLite. Startup-only paths remain read-only.</p>
@@ -372,6 +392,122 @@ pub fn render_settings_page(
         advertised_types = escape_html(&advertised_types),
         admin_users = escape_html(&admin_users),
     )
+}
+
+pub fn render_status_page(
+    principal_username: &str,
+    config: &Config,
+    status: &StatusPageData,
+) -> String {
+    let security_notice_html = render_http_security_notice(&config.server.base_url);
+    let sections = render_status_sections(&status.sections);
+    let notify_connections = render_status_connection_section(&status.notify_connections);
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gono Cloud Status</title>
+    <style>{STYLE}</style>
+  </head>
+  <body>
+    <div class="admin-shell">
+      <aside class="sidebar" aria-label="Admin navigation">
+        <div class="brand">
+          <span class="brand-mark">G</span>
+          <div>
+            <strong>Gono Cloud</strong>
+            <span>Admin console</span>
+          </div>
+        </div>
+        <nav class="nav-list">
+          <a class="nav-item" href="/admin/users">Users</a>
+          <a class="nav-item" href="/admin/status" aria-current="page">Status</a>
+          <a class="nav-item" href="/admin/settings">Settings</a>
+        </nav>
+        <p class="sidebar-note">Runtime counters are sampled from the current process.</p>
+      </aside>
+      <main class="admin-main">
+        <div class="page-header">
+          <h1>System Status</h1>
+          <span>Admin: {principal}</span>
+        </div>
+        {security_notice_html}
+        {sections}
+        {notify_connections}
+      </main>
+    </div>
+  </body>
+</html>"#,
+        principal = escape_html(principal_username),
+        security_notice_html = security_notice_html,
+        sections = sections,
+        notify_connections = notify_connections,
+    )
+}
+
+fn render_status_sections(sections: &[StatusSection]) -> String {
+    sections
+        .iter()
+        .map(|section| {
+            format!(
+                r#"<section class="card" aria-labelledby="{id}">
+  <div class="card-header"><h2 id="{id}">{title}</h2></div>
+  <div class="status-table">{rows}</div>
+</section>"#,
+                id = escape_attr(&format!("status-{}", status_anchor(&section.title))),
+                title = escape_html(&section.title),
+                rows = render_status_rows(&section.rows),
+            )
+        })
+        .collect::<String>()
+}
+
+fn render_status_connection_section(rows: &[StatusRow]) -> String {
+    let body = if rows.is_empty() {
+        r#"<p class="status-empty">No active notify_push clients.</p>"#.to_owned()
+    } else {
+        format!(
+            r#"<div class="status-table">{}</div>"#,
+            render_status_rows(rows)
+        )
+    };
+    format!(
+        r#"<section class="card" aria-labelledby="status-notify-clients">
+  <div class="card-header"><h2 id="status-notify-clients">Notify Push Clients</h2></div>
+  {body}
+</section>"#,
+        body = body,
+    )
+}
+
+fn render_status_rows(rows: &[StatusRow]) -> String {
+    rows.iter()
+        .map(|row| {
+            format!(
+                r#"<div class="status-row"><span>{label}</span><strong>{value}</strong></div>"#,
+                label = escape_html(&row.label),
+                value = escape_html(&row.value),
+            )
+        })
+        .collect::<String>()
+}
+
+fn status_anchor(title: &str) -> String {
+    title
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch.is_whitespace() {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn render_http_security_notice(base_url: &str) -> String {
@@ -1006,6 +1142,32 @@ label { color: var(--muted-strong); font-size: 12px; font-weight: 800; }
   justify-content: flex-end;
   margin-bottom: 18px;
 }
+.status-table { display: grid; }
+.status-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 30%) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+}
+.status-row:first-child { border-top: 0; }
+.status-row span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+.status-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.status-empty {
+  margin: 0;
+  padding: 14px 20px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
 .modal-popover {
   position: fixed;
   inset: 0;
@@ -1037,6 +1199,7 @@ label { color: var(--muted-strong); font-size: 12px; font-weight: 800; }
   .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
   .admin-main { padding: 18px 12px 32px; }
   .form-grid, .scope-form-grid, .settings-grid { grid-template-columns: 1fr; }
+  .status-row { grid-template-columns: 1fr; }
   .field-wide { grid-column: auto; }
   .user-summary-line { align-items: flex-start; flex-direction: column; }
   .user-toolbar, .row-actions { justify-content: flex-start; }

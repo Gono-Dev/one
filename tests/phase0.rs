@@ -2016,6 +2016,45 @@ async fn admin_pages_warn_when_base_url_uses_http() {
 }
 
 #[tokio::test]
+async fn admin_status_page_shows_runtime_state() {
+    let (app, _temp, password, state) = app_with_config(|config| {
+        config.admin.enabled = true;
+        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
+    })
+    .await;
+    let _receiver = state
+        .notify_push
+        .as_ref()
+        .expect("notify runtime")
+        .subscribe(BOOTSTRAP_USER)
+        .expect("subscribe notify client");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/status")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("System Status"));
+    assert!(body.contains("Notify Push"));
+    assert!(body.contains("Active connections"));
+    assert!(body.contains("1 connection(s)"));
+    assert!(body.contains("Notify Push Clients"));
+    assert!(body.contains(BOOTSTRAP_USER));
+    assert!(body.contains("Database"));
+    assert!(body.contains("Storage"));
+}
+
+#[tokio::test]
 async fn configured_admin_user_is_created_for_admin_access() {
     let temp = TempDir::new().expect("tempdir");
     let mut config = test_config(&temp);

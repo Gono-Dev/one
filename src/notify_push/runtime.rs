@@ -60,6 +60,12 @@ pub struct NotifyMetricsSnapshot {
     pub test_endpoint_hits: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyConnectionSnapshot {
+    pub user: String,
+    pub connections: usize,
+}
+
 impl NotifyRuntime {
     pub fn new(config: NotifyPushConfig) -> Arc<Self> {
         let runtime = Arc::new(Self {
@@ -226,6 +232,20 @@ impl NotifyRuntime {
             messages_sent_custom: self.metrics.messages_sent_custom.load(Ordering::Relaxed),
             test_endpoint_hits: self.metrics.test_endpoint_hits.load(Ordering::Relaxed),
         }
+    }
+
+    pub fn active_connections_by_user(&self) -> Vec<NotifyConnectionSnapshot> {
+        let mut connections = self
+            .channels
+            .iter()
+            .map(|entry| NotifyConnectionSnapshot {
+                user: entry.key().clone(),
+                connections: entry.value().receiver_count(),
+            })
+            .filter(|entry| entry.connections > 0)
+            .collect::<Vec<_>>();
+        connections.sort_by(|left, right| left.user.cmp(&right.user));
+        connections
     }
 
     fn send_to_user(&self, user: &str, message: PushMessage) {

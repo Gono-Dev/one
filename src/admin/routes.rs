@@ -26,6 +26,7 @@ use crate::{
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/users", get(users_page).post(create_user))
+        .route("/status", get(status_page))
         .route("/settings", get(settings_page).post(save_settings))
         .route("/app-passwords", post(create_app_password))
         .route("/users/{username}/display-name", post(update_display_name))
@@ -138,6 +139,25 @@ async fn settings_page(
     Extension(principal): Extension<Principal>,
 ) -> Response {
     render_settings(&state, &principal, None, false).await
+}
+
+async fn status_page(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+) -> Response {
+    match load_status_page_data(&state).await {
+        Ok(status) => Html(html::render_status_page(
+            &principal.username,
+            &state.config,
+            &status,
+        ))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load status: {err:#}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn save_settings(
@@ -655,6 +675,190 @@ async fn render_settings_error(
         false,
     ))
     .into_response()
+}
+
+async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusPageData> {
+    let users = db::list_local_users(&state.db).await?;
+    let enabled_users = users.iter().filter(|user| user.enabled).count();
+    let app_passwords = users
+        .iter()
+        .map(|user| user.app_password_count)
+        .sum::<i64>();
+    let file_records = count_rows(&state.db, "SELECT COUNT(*) FROM file_ids").await?;
+    let change_log_entries = count_rows(&state.db, "SELECT COUNT(*) FROM change_log").await?;
+    let upload_sessions = count_rows(&state.db, "SELECT COUNT(*) FROM upload_sessions").await?;
+    let expired_upload_sessions = count_rows_bound_i64(
+        &state.db,
+        "SELECT COUNT(*) FROM upload_sessions WHERE expires_at <= ?1",
+        db::unix_timestamp(),
+    )
+    .await?;
+    let sync_token = db::current_sync_token(&state.db, &state.owner).await?;
+    let change_log_floor_token =
+        db::change_log_floor_token(&state.db, &state.owner, sync_token).await?;
+    let storage_available = fs2::available_space(&state.data_root)?;
+    let storage_total = fs2::total_space(&state.data_root)?;
+
+    let (notify_rows, notify_connections) = if let Some(runtime) = &state.notify_push {
+        let metrics = runtime.metrics();
+        let connections = runtime
+            .active_connections_by_user()
+            .into_iter()
+            .map(|connection| html::StatusRow {
+                label: connection.user,
+                value: format!("{} connection(s)", connection.connections),
+            })
+            .collect::<Vec<_>>();
+        (
+            vec![
+                status_row("Runtime", "Enabled"),
+                status_row("WebSocket path", &state.notify_push_config.path),
+                status_row(
+                    "Advertised types",
+                    &state.notify_push_config.advertised_types.join(", "),
+                ),
+                status_row(
+                    "User connection limit",
+                    state.notify_push_config.user_connection_limit,
+                ),
+                status_row("Active connections", metrics.active_connections),
+                status_row("Active users", metrics.active_users),
+                status_row("Total connections", metrics.total_connections),
+                status_row("Events received", metrics.events_received),
+                status_row("Auth failures", metrics.auth_failures),
+                status_row("Messages sent", metrics.messages_sent),
+                status_row("File messages sent", metrics.messages_sent_file),
+                status_row("Activity messages sent", metrics.messages_sent_activity),
+                status_row(
+                    "Notification messages sent",
+                    metrics.messages_sent_notification,
+                ),
+                status_row("Custom messages sent", metrics.messages_sent_custom),
+                status_row("Test endpoint hits", metrics.test_endpoint_hits),
+            ],
+            connections,
+        )
+    } else {
+        (
+            vec![
+                status_row("Runtime", "Disabled"),
+                status_row("Configured path", &state.notify_push_config.path),
+                status_row(
+                    "Advertised types",
+                    &state.notify_push_config.advertised_types.join(", "),
+                ),
+            ],
+            Vec::new(),
+        )
+    };
+
+    Ok(html::StatusPageData {
+        sections: vec![
+            html::StatusSection {
+                title: "Server".to_owned(),
+                rows: vec![
+                    status_row("Base URL", &state.base_url),
+                    status_row("Bind", &state.config.server.bind),
+                    status_row("Instance ID", &state.instance_id),
+                    status_row("Admin enabled", enabled_label(state.admin_config.enabled)),
+                ],
+            },
+            html::StatusSection {
+                title: "Storage".to_owned(),
+                rows: vec![
+                    status_row("Data root", state.data_root.display()),
+                    status_row("Files root", state.files_root.display()),
+                    status_row("Uploads root", state.uploads_root.display()),
+                    status_row("Xattr namespace", &state.xattr_ns),
+                    status_row("Available space", format_bytes(storage_available)),
+                    status_row("Total space", format_bytes(storage_total)),
+                ],
+            },
+            html::StatusSection {
+                title: "Database".to_owned(),
+                rows: vec![
+                    status_row("Path", &state.config.db.path),
+                    status_row("Max connections", state.config.db.max_connections),
+                    status_row("Local users", users.len()),
+                    status_row("Enabled users", enabled_users),
+                    status_row("App passwords", app_passwords),
+                    status_row("File records", file_records),
+                    status_row("Change log entries", change_log_entries),
+                    status_row("Upload sessions", upload_sessions),
+                    status_row("Expired upload sessions", expired_upload_sessions),
+                ],
+            },
+            html::StatusSection {
+                title: "Sync".to_owned(),
+                rows: vec![
+                    status_row("Owner", &state.owner),
+                    status_row("Current sync token", sync_token),
+                    status_row("Change log floor token", change_log_floor_token),
+                    status_row(
+                        "Change log retention days",
+                        state.sync_config.change_log_retention_days,
+                    ),
+                    status_row(
+                        "Change log min entries",
+                        state.sync_config.change_log_min_entries,
+                    ),
+                ],
+            },
+            html::StatusSection {
+                title: "Notify Push".to_owned(),
+                rows: notify_rows,
+            },
+        ],
+        notify_connections,
+    })
+}
+
+async fn count_rows(pool: &sqlx::SqlitePool, query: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(query).fetch_one(pool).await?)
+}
+
+async fn count_rows_bound_i64(
+    pool: &sqlx::SqlitePool,
+    query: &str,
+    value: i64,
+) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(query)
+        .bind(value)
+        .fetch_one(pool)
+        .await?)
+}
+
+fn status_row(label: impl ToString, value: impl ToString) -> html::StatusRow {
+    html::StatusRow {
+        label: label.to_string(),
+        value: value.to_string(),
+    }
+}
+
+fn enabled_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Enabled"
+    } else {
+        "Disabled"
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = UNITS[0];
+    for next_unit in UNITS.iter().skip(1) {
+        if value < 1024.0 {
+            break;
+        }
+        value /= 1024.0;
+        unit = next_unit;
+    }
+    if unit == "B" {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {unit}")
+    }
 }
 
 async fn guard_last_admin(state: &Arc<AppState>, username: &str) -> Result<(), Response> {
