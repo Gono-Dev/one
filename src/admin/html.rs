@@ -210,36 +210,14 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
 
 pub fn render_settings_page(principal_username: &str, config: &Config) -> String {
     let security_notice_html = render_http_security_notice(&config.server.base_url);
-    let advertised_types = config.notify_push.advertised_types.join("\n");
     let admin_users = config.admin.users.join("\n");
-    let server_base_url =
-        readonly_input_text("server_base_url", "Base URL", &config.server.base_url);
-    let server_bind = readonly_text("Bind", &config.server.bind);
     let server_cert_file = readonly_text("TLS cert file", &config.server.cert_file);
     let server_key_file = readonly_text("TLS key file", &config.server.key_file);
     let auth_realm = readonly_input_text("auth_realm", "Realm", &config.auth.realm);
-    let sync_retention = readonly_input_number(
-        "sync_change_log_retention_days",
-        "Change log retention days",
-        config.sync.change_log_retention_days,
-    );
-    let sync_min_entries = readonly_input_number(
-        "sync_change_log_min_entries",
-        "Change log min entries",
-        config.sync.change_log_min_entries,
-    );
-    let notify_enabled =
-        readonly_input_bool("notify_push_enabled", "Enabled", config.notify_push.enabled);
-    let notify_path = readonly_input_text("notify_push_path", "Path", &config.notify_push.path);
     let notify_pre_auth = readonly_input_number(
         "notify_push_pre_auth_ttl_secs",
         "Pre-auth TTL seconds",
         config.notify_push.pre_auth_ttl_secs,
-    );
-    let notify_limit = readonly_input_number(
-        "notify_push_user_connection_limit",
-        "User connection limit",
-        config.notify_push.user_connection_limit,
     );
     let notify_debounce = readonly_input_number(
         "notify_push_max_debounce_secs",
@@ -261,19 +239,10 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
         "Max connection seconds",
         config.notify_push.max_connection_secs,
     );
-    let admin_enabled = readonly_input_bool("admin_enabled", "Enabled", config.admin.enabled);
-    let storage_data_dir = readonly_text("Data dir", &config.storage.data_dir);
-    let storage_xattr_ns = readonly_text("Xattr namespace", &config.storage.xattr_ns);
     let storage_upload_min_free_bytes = readonly_text(
         "Upload minimum free bytes",
         config.storage.upload_min_free_bytes,
     );
-    let storage_upload_min_free_percent = readonly_text(
-        "Upload minimum free percent",
-        format!("{}%", config.storage.upload_min_free_percent.min(100)),
-    );
-    let db_path = readonly_text("Path", &config.db.path);
-    let db_max_connections = readonly_text("Max connections", config.db.max_connections);
 
     format!(
         r#"<!doctype html>
@@ -312,8 +281,6 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
           <section class="card" aria-labelledby="server-settings-title">
             <div class="card-header"><h2 id="server-settings-title">Server</h2></div>
             <div class="settings-grid">
-              {server_base_url}
-              {server_bind}
               {server_cert_file}
               {server_key_file}
             </div>
@@ -324,34 +291,19 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
               {auth_realm}
             </div>
           </section>
-          <section class="card" aria-labelledby="sync-settings-title">
-            <div class="card-header"><h2 id="sync-settings-title">Sync</h2></div>
-            <div class="settings-grid">
-              {sync_retention}
-              {sync_min_entries}
-            </div>
-          </section>
           <section class="card" aria-labelledby="notify-settings-title">
             <div class="card-header"><h2 id="notify-settings-title">Notify Push</h2></div>
             <div class="settings-grid">
-              {notify_enabled}
-              {notify_path}
               {notify_pre_auth}
-              {notify_limit}
               {notify_debounce}
               {notify_ping}
               {notify_auth_timeout}
               {notify_max_connection}
-              <div class="field field-wide">
-                <label for="notify_push_advertised_types">Advertised types</label>
-                <textarea class="input textarea" id="notify_push_advertised_types" name="notify_push_advertised_types" rows="3" readonly aria-readonly="true">{advertised_types}</textarea>
-              </div>
             </div>
           </section>
           <section class="card" aria-labelledby="admin-settings-title">
             <div class="card-header"><h2 id="admin-settings-title">Admin</h2></div>
             <div class="settings-grid">
-              {admin_enabled}
               <div class="field field-wide">
                 <label for="admin_users">Admin users</label>
                 <textarea class="input textarea" id="admin_users" name="admin_users" rows="3" readonly aria-readonly="true">{admin_users}</textarea>
@@ -361,17 +313,7 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
           <section class="card" aria-labelledby="storage-settings-title">
             <div class="card-header"><h2 id="storage-settings-title">Storage</h2></div>
             <div class="settings-grid">
-              {storage_data_dir}
-              {storage_xattr_ns}
               {storage_upload_min_free_bytes}
-              {storage_upload_min_free_percent}
-            </div>
-          </section>
-          <section class="card" aria-labelledby="db-settings-title">
-            <div class="card-header"><h2 id="db-settings-title">Database</h2></div>
-            <div class="settings-grid">
-              {db_path}
-              {db_max_connections}
             </div>
           </section>
         </div>
@@ -381,7 +323,6 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
 </html>"#,
         principal = escape_html(principal_username),
         security_notice_html = security_notice_html,
-        advertised_types = escape_html(&advertised_types),
         admin_users = escape_html(&admin_users),
     )
 }
@@ -536,23 +477,6 @@ fn readonly_input_number(name: &str, label: &str, value: impl ToString) -> Strin
         name = name_attr,
         label = escape_html(label),
         value = escape_attr(&value.to_string())
-    )
-}
-
-fn readonly_input_bool(name: &str, label: &str, value: bool) -> String {
-    let true_selected = if value { " selected" } else { "" };
-    let false_selected = if value { "" } else { " selected" };
-    let name_attr = escape_attr(name);
-    format!(
-        r#"<div class="field">
-  <label for="{name}">{label}</label>
-  <select class="input" id="{name}" name="{name}" disabled aria-disabled="true">
-    <option value="true"{true_selected}>Enabled</option>
-    <option value="false"{false_selected}>Disabled</option>
-  </select>
-</div>"#,
-        name = name_attr,
-        label = escape_html(label),
     )
 }
 
