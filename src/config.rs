@@ -31,7 +31,7 @@ pub struct StorageConfig {
     pub xattr_ns: String,
     #[serde(default = "StorageConfig::default_upload_min_free_bytes")]
     pub upload_min_free_bytes: u64,
-    #[serde(default)]
+    #[serde(default = "StorageConfig::default_upload_min_free_percent")]
     pub upload_min_free_percent: u8,
 }
 
@@ -176,7 +176,11 @@ impl NotifyPushConfig {
 
 impl StorageConfig {
     pub fn default_upload_min_free_bytes() -> u64 {
-        1024 * 1024 * 1024
+        512 * 1024 * 1024
+    }
+
+    pub fn default_upload_min_free_percent() -> u8 {
+        5
     }
 }
 
@@ -209,7 +213,7 @@ impl Config {
                 data_dir: "data".to_owned(),
                 xattr_ns: "user.nc".to_owned(),
                 upload_min_free_bytes: StorageConfig::default_upload_min_free_bytes(),
-                upload_min_free_percent: 0,
+                upload_min_free_percent: StorageConfig::default_upload_min_free_percent(),
             },
             db: DbConfig {
                 path: "data/gono-cloud.db".to_owned(),
