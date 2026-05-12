@@ -604,7 +604,22 @@ fn status_anchor(title: &str) -> String {
 }
 
 fn render_http_security_notice(base_url: &str) -> String {
-    if !base_url.trim_start().starts_with("http://") {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return r#"<div id="runtime-http-security-notice" class="notice notice-warning" role="status" hidden></div>
+<script>
+  (() => {
+    const notice = document.getElementById("runtime-http-security-notice");
+    if (!notice) return;
+    const origin = window.location.origin || `${window.location.protocol}//${window.location.host}`;
+    if (!origin.startsWith("http://")) return;
+    notice.textContent = `Admin is configured with an HTTP base URL: ${origin}. Basic Auth credentials and app passwords can be exposed over plain HTTP; use HTTPS through Nginx or another reverse proxy before accessing this page from other machines.`;
+    notice.hidden = false;
+  })();
+</script>"#
+            .to_owned();
+    }
+    if !base_url.starts_with("http://") {
         return String::new();
     }
 
