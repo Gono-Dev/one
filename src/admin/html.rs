@@ -218,21 +218,8 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
     let security_notice_html = render_http_security_notice(&config.server.base_url);
     let advertised_types = config.notify_push.advertised_types.join("\n");
     let admin_users = config.admin.users.join("\n");
-    let server_base_url = readonly_input_text_with_note(
-        "server_base_url",
-        "Base URL",
-        &config.server.base_url,
-        if config.server.base_url.trim().is_empty() {
-            "Empty value; runtime responses infer the origin from each request."
-        } else {
-            "runtime inference is not used for generated endpoints."
-        },
-    );
-    let server_inferred_base_url = readonly_code_with_note(
-        "Runtime inferred Base URL",
-        "runtime-base-url",
-        "Detecting...",
-    );
+    let server_base_url =
+        readonly_input_text("server_base_url", "Base URL", &config.server.base_url);
     let server_bind = readonly_text("Bind", &config.server.bind);
     let server_cert_file = readonly_text("TLS cert file", &config.server.cert_file);
     let server_key_file = readonly_text("TLS key file", &config.server.key_file);
@@ -333,7 +320,6 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
             <div class="card-header"><h2 id="server-settings-title">Server</h2></div>
             <div class="settings-grid">
               {server_base_url}
-              {server_inferred_base_url}
               {server_bind}
               {server_cert_file}
               {server_key_file}
@@ -398,16 +384,6 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
         </div>
       </main>
     </div>
-    <script>
-      (() => {{
-        const value = document.getElementById("runtime-base-url");
-        const note = document.getElementById("runtime-base-url-note");
-        if (!value || !note) return;
-        const origin = window.location.origin || `${{window.location.protocol}}//${{window.location.host}}`;
-        value.textContent = origin;
-        note.textContent = "Inferred in this browser from the current Admin request.";
-      }})();
-    </script>
   </body>
 </html>"#,
         principal = escape_html(principal_username),
@@ -642,26 +618,6 @@ fn readonly_input_text(name: &str, label: &str, value: impl ToString) -> String 
     )
 }
 
-fn readonly_input_text_with_note(
-    name: &str,
-    label: &str,
-    value: impl ToString,
-    note: &str,
-) -> String {
-    let name_attr = escape_attr(name);
-    format!(
-        r#"<div class="field">
-  <label for="{name}">{label}</label>
-  <input class="input" id="{name}" name="{name}" value="{value}" readonly aria-readonly="true">
-  <span class="field-note">{note}</span>
-</div>"#,
-        name = name_attr,
-        label = escape_html(label),
-        value = escape_attr(&value.to_string()),
-        note = escape_html(note)
-    )
-}
-
 fn readonly_input_number(name: &str, label: &str, value: impl ToString) -> String {
     let name_attr = escape_attr(name);
     format!(
@@ -699,19 +655,6 @@ fn readonly_text(label: &str, value: impl ToString) -> String {
   <code>{value}</code>
 </div>"#,
         label = escape_html(label),
-        value = escape_html(&value.to_string())
-    )
-}
-
-fn readonly_code_with_note(label: &str, id: &str, value: impl ToString) -> String {
-    format!(
-        r#"<div class="readonly-field">
-  <span>{label}</span>
-  <code id="{id}">{value}</code>
-  <small id="{id}-note" class="field-note"></small>
-</div>"#,
-        label = escape_html(label),
-        id = escape_attr(id),
         value = escape_html(&value.to_string())
     )
 }
@@ -1070,7 +1013,7 @@ body {
   font-weight: 800;
 }
 .brand strong, .brand span { display: block; }
-.brand span, .sidebar-note, .help-text, .meta-line, .display-meta, .field-note {
+.brand span, .sidebar-note, .help-text, .meta-line, .display-meta {
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
@@ -1129,7 +1072,6 @@ h1 { margin-bottom: 0; font-size: 26px; }
 }
 .field-wide { grid-column: 1 / -1; }
 .field { display: grid; gap: 7px; }
-.field-note { line-height: 1.35; }
 label { color: var(--muted-strong); font-size: 12px; font-weight: 800; }
 .input {
   width: 100%;
