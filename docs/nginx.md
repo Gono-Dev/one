@@ -93,6 +93,36 @@ server {
         proxy_send_timeout 3600s;
         proxy_buffering off;
     }
+
+    location ^~ /login/v2 {
+        proxy_pass http://gono_cloud;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    location ^~ /index.php/login/v2 {
+        proxy_pass http://gono_cloud;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+    }
 }
 ```
 
@@ -121,6 +151,9 @@ Production deployments should still prefer an explicit `base_url` so generated e
   and chunked uploads.
 - Notify Push uses WebSocket at `/push/ws` by default. If `[notify_push].path` is changed, update the
   exact WebSocket location to match, for example `location = /custom/ws`.
+- Official Nextcloud Desktop uses Login Flow v2 during browser authorization. Proxy both
+  `/login/v2` and `/index.php/login/v2` to the service when the site root is shared with a separate
+  website.
 - The service also exposes WebDAV through `/remote.php/dav`, `/remote.php/webdav`, the standard
   `/remote.php/dav/files/{owner}` mount, and the root fallback. Keep all paths routed to the same
   upstream; do not strip prefixes in Nginx.
