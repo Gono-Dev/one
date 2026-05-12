@@ -25,6 +25,10 @@ pub struct OneTimePassword {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusPageData {
     pub sections: Vec<StatusSection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientsPageData {
     pub webdav_clients: Vec<StatusRow>,
     pub notify_connections: Vec<StatusRow>,
 }
@@ -81,6 +85,7 @@ pub fn render_users_page(
         <nav class="nav-list">
           <a class="nav-item" href="/admin/users" aria-current="page">Users</a>
           <a class="nav-item" href="/admin/status">Status</a>
+          <a class="nav-item" href="/admin/clients">Clients</a>
           <a class="nav-item" href="/admin/settings">Settings</a>
         </nav>
         <p class="sidebar-note">Signed in with Basic Auth. To switch users, clear browser credentials for this site.</p>
@@ -215,12 +220,12 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
     let admin_users = config.admin.users.join("\n");
     let server_base_url = readonly_input_text_with_note(
         "server_base_url",
-        "Configured Base URL",
+        "Base URL",
         &config.server.base_url,
         if config.server.base_url.trim().is_empty() {
-            "Empty config value; runtime responses infer the origin from each request."
+            "Empty value; runtime responses infer the origin from each request."
         } else {
-            "Explicit config value; runtime inference is not used for generated endpoints."
+            "runtime inference is not used for generated endpoints."
         },
     );
     let server_inferred_base_url = readonly_code_with_note(
@@ -311,6 +316,7 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
         <nav class="nav-list">
           <a class="nav-item" href="/admin/users">Users</a>
           <a class="nav-item" href="/admin/status">Status</a>
+          <a class="nav-item" href="/admin/clients">Clients</a>
           <a class="nav-item" href="/admin/settings" aria-current="page">Settings</a>
         </nav>
         <p class="sidebar-note">Runtime configuration is read from config.toml when the service starts.</p>
@@ -399,7 +405,7 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
         if (!value || !note) return;
         const origin = window.location.origin || `${{window.location.protocol}}//${{window.location.host}}`;
         value.textContent = origin;
-        note.textContent = "Inferred in this browser from the current Admin request; it is not written to config.toml.";
+        note.textContent = "Inferred in this browser from the current Admin request.";
       }})();
     </script>
   </body>
@@ -418,18 +424,6 @@ pub fn render_status_page(
 ) -> String {
     let security_notice_html = render_http_security_notice(&config.server.base_url);
     let sections = render_status_sections(&status.sections);
-    let webdav_clients = render_status_client_section(
-        "status-webdav-clients",
-        "WebDAV Clients",
-        "No recent WebDAV clients.",
-        &status.webdav_clients,
-    );
-    let notify_connections = render_status_client_section(
-        "status-notify-clients",
-        "Notify Push Clients",
-        "No active notify_push clients.",
-        &status.notify_connections,
-    );
 
     format!(
         r#"<!doctype html>
@@ -453,6 +447,7 @@ pub fn render_status_page(
         <nav class="nav-list">
           <a class="nav-item" href="/admin/users">Users</a>
           <a class="nav-item" href="/admin/status" aria-current="page">Status</a>
+          <a class="nav-item" href="/admin/clients">Clients</a>
           <a class="nav-item" href="/admin/settings">Settings</a>
         </nav>
         <p class="sidebar-note">Runtime counters are sampled from the current process.</p>
@@ -464,6 +459,68 @@ pub fn render_status_page(
         </div>
         {security_notice_html}
         {sections}
+      </main>
+    </div>
+  </body>
+</html>"#,
+        principal = escape_html(principal_username),
+        security_notice_html = security_notice_html,
+        sections = sections,
+    )
+}
+
+pub fn render_clients_page(
+    principal_username: &str,
+    config: &Config,
+    clients: &ClientsPageData,
+) -> String {
+    let security_notice_html = render_http_security_notice(&config.server.base_url);
+    let webdav_clients = render_status_client_section(
+        "status-webdav-clients",
+        "WebDAV Clients",
+        "No recent WebDAV clients.",
+        &clients.webdav_clients,
+    );
+    let notify_connections = render_status_client_section(
+        "status-notify-clients",
+        "Notify Push Clients",
+        "No active notify_push clients.",
+        &clients.notify_connections,
+    );
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gono Cloud Clients</title>
+    <style>{STYLE}</style>
+  </head>
+  <body>
+    <div class="admin-shell">
+      <aside class="sidebar" aria-label="Admin navigation">
+        <div class="brand">
+          <span class="brand-mark">G</span>
+          <div>
+            <strong>Gono Cloud</strong>
+            <span>Admin console</span>
+          </div>
+        </div>
+        <nav class="nav-list">
+          <a class="nav-item" href="/admin/users">Users</a>
+          <a class="nav-item" href="/admin/status">Status</a>
+          <a class="nav-item" href="/admin/clients" aria-current="page">Clients</a>
+          <a class="nav-item" href="/admin/settings">Settings</a>
+        </nav>
+        <p class="sidebar-note">Client activity is sampled from the current process.</p>
+      </aside>
+      <main class="admin-main">
+        <div class="page-header">
+          <h1>Clients</h1>
+          <span>Admin: {principal}</span>
+        </div>
+        {security_notice_html}
         {webdav_clients}
         {notify_connections}
       </main>
@@ -472,7 +529,6 @@ pub fn render_status_page(
 </html>"#,
         principal = escape_html(principal_username),
         security_notice_html = security_notice_html,
-        sections = sections,
         webdav_clients = webdav_clients,
         notify_connections = notify_connections,
     )

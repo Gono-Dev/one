@@ -27,6 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/users", get(users_page).post(create_user))
         .route("/status", get(status_page))
+        .route("/clients", get(clients_page))
         .route("/settings", get(settings_page))
         .route("/app-passwords", post(create_app_password))
         .route("/users/{username}/display-name", post(update_display_name))
@@ -137,6 +138,18 @@ async fn status_page(
         )
             .into_response(),
     }
+}
+
+async fn clients_page(
+    State(state): State<Arc<AppState>>,
+    Extension(principal): Extension<Principal>,
+) -> Response {
+    Html(html::render_clients_page(
+        &principal.username,
+        &state.config,
+        &load_clients_page_data(&state),
+    ))
+    .into_response()
 }
 
 async fn create_user(
@@ -623,42 +636,28 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
         ))
     })?;
     let auth_rate_limit = state.auth_rate_limiter.stats();
-    let webdav_clients = state
-        .webdav_clients
-        .recent_clients()
-        .into_iter()
-        .map(webdav_client_row)
-        .collect::<Vec<_>>();
 
-    let (notify_rows, notify_connections) = if let Some(runtime) = &state.notify_push {
+    let notify_rows = if let Some(runtime) = &state.notify_push {
         let metrics = runtime.metrics();
-        let connections = runtime
-            .active_connections()
-            .into_iter()
-            .map(notify_connection_row)
-            .collect::<Vec<_>>();
-        (
-            vec![
-                status_row("Runtime", "Enabled"),
-                status_row("Active connections", metrics.active_connections),
-                status_row("Active users", metrics.active_users),
-                status_row("Total connections", metrics.total_connections),
-                status_row("Events received", metrics.events_received),
-                status_row("Auth failures", metrics.auth_failures),
-                status_row("Messages sent", metrics.messages_sent),
-                status_row("File messages sent", metrics.messages_sent_file),
-                status_row("Activity messages sent", metrics.messages_sent_activity),
-                status_row(
-                    "Notification messages sent",
-                    metrics.messages_sent_notification,
-                ),
-                status_row("Custom messages sent", metrics.messages_sent_custom),
-                status_row("Test endpoint hits", metrics.test_endpoint_hits),
-            ],
-            connections,
-        )
+        vec![
+            status_row("Runtime", "Enabled"),
+            status_row("Active connections", metrics.active_connections),
+            status_row("Active users", metrics.active_users),
+            status_row("Total connections", metrics.total_connections),
+            status_row("Events received", metrics.events_received),
+            status_row("Auth failures", metrics.auth_failures),
+            status_row("Messages sent", metrics.messages_sent),
+            status_row("File messages sent", metrics.messages_sent_file),
+            status_row("Activity messages sent", metrics.messages_sent_activity),
+            status_row(
+                "Notification messages sent",
+                metrics.messages_sent_notification,
+            ),
+            status_row("Custom messages sent", metrics.messages_sent_custom),
+            status_row("Test endpoint hits", metrics.test_endpoint_hits),
+        ]
     } else {
-        (vec![status_row("Runtime", "Disabled")], Vec::new())
+        vec![status_row("Runtime", "Disabled")]
     };
 
     Ok(html::StatusPageData {
@@ -723,9 +722,32 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                 rows: notify_rows,
             },
         ],
+    })
+}
+
+fn load_clients_page_data(state: &AppState) -> html::ClientsPageData {
+    let webdav_clients = state
+        .webdav_clients
+        .recent_clients()
+        .into_iter()
+        .map(webdav_client_row)
+        .collect::<Vec<_>>();
+    let notify_connections = state
+        .notify_push
+        .as_ref()
+        .map(|runtime| {
+            runtime
+                .active_connections()
+                .into_iter()
+                .map(notify_connection_row)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    html::ClientsPageData {
         webdav_clients,
         notify_connections,
-    })
+    }
 }
 
 async fn count_rows(pool: &sqlx::SqlitePool, query: &str) -> anyhow::Result<i64> {

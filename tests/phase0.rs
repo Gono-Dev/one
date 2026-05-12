@@ -2267,6 +2267,7 @@ async fn admin_status_page_shows_runtime_state() {
     );
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -2284,17 +2285,6 @@ async fn admin_status_page_shows_runtime_state() {
     assert!(body.contains("System Status"));
     assert!(body.contains("Notify Push"));
     assert!(body.contains("Active connections"));
-    assert!(body.contains("WebDAV Clients"));
-    assert!(body.contains("Status WebDAV Mac"));
-    assert!(body.contains("status-webdav.local"));
-    assert!(body.contains("Nextcloud Desktop 3.16.0"));
-    assert!(body.contains("last PROPFIND"));
-    assert!(body.contains("Notify Push Clients"));
-    assert!(body.contains("Test Mac"));
-    assert!(body.contains("test-mac.local"));
-    assert!(body.contains("Gono Cloud Desktop 0.1.0"));
-    assert!(body.contains("macos / macOS 15.5"));
-    assert!(body.contains("listen_file_id"));
     assert!(body.contains(BOOTSTRAP_USER));
     assert!(body.contains("Database"));
     assert!(body.contains("Storage"));
@@ -2317,9 +2307,42 @@ async fn admin_status_page_shows_runtime_state() {
     assert!(!body.contains("WebSocket path"));
     assert!(!body.contains("Advertised types"));
     assert!(!body.contains("User connection limit"));
+    assert!(!body.contains("WebDAV Clients"));
+    assert!(!body.contains("Status WebDAV Mac"));
+    assert!(!body.contains("Notify Push Clients"));
+    assert!(!body.contains("Test Mac"));
     assert!(body.contains(">1</strong>"));
     assert!(body.contains(">2</strong>"));
     assert!(body.contains(">10s</strong>"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/clients")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("Clients"));
+    assert!(body.contains("WebDAV Clients"));
+    assert!(body.contains("Status WebDAV Mac"));
+    assert!(body.contains("status-webdav.local"));
+    assert!(body.contains("Nextcloud Desktop 3.16.0"));
+    assert!(body.contains("last PROPFIND"));
+    assert!(body.contains("Notify Push Clients"));
+    assert!(body.contains("Test Mac"));
+    assert!(body.contains("test-mac.local"));
+    assert!(body.contains("Gono Cloud Desktop 0.1.0"));
+    assert!(body.contains("macos / macOS 15.5"));
+    assert!(body.contains("listen_file_id"));
+    assert!(body.contains(BOOTSTRAP_USER));
 }
 
 #[tokio::test]
