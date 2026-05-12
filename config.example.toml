@@ -2,6 +2,8 @@
 bind = "127.0.0.1:16102"
 cert_file = "certs/cert.pem"
 key_file = "certs/key.pem"
+# Optional but recommended in production. If omitted or empty, responses that
+# need an absolute origin infer it from the current request, with bind fallback.
 base_url = "https://127.0.0.1:16102"
 
 [storage]

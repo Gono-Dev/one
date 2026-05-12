@@ -32,8 +32,7 @@ PLIST_PATH=""
 RUN_USER=""
 RUN_GROUP=""
 
-DOMAIN="gono.cloud"
-BASE_URL="https://${DOMAIN}"
+BASE_URL=""
 BIND="127.0.0.1:16102"
 XATTR_NS="user.nc"
 AUTH_REALM="Gono Cloud"
@@ -775,51 +774,10 @@ toml_escape() {
   printf '%s' "${value}"
 }
 
-normalize_base_url_input() {
-  local value="$1"
-  case "${value}" in
-    http://*|https://*)
-      ;;
-    *)
-      value="https://${value}"
-      ;;
-  esac
-
-  while [[ "${value}" == */ ]]; do
-    value="${value%/}"
-  done
-  printf '%s\n' "${value}"
-}
-
-host_from_base_url() {
-  local value="$1"
-  value="${value#http://}"
-  value="${value#https://}"
-  value="${value%%/*}"
-  printf '%s\n' "${value}"
-}
-
-prompt_base_url() {
-  local value host
-
-  while true; do
-    value="$(prompt_text "Public base URL (domain is OK)" "${BASE_URL}")"
-    value="$(normalize_base_url_input "${value}")"
-    host="$(host_from_base_url "${value}")"
-    if [[ -n "${host}" ]]; then
-      BASE_URL="${value}"
-      DOMAIN="${host}"
-      return
-    fi
-    warn "public base URL must include a host"
-  done
-}
-
 prompt_new_config_values() {
-  prompt_base_url
   BIND="$(prompt_text "Local bind address" "${BIND}")"
 
-  if prompt_yes_no "Disable Web admin at ${BASE_URL}/admin?" "y"; then
+  if prompt_yes_no "Disable Web admin?" "y"; then
     ADMIN_ENABLED="false"
     ADMIN_USERS=""
   else
@@ -1428,11 +1386,20 @@ install_service() {
   log "service: $(service_status_hint)"
   log "logs: $(service_log_hint)"
   log "local health: ${url}"
-  log "public base URL: ${BASE_URL}"
-  log "webdav URL: ${BASE_URL}/remote.php/dav"
-  warn "Important: ${APP_NAME} listens only on the local machine interface(${BIND}) by default. Use Nginx or another reverse proxy to expose ${BASE_URL} before accessing it from other machines."
+  if [[ -n "${BASE_URL}" ]]; then
+    log "public base URL: ${BASE_URL}"
+    log "webdav URL: ${BASE_URL}/remote.php/dav"
+  else
+    log "public base URL: inferred at request time from Host/protocol headers"
+    log "webdav URL: use your reverse proxy origin plus /remote.php/dav"
+  fi
+  warn "Important: ${APP_NAME} listens only on the configured interface (${BIND}) by default. Use Nginx or another reverse proxy before accessing it from other machines."
   if [[ "${ADMIN_ENABLED}" == "true" ]]; then
-    log "admin URL: ${BASE_URL}/admin"
+    if [[ -n "${BASE_URL}" ]]; then
+      log "admin URL: ${BASE_URL}/admin"
+    else
+      log "admin URL: use your reverse proxy origin plus /admin"
+    fi
   fi
   if [[ -n "${password}" ]]; then
     log "bootstrap user: gono"
@@ -1441,7 +1408,7 @@ install_service() {
   else
     log "no new bootstrap password was printed; existing database/password was preserved"
   fi
-  log "reverse proxy target: http://${BIND} (include WebSocket upgrade for ${BASE_URL}/push/ws)"
+  log "reverse proxy target: http://${BIND} (include WebSocket upgrade for /push/ws)"
 }
 
 dispatch_action() {

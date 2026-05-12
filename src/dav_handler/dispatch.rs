@@ -98,7 +98,6 @@ impl NcDavService {
             peer_addr_from_request(&request),
             request.method(),
             request.headers(),
-            default_protocol(&self.state.base_url),
         );
         let files_root = match self.state.ensure_files_root_for_owner(&owner).await {
             Ok(files_root) => files_root,
@@ -726,10 +725,6 @@ fn peer_addr_from_request(request: &Request<Body>) -> Option<SocketAddr> {
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| *addr)
-}
-
-fn default_protocol(base_url: &str) -> Option<&str> {
-    base_url.split_once("://").map(|(scheme, _)| scheme)
 }
 
 impl Service<Request<Body>> for NcDavService {

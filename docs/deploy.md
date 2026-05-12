@@ -164,8 +164,13 @@ The installer defaults to:
 
 ```text
 bind = 127.0.0.1:16102
-base_url = https://gono.cloud
+base_url =
 ```
+
+`base_url` is the canonical public origin for generated capability URLs. It is optional for local
+development: when omitted or empty, the service keeps the setting empty and infers an origin at
+request time from `Host` and protocol headers, with a local `bind` fallback. Production reverse-proxy
+installs should keep an explicit HTTPS `base_url`.
 
 Public HTTPS should terminate at a reverse proxy and forward to the local service:
 
@@ -198,9 +203,10 @@ location /push/ws {
 }
 ```
 
-On a first install, choose `1` in the interactive menu and enter the custom domain, base URL, and
-bind address when prompted. Existing installations preserve `config.toml`; edit the config file for
-startup-only values such as bind address, then restart from the menu.
+On a first install, choose `1` in the interactive menu and enter the local bind address when
+prompted. The installer leaves `server.base_url` empty for runtime inference. Existing installations
+preserve `config.toml`; edit the config file for startup-only values such as bind address or an
+explicit production `base_url`, then restart from the menu.
 
 ## First Password
 

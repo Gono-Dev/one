@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use axum::{extract::State, Json};
+use axum::{extract::State, http::HeaderMap, Json};
 use serde_json::{json, Value};
 
-use crate::{notify_push::routes, state::AppState};
+use crate::{notify_push::routes, origin, state::AppState};
 
-pub async fn handler(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Json<Value> {
     let mut response = json!({
         "ocs": {
             "meta": {
@@ -46,11 +46,12 @@ pub async fn handler(State(state): State<Arc<AppState>>) -> Json<Value> {
     });
 
     if let Some(runtime) = &state.notify_push {
+        let base_url = capability_base_url(&state, &headers);
         response["ocs"]["data"]["capabilities"]["notify_push"] = json!({
             "type": runtime.config().advertised_types.clone(),
             "endpoints": {
-                "websocket": routes::websocket_endpoint(&state.base_url, &runtime.config().path),
-                "pre_auth": routes::pre_auth_endpoint(&state.base_url),
+                "websocket": routes::websocket_endpoint(&base_url, &runtime.config().path),
+                "pre_auth": routes::pre_auth_endpoint(&base_url),
             }
         });
         response["ocs"]["data"]["capabilities"]["gono_cloud"]["notify_push_client_info"] = json!({
@@ -59,4 +60,11 @@ pub async fn handler(State(state): State<Arc<AppState>>) -> Json<Value> {
     }
 
     Json(response)
+}
+
+fn capability_base_url(state: &AppState, headers: &HeaderMap) -> String {
+    if state.base_url_explicit {
+        return state.base_url.clone();
+    }
+    origin::runtime_base_url(headers, &state.config.server.bind)
 }

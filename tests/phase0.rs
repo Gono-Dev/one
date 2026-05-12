@@ -2250,7 +2250,6 @@ async fn admin_status_page_shows_runtime_state() {
         Some("127.0.0.1:49998".parse().expect("test peer addr")),
         &Method::from_bytes(b"PROPFIND").unwrap(),
         &webdav_headers,
-        Some("https"),
     );
     assert_eq!(
         state
@@ -2455,6 +2454,8 @@ async fn admin_settings_page_is_read_only_config_view() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("Settings"));
     assert!(body.contains("server_base_url"));
+    assert!(body.contains("Runtime inferred Base URL"));
+    assert!(body.contains("window.location.origin"));
     assert!(body.contains("sync_change_log_retention_days"));
     assert!(body.contains("notify_push_path"));
     assert!(body.contains("notify_push_user_connection_limit"));

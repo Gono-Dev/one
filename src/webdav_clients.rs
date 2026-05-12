@@ -9,6 +9,8 @@ use axum::http::{
 };
 use dashmap::DashMap;
 
+use crate::origin;
+
 const CLIENT_RETENTION: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Default)]
@@ -59,7 +61,6 @@ impl WebDavClientRegistry {
         peer_addr: Option<SocketAddr>,
         method: &Method,
         headers: &HeaderMap,
-        default_protocol: Option<&str>,
     ) {
         let now = Instant::now();
         self.prune(now);
@@ -68,8 +69,7 @@ impl WebDavClientRegistry {
         let peer_addr = peer_addr_string(headers, peer_addr);
         let key = client_key(user, &peer_addr, &client_info);
         let method = method.as_str().to_owned();
-        let protocol =
-            protocol_from_headers(headers).or_else(|| sanitize_optional(default_protocol, 16));
+        let protocol = Some(origin::request_scheme(headers).to_owned());
 
         self.clients
             .entry(key)
@@ -185,13 +185,6 @@ fn peer_addr_string(headers: &HeaderMap, peer_addr: Option<SocketAddr>) -> Strin
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn protocol_from_headers(headers: &HeaderMap) -> Option<String> {
-    header_value(headers, "x-forwarded-proto", 16).and_then(|value| {
-        let value = value.to_ascii_lowercase();
-        matches!(value.as_str(), "http" | "https").then_some(value)
-    })
-}
-
 fn client_from_user_agent(user_agent: &str) -> (String, Option<String>) {
     if let Some(version) = product_version(user_agent, "GonoCloudDesktop")
         .or_else(|| product_version(user_agent, "Gono-Cloud-Desktop"))
@@ -286,10 +279,6 @@ fn header_value(headers: &HeaderMap, name: &str, max_len: usize) -> Option<Strin
         .and_then(|value| sanitize_value(value, max_len))
 }
 
-fn sanitize_optional(value: Option<&str>, max_len: usize) -> Option<String> {
-    value.and_then(|value| sanitize_value(value, max_len))
-}
-
 fn sanitize_value(value: &str, max_len: usize) -> Option<String> {
     let cleaned = value
         .trim()
@@ -361,15 +350,8 @@ mod tests {
             None,
             &axum::http::Method::from_bytes(b"PROPFIND").unwrap(),
             &headers,
-            Some("http"),
         );
-        registry.observe_request(
-            "gono",
-            None,
-            &axum::http::Method::PUT,
-            &headers,
-            Some("http"),
-        );
+        registry.observe_request("gono", None, &axum::http::Method::PUT, &headers);
 
         let clients = registry.recent_clients();
         assert_eq!(clients.len(), 1);

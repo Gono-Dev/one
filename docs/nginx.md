@@ -1,12 +1,12 @@
 # Nginx Reverse Proxy Reference
 
 This project is usually run as a local service on `127.0.0.1:16102`, with public HTTPS terminated
-by a reverse proxy. The installer writes:
+by a reverse proxy. The installer writes an empty `base_url` by default:
 
 ```toml
 [server]
 bind = "127.0.0.1:16102"
-base_url = "https://gono.cloud"
+base_url = ""
 
 [notify_push]
 enabled = true
@@ -15,6 +15,9 @@ path = "/push"
 
 For your deployment, set `base_url` to the exact public origin that users open in their clients,
 for example `https://files.example.com`. Notify Push capability URLs are built from this value.
+If `base_url` is omitted or left empty, Gono Cloud leaves the setting empty and infers an origin at
+request time for responses that need absolute URLs. This is convenient for local testing, but
+reverse-proxy deployments should set the public origin explicitly.
 
 ## Full HTTPS Site
 
@@ -106,6 +109,9 @@ base_url = "https://files.example.com"
 The packaged service defaults to local plain HTTP through `GONE_CLOUD_INSECURE_HTTP=1`, which is
 appropriate only while the bind address remains loopback-only. If you expose the application without
 a reverse proxy, provide `cert_file` and `key_file` instead of using insecure HTTP.
+Leaving `base_url` empty is supported for development; capabilities responses use the request `Host`
+and request protocol headers when available, falling back to a local origin derived from `bind`.
+Production deployments should still prefer an explicit `base_url` so generated endpoints are stable.
 
 ## Notes
 

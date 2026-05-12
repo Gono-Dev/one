@@ -15,6 +15,10 @@ pub async fn load_effective_config(_pool: &SqlitePool, base: Config) -> anyhow::
     Ok(base)
 }
 
+pub fn has_explicit_base_url(config: &Config) -> bool {
+    !config.server.base_url.trim().is_empty()
+}
+
 pub async fn get_or_create_instance_id(pool: &SqlitePool) -> anyhow::Result<String> {
     if let Some(instance_id) = load_instance_id(pool).await? {
         return Ok(instance_id);
@@ -42,7 +46,9 @@ pub async fn get_or_create_instance_id(pool: &SqlitePool) -> anyhow::Result<Stri
 }
 
 fn validate_config_subset(config: &Config) -> anyhow::Result<()> {
-    validate_base_url(&config.server.base_url)?;
+    if has_explicit_base_url(config) {
+        validate_base_url(&config.server.base_url)?;
+    }
     validate_notify_path(&config.notify_push.path)?;
     if config.auth.realm.trim().is_empty() {
         bail!("auth realm cannot be empty");
@@ -172,5 +178,33 @@ mod tests {
             .await
             .expect("load changed config");
         assert_eq!(effective.server.base_url, "https://new-config.example");
+    }
+
+    #[tokio::test]
+    async fn missing_base_url_stays_empty() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let mut config = Config::dev_default();
+        config.server.bind = "127.0.0.1:16102".to_owned();
+        config.server.base_url.clear();
+
+        let effective = load_effective_config(&pool, config)
+            .await
+            .expect("load config");
+        assert_eq!(effective.server.base_url, "");
+    }
+
+    #[tokio::test]
+    async fn whitespace_base_url_stays_empty_for_runtime_inference() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let mut config = Config::dev_default();
+        config.server.bind = "0.0.0.0:16102".to_owned();
+        config.server.base_url = "  ".to_owned();
+
+        let effective = load_effective_config(&pool, config)
+            .await
+            .expect("load config");
+        assert_eq!(effective.server.base_url, "  ");
     }
 }

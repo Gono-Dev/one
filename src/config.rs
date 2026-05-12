@@ -22,6 +22,7 @@ pub struct ServerConfig {
     pub bind: String,
     pub cert_file: String,
     pub key_file: String,
+    #[serde(default)]
     pub base_url: String,
 }
 

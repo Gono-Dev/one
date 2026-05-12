@@ -7,6 +7,7 @@ pub mod db;
 pub mod locks;
 pub mod nextcloud_proto;
 pub mod notify_push;
+pub mod origin;
 pub mod permissions;
 pub mod router;
 pub mod settings;

@@ -29,6 +29,7 @@ pub struct AppState {
     pub admin_csrf_token: String,
     pub owner: String,
     pub base_url: String,
+    pub base_url_explicit: bool,
     pub instance_id: String,
     pub xattr_ns: String,
     pub sync_config: SyncConfig,
@@ -48,6 +49,7 @@ impl AppState {
     pub async fn initialize(config: Config) -> anyhow::Result<InitializedApp> {
         let db = db::connect(&config.db).await?;
         db::migrate(&db).await?;
+        let base_url_explicit = settings::has_explicit_base_url(&config);
         let config = settings::load_effective_config(&db, config).await?;
         let storage = StorageLayout::prepare(&config.storage)?;
         for username in &config.admin.users {
@@ -84,6 +86,7 @@ impl AppState {
                 admin_csrf_token: generate_csrf_token(),
                 owner: BOOTSTRAP_USER.to_owned(),
                 base_url: config.server.base_url,
+                base_url_explicit,
                 instance_id,
                 xattr_ns: config.storage.xattr_ns,
                 sync_config,
