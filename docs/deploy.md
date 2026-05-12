@@ -98,6 +98,8 @@ scripts/package-release.sh
 ```
 
 The script writes the installer-facing latest-style archive to `dist/`, plus a `.sha256` sidecar.
+Linux release archives use musl Cargo targets by default so the installed binary does not depend on
+the build runner's glibc version.
 For example:
 
 ```text
@@ -108,17 +110,18 @@ dist/gono-cloud-linux-x86_64.tar.gz.sha256
 Cross-builds can pass Cargo and release target names explicitly:
 
 ```sh
-GONO_CLOUD_CARGO_TARGET=aarch64-unknown-linux-gnu \
+GONO_CLOUD_CARGO_TARGET=aarch64-unknown-linux-musl \
 GONO_CLOUD_RELEASE_TARGET=linux-aarch64 \
 scripts/package-release.sh
 ```
 
 On `v*` tag builds, GitHub Actions packages native Linux/macOS artifacts for `x86_64` and
-`aarch64`, then creates or updates the matching GitHub Release with latest-style `.tar.gz` files and
-`.sha256` sidecars. Re-running a release job also removes old versioned asset names from the same
-tag. Manual GitHub Actions runs package the same artifacts and can also run the separate litmus
-compatibility job without creating a GitHub Release. Ordinary pushes and pull requests do not run
-the Rust check/smoke job in CI.
+`aarch64`; Linux artifacts are built with musl while macOS artifacts use the native Apple targets.
+The release job then creates or updates the matching GitHub Release with latest-style `.tar.gz`
+files and `.sha256` sidecars. Re-running a release job also removes old versioned asset names from
+the same tag. Manual GitHub Actions runs package the same artifacts and can also run the separate
+litmus compatibility job without creating a GitHub Release. Ordinary pushes and pull requests do not
+run the Rust check/smoke job in CI.
 
 The installer uses latest GitHub Release URLs:
 

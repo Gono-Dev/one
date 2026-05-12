@@ -63,10 +63,39 @@ default_release_target() {
   printf '%s-%s\n' "$(target_os)" "$(target_arch)"
 }
 
+default_cargo_target_for_release_target() {
+  case "$1" in
+    linux-x86_64)
+      echo "x86_64-unknown-linux-musl"
+      ;;
+    linux-aarch64)
+      echo "aarch64-unknown-linux-musl"
+      ;;
+    linux-armv7)
+      echo "armv7-unknown-linux-musleabihf"
+      ;;
+    linux-armv6)
+      echo "arm-unknown-linux-musleabihf"
+      ;;
+  esac
+}
+
+ensure_cargo_target_installed() {
+  [[ -n "${CARGO_TARGET}" ]] || return 0
+  command -v rustup >/dev/null 2>&1 || return 0
+
+  if ! rustup target list --installed | grep -Fxq "${CARGO_TARGET}"; then
+    log "installing Rust target ${CARGO_TARGET}"
+    rustup target add "${CARGO_TARGET}"
+  fi
+}
+
 build_binary() {
   if [[ "${SKIP_BUILD}" == "1" ]]; then
     return
   fi
+
+  ensure_cargo_target_installed
 
   if [[ -n "${CARGO_TARGET}" ]]; then
     log "building release binary for Cargo target ${CARGO_TARGET}"
@@ -136,6 +165,13 @@ main() {
 
   if [[ -z "${RELEASE_TARGET}" ]]; then
     RELEASE_TARGET="$(default_release_target)"
+  fi
+
+  if [[ -z "${CARGO_TARGET}" ]]; then
+    CARGO_TARGET="$(default_cargo_target_for_release_target "${RELEASE_TARGET}")"
+    if [[ -n "${CARGO_TARGET}" ]]; then
+      log "using default Cargo target ${CARGO_TARGET} for ${RELEASE_TARGET}"
+    fi
   fi
 
   build_binary
