@@ -55,7 +55,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/.well-known/carddav",
             get(|| async { Redirect::permanent("/remote.php/dav") }),
-        );
+        )
+        .merge(nextcloud_proto::login_flow::router());
 
     if state.notify_push.is_some() {
         app = app.merge(notify_push::routes::router(&state.notify_push_config.path));

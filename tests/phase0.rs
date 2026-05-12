@@ -220,6 +220,121 @@ async fn capabilities_are_public() {
 }
 
 #[tokio::test]
+async fn login_flow_v2_returns_app_password_after_browser_basic_auth() {
+    let (app, _temp, password, _state) = app_with_config(|config| {
+        config.server.base_url.clear();
+    })
+    .await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/index.php/login/v2")
+                .header(header::HOST, "cloud.example.test")
+                .header("x-forwarded-proto", "https")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let login: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let poll_token = login["poll"]["token"].as_str().unwrap();
+    let login_url = login["login"].as_str().unwrap();
+    assert!(login_url.starts_with("https://cloud.example.test/login/v2/flow/"));
+    assert_eq!(
+        login["poll"]["endpoint"].as_str().unwrap(),
+        "https://cloud.example.test/login/v2/poll"
+    );
+    let login_path = login_url
+        .strip_prefix("https://cloud.example.test")
+        .unwrap();
+
+    let pending = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login/v2/poll")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("token={poll_token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), StatusCode::NOT_FOUND);
+
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(login_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(login_path)
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+    let body = to_bytes(authorized.into_body(), usize::MAX).await.unwrap();
+    assert!(std::str::from_utf8(&body).unwrap().contains("Account connected"));
+
+    let credentials = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/index.php/login/v2/poll")
+                .header(header::HOST, "cloud.example.test")
+                .header("x-forwarded-proto", "https")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("token={poll_token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(credentials.status(), StatusCode::OK);
+    let body = to_bytes(credentials.into_body(), usize::MAX).await.unwrap();
+    let credentials: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        credentials["server"].as_str().unwrap(),
+        "https://cloud.example.test"
+    );
+    assert_eq!(credentials["loginName"].as_str().unwrap(), BOOTSTRAP_USER);
+    assert_eq!(credentials["appPassword"].as_str().unwrap(), password);
+
+    let consumed = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login/v2/poll")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("token={poll_token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(consumed.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn ocs_user_endpoints_require_auth_and_return_profile() {
     let (app, _temp, password, state) = app_with_state().await;
 

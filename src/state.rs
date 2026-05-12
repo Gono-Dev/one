@@ -10,6 +10,7 @@ use crate::{
     auth::{AuthRateLimiter, SqliteUserStore},
     config::{AdminConfig, Config, NotifyPushConfig, SyncConfig},
     db::{self, BootstrapOutcome, BOOTSTRAP_USER},
+    nextcloud_proto::login_flow::LoginFlowStore,
     notify_push::NotifyRuntime,
     settings,
     storage::{self, StorageLayout},
@@ -35,6 +36,7 @@ pub struct AppState {
     pub sync_config: SyncConfig,
     pub notify_push_config: NotifyPushConfig,
     pub notify_push: Option<Arc<NotifyRuntime>>,
+    pub login_flows: LoginFlowStore,
     pub webdav_clients: WebDavClientRegistry,
     pub config: Config,
 }
@@ -92,6 +94,7 @@ impl AppState {
                 sync_config,
                 notify_push_config: config.notify_push,
                 notify_push,
+                login_flows: LoginFlowStore::default(),
                 webdav_clients: WebDavClientRegistry::default(),
                 config: state_config,
             }),
