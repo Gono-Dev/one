@@ -39,11 +39,32 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
     let Some(runtime) = state.notify_push.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let peer_addr = peer_addr_string(&headers, peer_addr);
     ws.on_upgrade(move |socket| websocket::handle_socket(socket, state, runtime, peer_addr))
+}
+
+fn peer_addr_string(headers: &HeaderMap, peer_addr: SocketAddr) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| peer_addr.to_string())
 }
 
 async fn pre_auth(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {

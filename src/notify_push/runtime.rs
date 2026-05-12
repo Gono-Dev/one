@@ -1,5 +1,4 @@
 use std::{
-    net::SocketAddr,
     sync::{
         atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -39,7 +38,7 @@ struct PreAuthEntry {
 #[derive(Debug, Clone)]
 struct NotifyConnectionRecord {
     user: String,
-    peer_addr: SocketAddr,
+    peer_addr: String,
     connected_at: Instant,
     listen_file_id: bool,
     client_info: NotifyClientInfo,
@@ -186,13 +185,13 @@ impl NotifyRuntime {
         Ok(receiver)
     }
 
-    pub fn register_connection(&self, user: &str, peer_addr: SocketAddr) -> u64 {
+    pub fn register_connection(&self, user: &str, peer_addr: impl ToString) -> u64 {
         let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
         self.connections.insert(
             id,
             NotifyConnectionRecord {
                 user: user.to_owned(),
-                peer_addr,
+                peer_addr: peer_addr.to_string(),
                 connected_at: Instant::now(),
                 listen_file_id: false,
                 client_info: NotifyClientInfo::default(),
@@ -325,7 +324,7 @@ impl NotifyRuntime {
                 let record = entry.value();
                 NotifyConnectionSnapshot {
                     user: record.user.clone(),
-                    peer_addr: record.peer_addr.to_string(),
+                    peer_addr: record.peer_addr.clone(),
                     connected_secs: now.duration_since(record.connected_at).as_secs(),
                     listen_file_id: record.listen_file_id,
                     client_info: record.client_info.clone(),

@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     body::{to_bytes, Body},
-    http::{header, Method, Request, StatusCode},
+    http::{header, HeaderName, HeaderValue, Method, Request, StatusCode},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
@@ -14,7 +14,11 @@ use gono_cloud::{
     notify_push::NotifyClientInfo, permissions::PermissionLevel, AppState, Config,
 };
 use tempfile::TempDir;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+    MaybeTlsStream, WebSocketStream,
+};
 use tower::ServiceExt;
 
 type TestWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -51,7 +55,28 @@ async fn login_ws(base_url: &str, username: &str, password: &str) -> TestWebSock
 }
 
 async fn login_ws_at(base_url: &str, path: &str, username: &str, password: &str) -> TestWebSocket {
-    let (mut websocket, _response) = connect_async(ws_url(base_url, path))
+    login_ws_at_with_headers(base_url, path, username, password, &[]).await
+}
+
+async fn login_ws_at_with_headers(
+    base_url: &str,
+    path: &str,
+    username: &str,
+    password: &str,
+    headers: &[(&str, &str)],
+) -> TestWebSocket {
+    let mut request = ws_url(base_url, path)
+        .into_client_request()
+        .expect("websocket request");
+    for (name, value) in headers {
+        request
+            .headers_mut()
+            .insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+    }
+    let (mut websocket, _response) = connect_async(request)
         .await
         .expect("connect websocket");
     websocket
@@ -1118,7 +1143,14 @@ async fn notify_push_websocket_accepts_gono_client_info() {
     let (app, _temp, password, state) = app_with_state().await;
     let (base_url, server) = spawn_app_server(app).await;
 
-    let mut websocket = login_ws(&base_url, BOOTSTRAP_USER, &password).await;
+    let mut websocket = login_ws_at_with_headers(
+        &base_url,
+        "/push/ws",
+        BOOTSTRAP_USER,
+        &password,
+        &[("x-forwarded-for", "198.51.100.23, 10.0.0.1")],
+    )
+    .await;
     assert_eq!(next_ws_text(&mut websocket).await, "authenticated");
     websocket
         .send(Message::Text("listen notify_file_id".into()))
@@ -1139,6 +1171,7 @@ async fn notify_push_websocket_accepts_gono_client_info() {
         .active_connections();
     assert_eq!(connections.len(), 1);
     assert_eq!(connections[0].user, BOOTSTRAP_USER);
+    assert_eq!(connections[0].peer_addr, "198.51.100.23");
     assert!(connections[0].listen_file_id);
     assert_eq!(
         connections[0].client_info.device_name.as_deref(),
@@ -2341,7 +2374,7 @@ async fn admin_status_page_shows_runtime_state() {
         .expect("subscribe notify client");
     let connection_id = runtime.register_connection(
         BOOTSTRAP_USER,
-        "127.0.0.1:49999".parse().expect("test peer addr"),
+        "127.0.0.1:49999",
     );
     runtime.set_connection_listen_file_id(connection_id, true);
     runtime.update_connection_client_info(

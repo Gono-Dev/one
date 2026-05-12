@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -15,7 +15,7 @@ pub async fn handle_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
     runtime: Arc<NotifyRuntime>,
-    peer_addr: SocketAddr,
+    peer_addr: String,
 ) {
     let principal = match time::timeout(
         runtime.auth_timeout(),
@@ -58,7 +58,7 @@ pub async fn handle_socket(
         return;
     }
 
-    let connection_id = runtime.register_connection(&user, peer_addr);
+    let connection_id = runtime.register_connection(&user, &peer_addr);
     info!(%peer_addr, user, "notify_push websocket authenticated");
     debug!(user, "notify_push websocket authenticated");
     let (mut sender, mut inbound) = socket.split();
@@ -90,7 +90,7 @@ pub async fn handle_socket(
             }
             _ = flush.tick() => {
                 let send_file_ids = listen_file_id && gono_client_info_received;
-                if !send_pending(&runtime, &mut sender, &mut pending, send_file_ids, &user, peer_addr).await {
+                if !send_pending(&runtime, &mut sender, &mut pending, send_file_ids, &user, &peer_addr).await {
                     break;
                 }
             }
@@ -140,7 +140,7 @@ pub async fn handle_socket(
         &mut pending,
         listen_file_id && gono_client_info_received,
         &user,
-        peer_addr,
+        &peer_addr,
     )
     .await;
     let _ = sender.close().await;
@@ -255,7 +255,7 @@ async fn send_pending(
     pending: &mut Option<PushMessage>,
     send_file_ids: bool,
     user: &str,
-    peer_addr: SocketAddr,
+    peer_addr: &str,
 ) -> bool {
     let Some(message) = pending.take() else {
         return true;
