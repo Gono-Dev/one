@@ -71,6 +71,9 @@ server {
 
         proxy_request_buffering off;
         proxy_buffering off;
+        proxy_cache off;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
         proxy_max_temp_file_size 0;
 
         proxy_read_timeout 3600s;
@@ -92,6 +95,9 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
+        proxy_cache off;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
     }
 
     location ^~ /login/v2 {
@@ -107,6 +113,9 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
+        proxy_cache off;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
     }
 
     location ^~ /index.php/login/v2 {
@@ -122,6 +131,9 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
+        proxy_cache off;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
     }
 }
 ```
@@ -154,6 +166,9 @@ Production deployments should still prefer an explicit `base_url` so generated e
 - Official Nextcloud Desktop uses Login Flow v2 during browser authorization. Proxy both
   `/login/v2` and `/index.php/login/v2` to the service when the site root is shared with a separate
   website.
+- Disable proxy caching on every Gono Cloud location. Some panel-managed Nginx installs set
+  `proxy_cache` globally, which can cache authenticated WebDAV `GET`/`HEAD` responses and stale
+  errors.
 - The service also exposes WebDAV through `/remote.php/dav`, `/remote.php/webdav`, the standard
   `/remote.php/dav/files/{owner}` mount, and the root fallback. Keep all paths routed to the same
   upstream; do not strip prefixes in Nginx.
