@@ -23,8 +23,9 @@ use crate::{
     auth::Principal,
     dav_handler::upload_space,
     db::{self, AppPasswordScopeInput, BOOTSTRAP_USER},
-    permissions::PermissionLevel,
+    permissions::{self, PermissionLevel},
     state::AppState,
+    storage,
 };
 
 pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -215,6 +216,9 @@ async fn create_app_password(
         Ok(scopes) => scopes,
         Err(err) => return render_error(&state, &principal, err).await,
     };
+    if let Err(err) = ensure_app_password_storage_paths(&state, &form.username, &scopes).await {
+        return render_error(&state, &principal, err).await;
+    }
 
     match db::create_local_app_password(&state.db, &form.username, &form.label, expires_at, &scopes)
         .await
@@ -1024,6 +1028,64 @@ fn parse_permission(value: &str) -> anyhow::Result<PermissionLevel> {
         "full" => Ok(PermissionLevel::Full),
         _ => anyhow::bail!("permission must be view or full"),
     }
+}
+
+async fn ensure_app_password_storage_paths(
+    state: &AppState,
+    username: &str,
+    scopes: &[AppPasswordScopeInput],
+) -> anyhow::Result<()> {
+    if !db::local_user_exists(&state.db, username).await? {
+        anyhow::bail!("local user {username:?} not found");
+    }
+
+    let files_root = state.ensure_files_root_for_owner(username).await?;
+    for scope in scopes {
+        let storage_path = permissions::normalize_scope_path(scope.storage_path.trim())?;
+        ensure_storage_dir(&files_root, &storage_path).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_storage_dir(files_root: &StdPath, storage_path: &StdPath) -> anyhow::Result<()> {
+    if storage_path.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    let mut current = PathBuf::new();
+    for component in storage_path.components() {
+        current.push(component.as_os_str());
+        match storage::safe_existing_path(files_root, &current) {
+            Ok(abs_path) => {
+                let metadata = tokio::fs::metadata(&abs_path).await?;
+                if !metadata.is_dir() {
+                    anyhow::bail!(
+                        "storage path {} exists but is not a directory",
+                        current.display()
+                    );
+                }
+            }
+            Err(_) => {
+                let create_path = storage::safe_create_path(files_root, &current)?;
+                match tokio::fs::create_dir(&create_path).await {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let abs_path = storage::safe_existing_path(files_root, &current)?;
+                        let metadata = tokio::fs::metadata(&abs_path).await?;
+                        if !metadata.is_dir() {
+                            anyhow::bail!(
+                                "storage path {} exists but is not a directory",
+                                current.display()
+                            );
+                        }
+                    }
+                    Err(err) => return Err(err).map_err(anyhow::Error::from),
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_csrf(state: &AppState, csrf: &str) -> Result<(), Response> {

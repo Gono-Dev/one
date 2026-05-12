@@ -2606,6 +2606,67 @@ async fn admin_create_user_requires_csrf_and_shows_one_time_password() {
 }
 
 #[tokio::test]
+async fn admin_create_app_password_creates_missing_storage_path() {
+    let (app, _temp, password, state) = app_with_config(|config| {
+        config.admin.enabled = true;
+        config.admin.users = vec![BOOTSTRAP_USER.to_owned()];
+    })
+    .await;
+
+    assert!(!state.files_root.join("DemoStorage").exists());
+
+    let body = format!(
+        "_csrf={}&username={}&label=demo&mount_path=/Demo&storage_path=/DemoStorage&permission=full",
+        state.admin_csrf_token, BOOTSTRAP_USER
+    );
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/gono-admin/app-passwords")
+                .header(header::AUTHORIZATION, auth_header(&password))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    assert!(state.files_root.join("DemoStorage").is_dir());
+
+    let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let app_password = body
+        .split("<code>")
+        .nth(1)
+        .and_then(|value| value.split("</code>").next())
+        .expect("one-time app password in admin response")
+        .to_owned();
+
+    let uploaded = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/remote.php/dav/files/gono/Demo/new.txt")
+                .header(
+                    header::AUTHORIZATION,
+                    auth_header_for(BOOTSTRAP_USER, &app_password),
+                )
+                .body(Body::from("from demo scope"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::CREATED);
+    assert_eq!(
+        std::fs::read_to_string(state.files_root.join("DemoStorage/new.txt"))
+            .expect("read scoped upload"),
+        "from demo scope"
+    );
+}
+
+#[tokio::test]
 async fn admin_settings_page_is_read_only_config_view() {
     let (app, _temp, password, state) = app_with_config(|config| {
         config.admin.enabled = true;
