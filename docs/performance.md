@@ -44,7 +44,7 @@ sudo GONO_PERF_CREATE_PASSWORD=1 GONO_PERF_PROFILE=quick scripts/perf-gate.sh ba
 - `mixed`: concurrent WebDAV mix with PROPFIND/HEAD/GET/PUT/MOVE/COPY/DELETE/sync REPORT.
 - `chunking`: concurrent Nextcloud chunking v2 uploads.
 - `notify`: WebSocket Notify Push connections plus file events.
-- `admin`: read-only `/admin/users` and `/admin/settings` interference load.
+- `admin`: read-only `/gono-admin/users` and `/gono-admin/settings` interference load.
 - `spike`: ramp to high HTTP and WebSocket pressure, then verify resources settle.
 - `soak`: long mixed load; optionally pass `GONO_PERF_RESTART_COMMAND` to restart mid-run.
 - `all`: runs every scenario in order.

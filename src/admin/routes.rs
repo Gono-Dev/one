@@ -57,16 +57,22 @@ pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route_layer(middleware::from_fn_with_state(state, require_admin));
 
     Router::new()
-        .route("/admin", get(|| async { Redirect::to("/admin/users") }))
-        .route("/admin/", get(|| async { Redirect::to("/admin/users") }))
-        .nest("/admin", protected)
+        .route(
+            "/gono-admin",
+            get(|| async { Redirect::to("/gono-admin/users") }),
+        )
+        .route(
+            "/gono-admin/",
+            get(|| async { Redirect::to("/gono-admin/users") }),
+        )
+        .nest("/gono-admin", protected)
 }
 
 pub fn disabled_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/admin", any(not_found))
-        .route("/admin/", any(not_found))
-        .nest("/admin", Router::new().fallback(not_found))
+        .route("/gono-admin", any(not_found))
+        .route("/gono-admin/", any(not_found))
+        .nest("/gono-admin", Router::new().fallback(not_found))
 }
 
 #[derive(Debug, Deserialize)]

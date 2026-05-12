@@ -1,6 +1,6 @@
 # Admin Web Rendering Reference
 
-This directory captures the intended server-rendered HTML shape for the `/admin` user-management
+This directory captures the intended server-rendered HTML shape for the `/gono-admin` user-management
 surface described in `plan/10-admin.md` and the app-password permission model in
 `plan/11-permission.md`.
 
@@ -15,7 +15,7 @@ The visual direction follows the logged-in `seek.li` management pages:
 The prototype is static on purpose. The Rust implementation should render equivalent markup directly
 from `src/admin/html.rs` and may inline `admin.css` or serve it as a small static asset.
 
-Current implementation note: `/admin/settings` is a read-only view of the effective `config.toml`
+Current implementation note: `/gono-admin/settings` is a read-only view of the effective `config.toml`
 values. Runtime configuration changes are made in `config.toml` and applied by restarting the
 service; SQLite `settings` only stores system-managed state such as `instance.id`.
 

@@ -58,7 +58,7 @@ impl AppState {
             db::validate_username(username)?;
         }
         if config.admin.enabled && config.admin.users.is_empty() {
-            warn!("admin.enabled=true but admin.users is empty; no user can access /admin");
+            warn!("admin.enabled=true but admin.users is empty; no user can access /gono-admin");
         }
         let mut bootstrap = db::ensure_bootstrap_user(&db).await?;
         if config.admin.enabled {

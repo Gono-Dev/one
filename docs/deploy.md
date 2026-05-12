@@ -32,14 +32,14 @@ The installer:
 - creates the platform data directory for SQLite, files, uploads, and xattrs.
 
 Web admin is disabled by default. During first install, the menu asks whether to enable the built-in
-`/admin` management page. When enabled by the installer, `gono` is granted admin access by default.
+`/gono-admin` management page. When enabled by the installer, `gono` is granted admin access by default.
 Configured admin users that do not exist yet are created at startup, and their one-time app passwords
 are written to the service log. Existing config files are preserved by the installer during upgrades,
 so add or edit `[admin]` manually when enabling admin on an existing installation. When exposing
-`/admin` through a reverse proxy, consider adding an IP allowlist or another network-level access
+`/gono-admin` through a reverse proxy, consider adding an IP allowlist or another network-level access
 control in front of it.
 
-Runtime configuration is read from `config.toml` at startup. The `/admin/settings` page is a
+Runtime configuration is read from `config.toml` at startup. The `/gono-admin/settings` page is a
 read-only view of the effective config; it does not save changes. To change `server.base_url`,
 `auth.realm`, sync retention, notify push options, or admin access, edit `config.toml` and restart
 the service.

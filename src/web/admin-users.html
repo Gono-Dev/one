@@ -19,7 +19,7 @@
 
         <p class="nav-section-title">Manage</p>
         <nav class="nav-list">
-          <a class="nav-item" href="/admin/users" aria-current="page">
+          <a class="nav-item" href="/gono-admin/users" aria-current="page">
             <span aria-hidden="true">◎</span>
             <span>Users</span>
           </a>
@@ -56,7 +56,7 @@
               <h2 class="card-title" id="create-user-title">Create User</h2>
             </div>
             <div class="card-body">
-              <form method="post" action="/admin/users" class="form-grid">
+              <form method="post" action="/gono-admin/users" class="form-grid">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <div class="field">
                   <label for="username">Username</label>
@@ -90,7 +90,7 @@
               <h2 class="card-title" id="create-password-title">Create App Password</h2>
             </div>
             <div class="card-body">
-              <form method="post" action="/admin/app-passwords" class="scope-form-grid">
+              <form method="post" action="/gono-admin/app-passwords" class="scope-form-grid">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <div class="field">
                   <label for="password_user">User</label>
@@ -215,7 +215,7 @@
                     </div>
                   </div>
                   <div class="modal-popover" id="alias-gono" popover>
-                    <form method="post" action="/admin/users/gono/alias">
+                    <form method="post" action="/gono-admin/users/gono/alias">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <h4 class="modal-title">Edit alias</h4>
                       <p class="modal-copy">Set the admin-only alias shown beside gono.</p>
@@ -241,7 +241,7 @@
                     </form>
                   </div>
                   <div class="modal-popover" id="display-name-gono" popover>
-                    <form method="post" action="/admin/users/gono/display-name">
+                    <form method="post" action="/gono-admin/users/gono/display-name">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <h4 class="modal-title">Edit display name</h4>
                       <p class="modal-copy">Set the display name for gono.</p>
@@ -280,14 +280,14 @@
                             class="button button-secondary"
                             type="button"
                             popovertarget="expiry-gono-bootstrap">Save expiry</button>
-                          <form method="post" action="/admin/users/gono/app-passwords/bootstrap/reset-password">
+                          <form method="post" action="/gono-admin/users/gono/app-passwords/bootstrap/reset-password">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <button class="button button-secondary" type="submit">Reset password</button>
                           </form>
                         </div>
                       </div>
                       <div class="modal-popover" id="expiry-gono-bootstrap" popover>
-                        <form method="post" action="/admin/users/gono/app-passwords/bootstrap/expires-at">
+                        <form method="post" action="/gono-admin/users/gono/app-passwords/bootstrap/expires-at">
                           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                           <h4 class="modal-title">Edit app password expiry</h4>
                           <p class="modal-copy">Set when bootstrap expires, or keep it valid forever.</p>
@@ -351,14 +351,14 @@
                             class="button button-secondary"
                             type="button"
                             popovertarget="expiry-gono-readonly-sync">Save expiry</button>
-                          <form method="post" action="/admin/users/gono/app-passwords/readonly-sync/delete">
+                          <form method="post" action="/gono-admin/users/gono/app-passwords/readonly-sync/delete">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <button class="button button-danger" type="submit">Delete</button>
                           </form>
                         </div>
                       </div>
                       <div class="modal-popover" id="expiry-gono-readonly-sync" popover>
-                        <form method="post" action="/admin/users/gono/app-passwords/readonly-sync/expires-at">
+                        <form method="post" action="/gono-admin/users/gono/app-passwords/readonly-sync/expires-at">
                           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                           <h4 class="modal-title">Edit app password expiry</h4>
                           <p class="modal-copy">Set when readonly-sync expires, or keep it valid forever.</p>
@@ -435,7 +435,7 @@
                         popovertarget="alias-alice">
                         Alias
                       </button>
-                      <form method="post" action="/admin/users/alice/disable">
+                      <form method="post" action="/gono-admin/users/alice/disable">
                         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                         <button class="button button-secondary button-mini" type="submit">Disable</button>
                       </form>
@@ -445,14 +445,14 @@
                         popovertarget="display-name-alice">
                         Display name
                       </button>
-                      <form method="post" action="/admin/users/alice/delete">
+                      <form method="post" action="/gono-admin/users/alice/delete">
                         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                         <button class="button button-danger button-mini" type="submit">Delete</button>
                       </form>
                     </div>
                   </div>
                   <div class="modal-popover" id="alias-alice" popover>
-                    <form method="post" action="/admin/users/alice/alias">
+                    <form method="post" action="/gono-admin/users/alice/alias">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <h4 class="modal-title">Edit alias</h4>
                       <p class="modal-copy">Set the admin-only alias shown beside alice.</p>
@@ -478,7 +478,7 @@
                     </form>
                   </div>
                   <div class="modal-popover" id="display-name-alice" popover>
-                    <form method="post" action="/admin/users/alice/display-name">
+                    <form method="post" action="/gono-admin/users/alice/display-name">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <h4 class="modal-title">Edit display name</h4>
                       <p class="modal-copy">Set the display name for alice.</p>
@@ -517,18 +517,18 @@
                             class="button button-secondary"
                             type="button"
                             popovertarget="expiry-alice-default">Save expiry</button>
-                          <form method="post" action="/admin/users/alice/app-passwords/default/reset-password">
+                          <form method="post" action="/gono-admin/users/alice/app-passwords/default/reset-password">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <button class="button button-secondary" type="submit">Reset password</button>
                           </form>
-                          <form method="post" action="/admin/users/alice/app-passwords/default/delete">
+                          <form method="post" action="/gono-admin/users/alice/app-passwords/default/delete">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <button class="button button-danger" type="submit">Delete</button>
                           </form>
                         </div>
                       </div>
                       <div class="modal-popover" id="expiry-alice-default" popover>
-                        <form method="post" action="/admin/users/alice/app-passwords/default/expires-at">
+                        <form method="post" action="/gono-admin/users/alice/app-passwords/default/expires-at">
                           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                           <h4 class="modal-title">Edit app password expiry</h4>
                           <p class="modal-copy">Set when default expires, or keep it valid forever.</p>
@@ -599,7 +599,7 @@
                         popovertarget="alias-bob">
                         Alias
                       </button>
-                      <form method="post" action="/admin/users/bob/enable">
+                      <form method="post" action="/gono-admin/users/bob/enable">
                         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                         <button class="button button-secondary button-mini" type="submit">Enable</button>
                       </form>
@@ -609,14 +609,14 @@
                         popovertarget="display-name-bob">
                         Display name
                       </button>
-                      <form method="post" action="/admin/users/bob/delete">
+                      <form method="post" action="/gono-admin/users/bob/delete">
                         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                         <button class="button button-danger button-mini" type="submit">Delete</button>
                       </form>
                     </div>
                   </div>
                   <div class="modal-popover" id="alias-bob" popover>
-                    <form method="post" action="/admin/users/bob/alias">
+                    <form method="post" action="/gono-admin/users/bob/alias">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <h4 class="modal-title">Edit alias</h4>
                       <p class="modal-copy">Set the admin-only alias shown beside bob.</p>
@@ -642,7 +642,7 @@
                     </form>
                   </div>
                   <div class="modal-popover" id="display-name-bob" popover>
-                    <form method="post" action="/admin/users/bob/display-name">
+                    <form method="post" action="/gono-admin/users/bob/display-name">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <h4 class="modal-title">Edit display name</h4>
                       <p class="modal-copy">Set the display name for bob.</p>
@@ -681,18 +681,18 @@
                             class="button button-secondary"
                             type="button"
                             popovertarget="expiry-bob-mobile-view">Save expiry</button>
-                          <form method="post" action="/admin/users/bob/app-passwords/mobile-view/reset-password">
+                          <form method="post" action="/gono-admin/users/bob/app-passwords/mobile-view/reset-password">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <button class="button button-secondary" type="submit">Reset password</button>
                           </form>
-                          <form method="post" action="/admin/users/bob/app-passwords/mobile-view/delete">
+                          <form method="post" action="/gono-admin/users/bob/app-passwords/mobile-view/delete">
                             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                             <button class="button button-danger" type="submit">Delete</button>
                           </form>
                         </div>
                       </div>
                       <div class="modal-popover" id="expiry-bob-mobile-view" popover>
-                        <form method="post" action="/admin/users/bob/app-passwords/mobile-view/expires-at">
+                        <form method="post" action="/gono-admin/users/bob/app-passwords/mobile-view/expires-at">
                           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                           <h4 class="modal-title">Edit app password expiry</h4>
                           <p class="modal-copy">Set when mobile-view expires, or keep it valid forever.</p>

@@ -2173,7 +2173,7 @@ async fn admin_disabled_returns_not_found() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin")
+                .uri("/gono-admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2186,7 +2186,7 @@ async fn admin_disabled_returns_not_found() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/")
+                .uri("/gono-admin/")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2204,7 +2204,7 @@ async fn admin_users_page_requires_configured_admin() {
     })
     .await;
 
-    for uri in ["/admin", "/admin/"] {
+    for uri in ["/gono-admin", "/gono-admin/"] {
         let response = app
             .clone()
             .oneshot(
@@ -2219,7 +2219,7 @@ async fn admin_users_page_requires_configured_admin() {
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             response.headers().get(header::LOCATION).unwrap(),
-            "/admin/users"
+            "/gono-admin/users"
         );
     }
 
@@ -2228,7 +2228,7 @@ async fn admin_users_page_requires_configured_admin() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/users")
+                .uri("/gono-admin/users")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2252,7 +2252,7 @@ async fn admin_users_page_requires_configured_admin() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/users")
+                .uri("/gono-admin/users")
                 .header(
                     header::AUTHORIZATION,
                     auth_header_for("alice", &alice.app_password),
@@ -2268,7 +2268,7 @@ async fn admin_users_page_requires_configured_admin() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/users")
+                .uri("/gono-admin/users")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .body(Body::empty())
                 .unwrap(),
@@ -2306,7 +2306,7 @@ async fn admin_pages_warn_when_base_url_uses_http() {
     })
     .await;
 
-    for uri in ["/admin/users", "/admin/settings"] {
+    for uri in ["/gono-admin/users", "/gono-admin/settings"] {
         let response = app
             .clone()
             .oneshot(
@@ -2386,7 +2386,7 @@ async fn admin_status_page_shows_runtime_state() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/status")
+                .uri("/gono-admin/status")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .body(Body::empty())
                 .unwrap(),
@@ -2439,7 +2439,7 @@ async fn admin_status_page_shows_runtime_state() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/clients")
+                .uri("/gono-admin/clients")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .body(Body::empty())
                 .unwrap(),
@@ -2494,7 +2494,7 @@ async fn configured_admin_user_is_created_for_admin_access() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/users")
+                .uri("/gono-admin/users")
                 .header(header::AUTHORIZATION, auth_header(&gono_password))
                 .body(Body::empty())
                 .unwrap(),
@@ -2507,7 +2507,7 @@ async fn configured_admin_user_is_created_for_admin_access() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/users")
+                .uri("/gono-admin/users")
                 .header(
                     header::AUTHORIZATION,
                     auth_header_for("kimi", &admin_user.app_password),
@@ -2537,7 +2537,7 @@ async fn admin_create_user_requires_csrf_and_shows_one_time_password() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/admin/users")
+                .uri("/gono-admin/users")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(
@@ -2557,7 +2557,7 @@ async fn admin_create_user_requires_csrf_and_shows_one_time_password() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/admin/users")
+                .uri("/gono-admin/users")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
@@ -2585,7 +2585,7 @@ async fn admin_settings_page_is_read_only_config_view() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/settings")
+                .uri("/gono-admin/settings")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .body(Body::empty())
                 .unwrap(),
@@ -2610,7 +2610,7 @@ async fn admin_settings_page_is_read_only_config_view() {
     assert!(body.contains("disabled aria-disabled=\"true\""));
     assert!(body.contains("Edit config.toml and restart gono-cloud"));
     assert!(!body.contains("Save Settings"));
-    assert!(!body.contains("method=\"post\" action=\"/admin/settings\""));
+    assert!(!body.contains("method=\"post\" action=\"/gono-admin/settings\""));
     assert!(body.contains("readonly-field"));
 
     let post = app
@@ -2618,7 +2618,7 @@ async fn admin_settings_page_is_read_only_config_view() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/admin/settings")
+                .uri("/gono-admin/settings")
                 .header(header::AUTHORIZATION, auth_header(&password))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(

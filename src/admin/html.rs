@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    db::{LocalAppPassword, LocalUser, BOOTSTRAP_USER},
+    db::{BOOTSTRAP_USER, LocalAppPassword, LocalUser},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +83,10 @@ pub fn render_users_page(
           </div>
         </div>
         <nav class="nav-list">
-          <a class="nav-item" href="/admin/users" aria-current="page">Users</a>
-          <a class="nav-item" href="/admin/status">Status</a>
-          <a class="nav-item" href="/admin/clients">Clients</a>
-          <a class="nav-item" href="/admin/settings">Settings</a>
+          <a class="nav-item" href="/gono-admin/users" aria-current="page">Users</a>
+          <a class="nav-item" href="/gono-admin/status">Status</a>
+          <a class="nav-item" href="/gono-admin/clients">Clients</a>
+          <a class="nav-item" href="/gono-admin/settings">Settings</a>
         </nav>
         <p class="sidebar-note">Signed in with Basic Auth. To switch users, clear browser credentials for this site.</p>
       </aside>
@@ -102,7 +102,7 @@ pub fn render_users_page(
           <div class="card-header">
             <h2 id="create-user-title">Create User</h2>
           </div>
-          <form method="post" action="/admin/users" class="form-grid">
+          <form method="post" action="/gono-admin/users" class="form-grid">
             <input type="hidden" name="_csrf" value="{csrf}">
             <div class="field">
               <label for="username">Username</label>
@@ -156,7 +156,7 @@ fn render_create_app_password_card(users: &[LocalUser], csrf_token: &str) -> Str
   <div class="card-header">
     <h2 id="create-password-title">Create App Password</h2>
   </div>
-  <form method="post" action="/admin/app-passwords" class="scope-form-grid">
+  <form method="post" action="/gono-admin/app-passwords" class="scope-form-grid">
     <input type="hidden" name="_csrf" value="{csrf}">
     <div class="field">
       <label for="password-username">Username</label>
@@ -301,10 +301,10 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
           </div>
         </div>
         <nav class="nav-list">
-          <a class="nav-item" href="/admin/users">Users</a>
-          <a class="nav-item" href="/admin/status">Status</a>
-          <a class="nav-item" href="/admin/clients">Clients</a>
-          <a class="nav-item" href="/admin/settings" aria-current="page">Settings</a>
+          <a class="nav-item" href="/gono-admin/users">Users</a>
+          <a class="nav-item" href="/gono-admin/status">Status</a>
+          <a class="nav-item" href="/gono-admin/clients">Clients</a>
+          <a class="nav-item" href="/gono-admin/settings" aria-current="page">Settings</a>
         </nav>
         <p class="sidebar-note">Runtime configuration is read from config.toml when the service starts.</p>
       </aside>
@@ -421,10 +421,10 @@ pub fn render_status_page(
           </div>
         </div>
         <nav class="nav-list">
-          <a class="nav-item" href="/admin/users">Users</a>
-          <a class="nav-item" href="/admin/status" aria-current="page">Status</a>
-          <a class="nav-item" href="/admin/clients">Clients</a>
-          <a class="nav-item" href="/admin/settings">Settings</a>
+          <a class="nav-item" href="/gono-admin/users">Users</a>
+          <a class="nav-item" href="/gono-admin/status" aria-current="page">Status</a>
+          <a class="nav-item" href="/gono-admin/clients">Clients</a>
+          <a class="nav-item" href="/gono-admin/settings">Settings</a>
         </nav>
         <p class="sidebar-note">Runtime counters are sampled from the current process.</p>
       </aside>
@@ -484,10 +484,10 @@ pub fn render_clients_page(
           </div>
         </div>
         <nav class="nav-list">
-          <a class="nav-item" href="/admin/users">Users</a>
-          <a class="nav-item" href="/admin/status">Status</a>
-          <a class="nav-item" href="/admin/clients" aria-current="page">Clients</a>
-          <a class="nav-item" href="/admin/settings">Settings</a>
+          <a class="nav-item" href="/gono-admin/users">Users</a>
+          <a class="nav-item" href="/gono-admin/status">Status</a>
+          <a class="nav-item" href="/gono-admin/clients" aria-current="page">Clients</a>
+          <a class="nav-item" href="/gono-admin/settings">Settings</a>
         </nav>
         <p class="sidebar-note">Client activity is sampled from the current process.</p>
       </aside>
@@ -705,14 +705,14 @@ fn render_user_row(user: &LocalUser, csrf_token: &str) -> String {
     };
     let toggle = if user.enabled {
         render_post_button(
-            &format!("/admin/users/{}/disable", user.username),
+            &format!("/gono-admin/users/{}/disable", user.username),
             csrf_token,
             "Disable",
             "button button-secondary button-mini",
         )
     } else {
         render_post_button(
-            &format!("/admin/users/{}/enable", user.username),
+            &format!("/gono-admin/users/{}/enable", user.username),
             csrf_token,
             "Enable",
             "button button-secondary button-mini",
@@ -723,7 +723,7 @@ fn render_user_row(user: &LocalUser, csrf_token: &str) -> String {
             .to_owned()
     } else {
         render_post_button(
-            &format!("/admin/users/{}/delete", user.username),
+            &format!("/gono-admin/users/{}/delete", user.username),
             csrf_token,
             "Delete",
             "button button-danger button-mini",
@@ -745,7 +745,7 @@ fn render_user_row(user: &LocalUser, csrf_token: &str) -> String {
     </div>
   </div>
   <div class="modal-popover" id="display-name-{username_attr}" popover>
-    <form method="post" action="/admin/users/{username_attr}/display-name">
+    <form method="post" action="/gono-admin/users/{username_attr}/display-name">
       <input type="hidden" name="_csrf" value="{csrf}">
       <h4>Edit display name</h4>
       <p>Set the display name for {username}.</p>
@@ -809,7 +809,7 @@ fn render_app_password_block(
     } else {
         render_post_button(
             &format!(
-                "/admin/users/{}/app-passwords/{}/delete",
+                "/gono-admin/users/{}/app-passwords/{}/delete",
                 user.username, password.label
             ),
             csrf_token,
@@ -821,7 +821,7 @@ fn render_app_password_block(
     let expiry_form = format!(
         r#"<button class="button button-secondary button-mini" type="button" popovertarget="{expiry_popover_id}">Set expiry</button>
   <div class="modal-popover" id="{expiry_popover_id}" popover>
-    <form method="post" action="/admin/users/{username_attr}/app-passwords/{label_attr}/expires-at">
+    <form method="post" action="/gono-admin/users/{username_attr}/app-passwords/{label_attr}/expires-at">
       <input type="hidden" name="_csrf" value="{csrf}">
       <h4>Edit app password expiry</h4>
       <p>Set when {label} expires, or keep it valid forever.</p>
@@ -891,7 +891,7 @@ fn render_app_password_block(
         expiry_form = expiry_form,
         reset = render_post_button(
             &format!(
-                "/admin/users/{}/app-passwords/{}/reset-password",
+                "/gono-admin/users/{}/app-passwords/{}/reset-password",
                 user.username, password.label
             ),
             csrf_token,
