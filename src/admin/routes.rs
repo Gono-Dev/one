@@ -1,12 +1,16 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    path::{Path as StdPath, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use axum::{
+    Router,
     extract::{Extension, Form, Path, State},
     http::StatusCode,
     middleware,
     response::{Html, IntoResponse, Redirect, Response},
     routing::{any, get, post},
-    Router,
 };
 use serde::Deserialize;
 use tracing::info;
@@ -635,6 +639,11 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
             &state.config.storage,
         ))
     })?;
+    let db_path = StdPath::new(&state.config.db.path);
+    let db_display_path = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let sqlite_db_size = file_size_label(db_path);
+    let sqlite_wal_size = file_size_label(&sqlite_sidecar_path(db_path, "-wal"));
+    let sqlite_shm_size = file_size_label(&sqlite_sidecar_path(db_path, "-shm"));
     let auth_rate_limit = state.auth_rate_limiter.stats();
 
     let notify_rows = if let Some(runtime) = &state.notify_push {
@@ -684,6 +693,10 @@ async fn load_status_page_data(state: &AppState) -> anyhow::Result<html::StatusP
                         "Upload minimum free space",
                         format_timed_value(format_bytes(upload_reserved), upload_reserved_ms),
                     ),
+                    status_row("SQLite database path", db_display_path.display()),
+                    status_row("SQLite database size", sqlite_db_size),
+                    status_row("SQLite WAL size", sqlite_wal_size),
+                    status_row("SQLite SHM size", sqlite_shm_size),
                 ],
             },
             html::StatusSection {
@@ -902,6 +915,21 @@ fn measure_elapsed_millis<T>(
 
 fn format_timed_value(value: String, elapsed_ms: f64) -> String {
     format!("{value} ({elapsed_ms:.3} ms)")
+}
+
+fn sqlite_sidecar_path(db_path: &StdPath, suffix: &str) -> PathBuf {
+    let mut raw = db_path.as_os_str().to_os_string();
+    raw.push(suffix);
+    PathBuf::from(raw)
+}
+
+fn file_size_label(path: &StdPath) -> String {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => format_bytes(metadata.len()),
+        Ok(_) => "not a file".to_owned(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => "not present".to_owned(),
+        Err(err) => format!("unavailable: {err}"),
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {

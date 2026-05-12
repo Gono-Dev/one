@@ -2407,6 +2407,11 @@ async fn admin_status_page_shows_runtime_state() {
     assert!(body.contains("Total space"));
     assert!(body.contains("Upload minimum free space"));
     assert!(body.contains(".") && body.contains(" ms)"));
+    assert!(body.contains("SQLite database path"));
+    assert!(body.contains("SQLite database size"));
+    assert!(body.contains("SQLite WAL size"));
+    assert!(body.contains("SQLite SHM size"));
+    assert!(body.contains("gono-cloud.db"));
     assert!(body.contains("Auth Rate Limit"));
     assert!(body.contains("Active throttled keys"));
     assert!(body.contains("Total failed attempts"));
