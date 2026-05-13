@@ -715,7 +715,9 @@ impl NcDavService {
             })?;
         self.state
             .notify_file_changed_for_owner(owner, Some(file_id));
-        self.state.compact_change_log_for_owner(owner).await;
+        self.state
+            .compact_change_log_for_owner_throttled(owner)
+            .await;
         Ok(sync_token)
     }
 }

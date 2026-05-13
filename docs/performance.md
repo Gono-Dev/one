@@ -63,7 +63,10 @@ query behavior is:
 - `REPORT oc:filter-files` for favorites uses the `file_ids(owner, favorite, rel_path)` runtime
   index first, then verifies each candidate through `safe_existing_path`, scope filtering, and a
   metadata refresh.
-- `change_log` pruning runs per enabled local user at startup and per owner after writes.
+- `change_log` pruning runs per enabled local user at startup and is throttled after writes so large
+  small-file uploads do not run the retention query on every file.
+- Notify Push file events are coalesced in a short per-user window before broadcasting to WebSocket
+  listeners. Per-file queue/send logs are `debug` level to avoid log I/O becoming a hot path.
 - WebDAV locks are stored in SQLite and guarded by a process-local gate shared by principal scope.
 - Uploads run a `statvfs`-style free-space preflight before ordinary `PUT`, chunking `MKCOL`, chunk
   writes, and final `MOVE .file`; failures return WebDAV `507 Insufficient Storage`.

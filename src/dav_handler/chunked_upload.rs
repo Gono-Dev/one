@@ -7,7 +7,7 @@ use std::{
 use anyhow::Context;
 use axum::{
     body::Body,
-    http::{header::HeaderName, HeaderMap, HeaderValue, Request, Response, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, Response, StatusCode, header::HeaderName},
     response::IntoResponse,
 };
 use filetime::FileTime;
@@ -259,7 +259,7 @@ async fn move_file(
     .await
     .map_err(|err| internal_error(err, "record uploaded file change"))?;
     state.notify_file_changed_for_owner(owner, Some(record.id));
-    state.compact_change_log_for_owner(owner).await;
+    state.compact_change_log_for_owner_throttled(owner).await;
 
     remove_session_dir(&state, &upload_path).await?;
     db::delete_upload_session(&state.db, owner, &upload_path.upload_id)

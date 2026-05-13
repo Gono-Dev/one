@@ -264,7 +264,7 @@ async fn send_pending(
     let text = message.to_wire_text(send_file_ids);
     if sender.send(Message::text(text)).await.is_ok() {
         runtime.message_sent(ty);
-        info!(
+        debug!(
             %peer_addr,
             user,
             send_file_ids,

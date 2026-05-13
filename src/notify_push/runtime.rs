@@ -1,17 +1,17 @@
 use std::{
     sync::{
-        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dashmap::DashMap;
 use rand::RngCore;
 use serde::Deserialize;
-use tokio::sync::broadcast;
-use tracing::info;
+use tokio::{sync::broadcast, time};
+use tracing::debug;
 
 use crate::{auth::Principal, config::NotifyPushConfig};
 
@@ -23,11 +23,14 @@ pub struct NotifyRuntime {
     channels: DashMap<String, broadcast::Sender<PushMessage>>,
     pre_auth: DashMap<String, PreAuthEntry>,
     connections: DashMap<u64, NotifyConnectionRecord>,
+    pending_file_events: DashMap<String, Arc<PendingFileEvent>>,
     test_values: DashMap<String, String>,
     test_cookie: AtomicU32,
     next_connection_id: AtomicU64,
     metrics: NotifyMetrics,
 }
+
+const FILE_EVENT_COALESCE_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 struct PreAuthEntry {
@@ -42,6 +45,12 @@ struct NotifyConnectionRecord {
     connected_at: Instant,
     listen_file_id: bool,
     client_info: NotifyClientInfo,
+}
+
+#[derive(Debug, Default)]
+struct PendingFileEvent {
+    message: Mutex<Option<PushMessage>>,
+    flush_scheduled: AtomicBool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -112,6 +121,7 @@ impl NotifyRuntime {
             channels: DashMap::new(),
             pre_auth: DashMap::new(),
             connections: DashMap::new(),
+            pending_file_events: DashMap::new(),
             test_values: DashMap::new(),
             test_cookie: AtomicU32::new(rand::random()),
             next_connection_id: AtomicU64::new(1),
@@ -225,8 +235,43 @@ impl NotifyRuntime {
         }
     }
 
-    pub fn notify_file(&self, user: &str, file_id: Option<i64>) {
-        self.send_to_user(user, PushMessage::file(file_id));
+    pub fn notify_file(self: &Arc<Self>, user: &str, file_id: Option<i64>) {
+        self.metrics.events_received.fetch_add(1, Ordering::Relaxed);
+
+        if !self.has_active_subscribers(user) {
+            debug!(
+                user,
+                file_id, "notify_push file event dropped because user has no active subscribers"
+            );
+            return;
+        }
+
+        let pending = self
+            .pending_file_events
+            .entry(user.to_owned())
+            .or_insert_with(|| Arc::new(PendingFileEvent::default()))
+            .clone();
+        {
+            let mut message = pending
+                .message
+                .lock()
+                .expect("notify_push pending file event poisoned");
+            match message.as_mut() {
+                Some(existing) => {
+                    existing.merge(&PushMessage::file(file_id));
+                }
+                None => *message = Some(PushMessage::file(file_id)),
+            }
+        }
+
+        if !pending.flush_scheduled.swap(true, Ordering::AcqRel) {
+            let runtime = Arc::clone(self);
+            let user = user.to_owned();
+            tokio::spawn(async move {
+                time::sleep(FILE_EVENT_COALESCE_DELAY).await;
+                runtime.flush_file_events(&user);
+            });
+        }
     }
 
     pub fn notify_activity(&self, user: &str) {
@@ -341,20 +386,53 @@ impl NotifyRuntime {
 
     fn send_to_user(&self, user: &str, message: PushMessage) {
         self.metrics.events_received.fetch_add(1, Ordering::Relaxed);
+        self.send_to_user_now(user, message);
+    }
+
+    fn flush_file_events(&self, user: &str) {
+        let Some(pending) = self
+            .pending_file_events
+            .get(user)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return;
+        };
+        let message = {
+            let mut message = pending
+                .message
+                .lock()
+                .expect("notify_push pending file event poisoned");
+            let message = message.take();
+            pending.flush_scheduled.store(false, Ordering::Release);
+            message
+        };
+        if let Some(message) = message {
+            self.send_to_user_now(user, message);
+        }
+    }
+
+    fn has_active_subscribers(&self, user: &str) -> bool {
+        self.channels
+            .get(user)
+            .map(|sender| sender.receiver_count() > 0)
+            .unwrap_or(false)
+    }
+
+    fn send_to_user_now(&self, user: &str, message: PushMessage) {
         if let Some(sender) = self.channels.get(user) {
             let receiver_count = sender.receiver_count();
-            info!(
+            debug!(
                 user,
                 receiver_count,
                 message = ?message,
-                "notify_push file event queued"
+                "notify_push event queued"
             );
             let _ = sender.send(message);
         } else {
-            info!(
+            debug!(
                 user,
                 message = ?message,
-                "notify_push file event dropped because user has no active subscribers"
+                "notify_push event dropped because user has no active subscribers"
             );
         }
     }
@@ -457,7 +535,7 @@ mod tests {
     use crate::{auth::Principal, config::NotifyPushConfig, permissions};
 
     use super::NotifyRuntime;
-    use super::{sanitize_optional, NotifyClientInfo};
+    use super::{NotifyClientInfo, sanitize_optional};
 
     fn principal(username: &str) -> Principal {
         Principal {
@@ -506,5 +584,26 @@ mod tests {
             sanitize_optional(Some("x".repeat(90)), 80).unwrap().len(),
             80
         );
+    }
+
+    #[tokio::test]
+    async fn file_events_are_coalesced_before_broadcast() {
+        let runtime = NotifyRuntime::new(NotifyPushConfig::default());
+        let mut receiver = runtime.subscribe("gono").expect("subscribe");
+
+        runtime.notify_file("gono", Some(2));
+        runtime.notify_file("gono", Some(1));
+
+        let message = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("coalesced event")
+            .expect("broadcast message");
+        assert_eq!(message.to_wire_text(true), "notify_file_id [1,2]");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(runtime.metrics().events_received, 2);
     }
 }

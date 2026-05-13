@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use sqlx::SqlitePool;
@@ -9,7 +11,7 @@ use tracing::{info, warn};
 use crate::{
     auth::{AuthRateLimiter, SqliteUserStore},
     config::{AdminConfig, Config, NotifyPushConfig, SyncConfig},
-    db::{self, BootstrapOutcome, BOOTSTRAP_USER},
+    db::{self, BOOTSTRAP_USER, BootstrapOutcome},
     nextcloud_proto::login_flow::LoginFlowStore,
     notify_push::NotifyRuntime,
     settings,
@@ -39,6 +41,7 @@ pub struct AppState {
     pub login_flows: LoginFlowStore,
     pub webdav_clients: WebDavClientRegistry,
     pub config: Config,
+    change_log_prune_gate: ChangeLogPruneGate,
 }
 
 #[derive(Debug)]
@@ -97,6 +100,7 @@ impl AppState {
                 login_flows: LoginFlowStore::default(),
                 webdav_clients: WebDavClientRegistry::default(),
                 config: state_config,
+                change_log_prune_gate: ChangeLogPruneGate::default(),
             }),
             bootstrap,
         })
@@ -129,6 +133,12 @@ impl AppState {
         self.compact_change_log_for_owner(&self.owner).await;
     }
 
+    pub async fn compact_change_log_for_owner_throttled(&self, owner: &str) {
+        if self.change_log_prune_gate.should_prune(owner) {
+            self.compact_change_log_for_owner(owner).await;
+        }
+    }
+
     pub async fn compact_change_log_for_owner(&self, owner: &str) {
         match db::prune_change_log(
             &self.db,
@@ -152,9 +162,48 @@ impl AppState {
     }
 }
 
+const CHANGE_LOG_PRUNE_MIN_INTERVAL: Duration = Duration::from_secs(30);
+const CHANGE_LOG_PRUNE_CHANGE_INTERVAL: u64 = 512;
+
+#[derive(Debug, Default)]
+struct ChangeLogPruneGate {
+    owners: Mutex<HashMap<String, ChangeLogPruneState>>,
+}
+
+#[derive(Debug)]
+struct ChangeLogPruneState {
+    last_pruned: Instant,
+    pending_changes: u64,
+}
+
+impl ChangeLogPruneGate {
+    fn should_prune(&self, owner: &str) -> bool {
+        self.should_prune_at(owner, Instant::now())
+    }
+
+    fn should_prune_at(&self, owner: &str, now: Instant) -> bool {
+        let mut owners = self.owners.lock().expect("change_log prune gate poisoned");
+        let state = owners
+            .entry(owner.to_owned())
+            .or_insert_with(|| ChangeLogPruneState {
+                last_pruned: now,
+                pending_changes: 0,
+            });
+        state.pending_changes = state.pending_changes.saturating_add(1);
+
+        let due = state.pending_changes >= CHANGE_LOG_PRUNE_CHANGE_INTERVAL
+            || now.duration_since(state.last_pruned) >= CHANGE_LOG_PRUNE_MIN_INTERVAL;
+        if due {
+            state.last_pruned = now;
+            state.pending_changes = 0;
+        }
+        due
+    }
+}
+
 fn generate_csrf_token() -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    use rand::{rngs::OsRng, RngCore};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::{RngCore, rngs::OsRng};
 
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -188,4 +237,38 @@ async fn prune_startup_change_logs(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{
+        CHANGE_LOG_PRUNE_CHANGE_INTERVAL, CHANGE_LOG_PRUNE_MIN_INTERVAL, ChangeLogPruneGate,
+    };
+
+    #[test]
+    fn change_log_prune_gate_batches_write_bursts() {
+        let gate = ChangeLogPruneGate::default();
+        let start = Instant::now();
+
+        for _ in 1..CHANGE_LOG_PRUNE_CHANGE_INTERVAL {
+            assert!(!gate.should_prune_at("gono", start));
+        }
+        assert!(gate.should_prune_at("gono", start));
+        assert!(!gate.should_prune_at("gono", start));
+    }
+
+    #[test]
+    fn change_log_prune_gate_runs_after_interval() {
+        let gate = ChangeLogPruneGate::default();
+        let start = Instant::now();
+
+        assert!(!gate.should_prune_at("gono", start));
+        assert!(!gate.should_prune_at(
+            "gono",
+            start + CHANGE_LOG_PRUNE_MIN_INTERVAL - Duration::from_millis(1),
+        ));
+        assert!(gate.should_prune_at("gono", start + CHANGE_LOG_PRUNE_MIN_INTERVAL,));
+    }
 }
