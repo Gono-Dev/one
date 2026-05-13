@@ -2,10 +2,10 @@ use std::path::Path;
 
 use axum::{
     body::Body,
-    http::{header, HeaderMap, Response, StatusCode},
+    http::{HeaderMap, Response, StatusCode, header},
     response::IntoResponse,
 };
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::config::StorageConfig;
 
@@ -37,6 +37,14 @@ pub fn ensure_upload_space(
     let reserved = reserved_space_threshold(total.unwrap_or(0), config);
     let needed = required_bytes.unwrap_or(0).saturating_add(reserved);
     if available < needed {
+        warn!(
+            path = %root.display(),
+            available_bytes = available,
+            required_bytes = required_bytes.unwrap_or(0),
+            reserved_bytes = reserved,
+            needed_bytes = needed,
+            "insufficient storage for upload"
+        );
         Err(insufficient_storage_response())
     } else {
         Ok(())

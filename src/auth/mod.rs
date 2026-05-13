@@ -23,7 +23,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
-use tracing::error;
+use tracing::{error, warn};
 
 mod rate_limit;
 pub use rate_limit::{AuthRateLimitStats, AuthRateLimiter};
@@ -249,6 +249,14 @@ pub async fn require_basic_auth(
             let delay = state
                 .auth_rate_limiter
                 .register_failure(&client_ip, &username);
+            if delay.as_secs() == 5 || delay.as_secs() % 60 == 0 {
+                warn!(
+                    client_ip,
+                    username,
+                    delay_secs = delay.as_secs(),
+                    "Basic Auth verification failed"
+                );
+            }
             tokio::time::sleep(delay).await;
             unauthorized(&state.auth_realm)
         }

@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
 use axum::{
+    Router,
     body::Body,
-    http::{header::HeaderName, Request, StatusCode},
+    http::{Request, StatusCode, header::HeaderName},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
     routing::get,
-    Router,
 };
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
+use tracing::warn;
 
 use crate::{
     admin, auth::require_basic_auth, dav_handler::NcDavService, nextcloud_proto, notify_push,
@@ -86,6 +87,11 @@ async fn depth_guard(request: Request<Body>, next: Next) -> Response {
         .unwrap_or(false);
 
     if request.method().as_str() == "PROPFIND" && depth_is_infinity {
+        warn!(
+            method = %request.method(),
+            path = %request.uri().path(),
+            "rejecting PROPFIND Depth infinity"
+        );
         return (StatusCode::FORBIDDEN, "Depth infinity is not allowed").into_response();
     }
 

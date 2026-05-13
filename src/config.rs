@@ -119,7 +119,7 @@ pub struct NotifyPushConfig {
 pub struct LoggingConfig {
     #[serde(default = "LoggingConfig::default_loglevel")]
     pub loglevel: String,
-    #[serde(default)]
+    #[serde(default = "LoggingConfig::default_logfile")]
     pub logfile: String,
 }
 
@@ -127,14 +127,24 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             loglevel: Self::default_loglevel(),
-            logfile: String::new(),
+            logfile: Self::default_logfile(),
         }
     }
 }
 
 impl LoggingConfig {
     fn default_loglevel() -> String {
-        "notice".to_owned()
+        "warning".to_owned()
+    }
+
+    fn default_logfile() -> String {
+        if cfg!(target_os = "macos") {
+            "/Library/Logs/Gono Cloud/gono-cloud.log".to_owned()
+        } else if cfg!(target_os = "linux") {
+            "/var/log/gono-cloud/gono-cloud.log".to_owned()
+        } else {
+            String::new()
+        }
     }
 
     pub fn tracing_level(&self) -> anyhow::Result<&'static str> {

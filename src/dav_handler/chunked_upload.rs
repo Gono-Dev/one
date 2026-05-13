@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -201,6 +201,7 @@ async fn move_file(
     request: Request<Body>,
     upload_path: UploadPath,
 ) -> ChunkResult<Response<Body>> {
+    let started = Instant::now();
     let owner = &principal.username;
     if upload_path.chunk_name.as_deref() != Some(".file") {
         return Err(text_response(
@@ -260,6 +261,18 @@ async fn move_file(
     .map_err(|err| internal_error(err, "record uploaded file change"))?;
     state.notify_file_changed_for_owner(owner, Some(record.id));
     state.compact_change_log_for_owner_throttled(owner).await;
+
+    info!(
+        owner,
+        upload_id = %upload_path.upload_id,
+        target = %destination.display(),
+        file_id = record.id,
+        oc_file_id = %record.oc_file_id,
+        operation = if target_existed { "modify" } else { "create" },
+        uploaded_bytes = required_size.unwrap_or(0),
+        elapsed_ms = format_args!("{:.3}", started.elapsed().as_secs_f64() * 1000.0),
+        "chunked upload completed"
+    );
 
     remove_session_dir(&state, &upload_path).await?;
     db::delete_upload_session(&state.db, owner, &upload_path.upload_id)

@@ -249,7 +249,7 @@ max_connections = 5
 realm = "Gono Cloud"
 
 [logging]
-loglevel = "notice"
+loglevel = "warning"
 logfile = ""
 EOF
 

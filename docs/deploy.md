@@ -44,12 +44,13 @@ read-only view of the effective config; it does not save changes. To change `ser
 `auth.realm`, sync retention, notify push options, logging diagnostics, or admin access, edit
 `config.toml` and restart the service.
 
-Logging is controlled by `[logging]`, using Redis-style names. `loglevel` defaults to `notice` and
+Logging is controlled by `[logging]`, using Redis-style names. `loglevel` defaults to `warning` and
 accepts `debug`, `verbose`, `notice`, and `warning` (`info`, `warn`, and `error` are accepted as
-aliases). `logfile` defaults to the empty string, which writes logs to stdout; set it to a path such
-as `/var/log/gono-cloud/gono-cloud.log` to append logs to a file. WebDAV service entry timing is
-marked as `debug`; it records method, path, status, peer address, depth, user agent, and elapsed
-milliseconds only when `loglevel = "debug"`.
+aliases). Installed services write to the platform log file by default: Linux uses
+`/var/log/gono-cloud/gono-cloud.log`, and macOS uses
+`/Library/Logs/Gono Cloud/gono-cloud.log`. Set `logfile = ""` only when you want stdout. WebDAV
+service entry timing is marked as `debug`; it records method, path, status, peer address, depth,
+user agent, and elapsed milliseconds only when `loglevel = "debug"`.
 
 Default Linux layout:
 
@@ -57,6 +58,7 @@ Default Linux layout:
 /opt/gono-cloud/bin/gono-cloud
 /etc/gono-cloud/config.toml
 /var/lib/gono-cloud/
+/var/log/gono-cloud/gono-cloud.log
 /etc/systemd/system/gono-cloud.service
 ```
 
@@ -68,6 +70,7 @@ Default macOS layout:
 /Library/Application Support/Gono Cloud/gono-cloud.db
 /Library/Application Support/Gono Cloud/data/users/<username>/files
 /Library/Application Support/Gono Cloud/data/uploads
+/Library/Logs/Gono Cloud/gono-cloud.log
 /Library/LaunchDaemons/cloud.gono.gono-cloud.plist
 /Library/Logs/Gono Cloud/
 ```
@@ -226,8 +229,8 @@ Save it immediately:
 Linux:
 
 ```sh
-journalctl -u gono-cloud --no-pager \
-  | sed -n 's/.*Generated app password for gono: //p' \
+sed -n 's/.*Generated app password for gono: //p' \
+  /var/log/gono-cloud/gono-cloud.log \
   | tail -n 1
 ```
 
@@ -235,6 +238,7 @@ macOS:
 
 ```sh
 sed -n 's/.*Generated app password for gono: //p' \
+  "/Library/Logs/Gono Cloud/gono-cloud.log" \
   "/Library/Logs/Gono Cloud/stdout.log" \
   "/Library/Logs/Gono Cloud/stderr.log" \
   | tail -n 1

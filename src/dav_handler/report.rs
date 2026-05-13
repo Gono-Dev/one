@@ -2,15 +2,16 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use axum::{
-    body::{to_bytes, Body},
-    http::{header, Request, Response, StatusCode},
+    body::{Body, to_bytes},
+    http::{Request, Response, StatusCode, header},
     response::IntoResponse,
 };
-use quick_xml::{escape::escape, events::Event, Reader};
+use quick_xml::{Reader, escape::escape, events::Event};
 use tracing::{debug, error};
 
 use crate::{
@@ -83,11 +84,20 @@ async fn handle_sync_collection(
     href_prefix: &str,
     report: &ParsedReport,
 ) -> anyhow::Result<Response<Body>> {
+    let started = Instant::now();
     let owner = &principal.username;
     let current_token = db::current_sync_token(&state.db, owner).await?;
     let since_token = report.sync_token.unwrap_or(0);
     let floor_token = db::change_log_floor_token(&state.db, owner, current_token).await?;
     if since_token < floor_token {
+        debug!(
+            owner,
+            since_token,
+            floor_token,
+            current_token,
+            elapsed_ms = format_args!("{:.3}", started.elapsed().as_secs_f64() * 1000.0),
+            "sync-collection token is stale"
+        );
         return Ok(stale_sync_token_response(
             since_token,
             floor_token,
@@ -96,6 +106,7 @@ async fn handle_sync_collection(
     }
 
     let entries = db::list_change_log_range(&state.db, owner, since_token, current_token).await?;
+    let entry_count = entries.len();
     let mut xml = multistatus_start();
 
     for entry in entries {
@@ -106,6 +117,16 @@ async fn handle_sync_collection(
     xml.push_str("<d:sync-token>");
     xml.push_str(&current_token.to_string());
     xml.push_str("</d:sync-token></d:multistatus>");
+
+    debug!(
+        owner,
+        since_token,
+        current_token,
+        floor_token,
+        entry_count,
+        elapsed_ms = format_args!("{:.3}", started.elapsed().as_secs_f64() * 1000.0),
+        "sync-collection REPORT completed"
+    );
 
     Ok(xml_response(xml))
 }
@@ -143,6 +164,7 @@ async fn handle_filter_files(
     href_prefix: &str,
     report: &ParsedReport,
 ) -> anyhow::Result<Response<Body>> {
+    let started = Instant::now();
     let owner = &principal.username;
     let Some(favorite) = report.favorite_filter else {
         return Ok((
@@ -164,7 +186,7 @@ async fn handle_filter_files(
     };
     let scope_abs = storage::safe_existing_path(files_root, &scope_match.storage_rel_path)?;
     let mut xml = multistatus_start();
-    append_filter_matches(
+    let returned_count = append_filter_matches(
         &mut xml,
         &state,
         principal,
@@ -176,6 +198,14 @@ async fn handle_filter_files(
     )
     .await?;
     xml.push_str("</d:multistatus>");
+
+    debug!(
+        owner,
+        favorite,
+        returned_count,
+        elapsed_ms = format_args!("{:.3}", started.elapsed().as_secs_f64() * 1000.0),
+        "oc:filter-files REPORT completed"
+    );
 
     Ok(xml_response(xml))
 }
@@ -233,8 +263,9 @@ async fn append_filter_matches(
     scope_rel: std::path::PathBuf,
     scope_abs: std::path::PathBuf,
     favorite: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let owner = &principal.username;
+    let mut returned_count = 0_usize;
     if favorite {
         let indexed = db::indexed_file_records_by_favorite(
             &state.db,
@@ -276,8 +307,9 @@ async fn append_filter_matches(
             };
             let href_rel_path = storage::rel_path_string(&client_rel_path)?;
             append_resource_response(xml, href_prefix, &href_rel_path, &record, metadata.is_dir());
+            returned_count += 1;
         }
-        return Ok(());
+        return Ok(returned_count);
     }
 
     let mut stack = vec![(scope_rel, scope_abs)];
@@ -305,6 +337,7 @@ async fn append_filter_matches(
             };
             let href_rel_path = storage::rel_path_string(&client_rel_path)?;
             append_resource_response(xml, href_prefix, &href_rel_path, &record, metadata.is_dir());
+            returned_count += 1;
         }
 
         if metadata.is_dir() {
@@ -322,7 +355,7 @@ async fn append_filter_matches(
         }
     }
 
-    Ok(())
+    Ok(returned_count)
 }
 
 async fn current_record_for_rel_path(

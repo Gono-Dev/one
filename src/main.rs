@@ -582,6 +582,14 @@ fn init_tracing(logging: &LoggingConfig) -> anyhow::Result<()> {
             .with(tracing_subscriber::fmt::layer())
             .init();
     } else {
+        if let Some(parent) = Path::new(&logging.logfile)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create logging.logfile directory {}", parent.display())
+            })?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -594,6 +602,11 @@ fn init_tracing(logging: &LoggingConfig) -> anyhow::Result<()> {
             .with(tracing_subscriber::fmt::layer().with_writer(writer))
             .init();
     }
+    tracing::info!(
+        loglevel = %logging.loglevel,
+        logfile = %logging.logfile,
+        "logging configured"
+    );
     Ok(())
 }
 

@@ -27,6 +27,7 @@ DATA_DIR=""
 DB_PATH=""
 TLS_DIR=""
 LOG_DIR=""
+LOG_FILE=""
 PLIST_PATH=""
 
 RUN_USER=""
@@ -46,6 +47,7 @@ PURGE="0"
 
 LOG_STDOUT_OFFSET=0
 LOG_STDERR_OFFSET=0
+LOG_FILE_OFFSET=0
 
 log() {
   printf '[gono-cloud] %s\n' "$*"
@@ -392,6 +394,9 @@ load_existing_config_defaults() {
   [[ -n "${value}" ]] && AUTH_REALM="${value}"
   value="$(extract_toml_bool "${CONFIG_FILE}" admin enabled || true)"
   [[ -n "${value}" ]] && ADMIN_ENABLED="${value}"
+  value="$(extract_toml_string "${CONFIG_FILE}" logging logfile || true)"
+  [[ -n "${value}" ]] && LOG_FILE="${value}"
+  return 0
 }
 
 inline_table_header_lines() {
@@ -449,6 +454,7 @@ set_platform_defaults() {
   DATA_DIR="${STATE_DIR}/data"
   DB_PATH="${STATE_DIR}/gono-cloud.db"
   TLS_DIR="${CONFIG_DIR}/tls"
+  LOG_FILE="${LOG_DIR}/gono-cloud.log"
   PLIST_PATH="/Library/LaunchDaemons/${SERVICE_NAME}.plist"
   load_existing_config_defaults
 }
@@ -727,6 +733,7 @@ ensure_run_identity() {
 
 prepare_directories() {
   mkdir -p "${BIN_DIR}" "${CONFIG_DIR}" "${TLS_DIR}" "${STATE_DIR}" "${DATA_DIR}" "$(dirname "${DB_PATH}")" "${LOG_DIR}"
+  touch "${LOG_FILE}"
   case "${PLATFORM}" in
     macos)
       chown -R "${RUN_USER}:${RUN_GROUP}" "${STATE_DIR}" "${LOG_DIR}"
@@ -849,8 +856,8 @@ auth_timeout_secs = 15
 max_connection_secs = 0
 
 [logging]
-loglevel = "notice"
-logfile = ""
+loglevel = "warning"
+logfile = "$(toml_escape "${LOG_FILE}")"
 EOF
   chown root:"${RUN_GROUP}" "${CONFIG_FILE}"
   chmod 0640 "${CONFIG_FILE}"
@@ -968,10 +975,12 @@ health_url() {
 show_service_logs_tail() {
   case "${PLATFORM}" in
     linux)
+      tail -n 80 "${LOG_FILE}" >&2 2>/dev/null || true
       journalctl -u "${SERVICE_NAME}" -n 80 --no-pager >&2 || true
       ;;
     macos)
       launchctl print "system/${SERVICE_NAME}" >&2 2>/dev/null || true
+      tail -n 80 "${LOG_FILE}" >&2 2>/dev/null || true
       tail -n 80 "${LOG_DIR}/stderr.log" >&2 2>/dev/null || true
       tail -n 80 "${LOG_DIR}/stdout.log" >&2 2>/dev/null || true
       ;;
@@ -1019,6 +1028,7 @@ log_size() {
 capture_macos_log_offsets() {
   LOG_STDOUT_OFFSET="$(log_size "${LOG_DIR}/stdout.log")"
   LOG_STDERR_OFFSET="$(log_size "${LOG_DIR}/stderr.log")"
+  LOG_FILE_OFFSET="$(log_size "${LOG_FILE}")"
 }
 
 latest_generated_password() {
@@ -1026,13 +1036,17 @@ latest_generated_password() {
 
   case "${PLATFORM}" in
     linux)
-      journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager -o cat \
+      {
+        tail -c +"$((LOG_FILE_OFFSET + 1))" "${LOG_FILE}" 2>/dev/null || true
+        journalctl -u "${SERVICE_NAME}" --since "${since}" --no-pager -o cat 2>/dev/null || true
+      } \
         | sed -n 's/.*Generated app password for gono: //p' \
         | tail -n 1 \
         | sed 's/[",}].*$//'
       ;;
     macos)
       {
+        tail -c +"$((LOG_FILE_OFFSET + 1))" "${LOG_FILE}" 2>/dev/null || true
         tail -c +"$((LOG_STDOUT_OFFSET + 1))" "${LOG_DIR}/stdout.log" 2>/dev/null || true
         tail -c +"$((LOG_STDERR_OFFSET + 1))" "${LOG_DIR}/stderr.log" 2>/dev/null || true
       } \
@@ -1044,6 +1058,7 @@ latest_generated_password() {
 }
 
 start_linux_service() {
+  LOG_FILE_OFFSET="$(log_size "${LOG_FILE}")"
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}" >/dev/null
   if ! systemctl restart "${SERVICE_NAME}"; then
@@ -1053,8 +1068,8 @@ start_linux_service() {
 }
 
 prepare_macos_log_files() {
-  touch "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
-  chown "${RUN_USER}:${RUN_GROUP}" "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log"
+  touch "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log" "${LOG_FILE}"
+  chown "${RUN_USER}:${RUN_GROUP}" "${LOG_DIR}/stdout.log" "${LOG_DIR}/stderr.log" "${LOG_FILE}"
   capture_macos_log_offsets
 }
 
@@ -1167,10 +1182,10 @@ service_status_hint() {
 service_log_hint() {
   case "${PLATFORM}" in
     linux)
-      echo "journalctl -u ${SERVICE_NAME} --no-pager"
+      echo "tail -f '${LOG_FILE}'"
       ;;
     macos)
-      echo "tail -f '${LOG_DIR}/stdout.log' '${LOG_DIR}/stderr.log'"
+      echo "tail -f '${LOG_FILE}' '${LOG_DIR}/stdout.log' '${LOG_DIR}/stderr.log'"
       ;;
   esac
 }
@@ -1184,6 +1199,7 @@ show_service_status() {
       log "config: ${CONFIG_FILE}"
       log "data: ${DATA_DIR}"
       log "logs: ${LOG_DIR}"
+      log "log file: ${LOG_FILE}"
       local active enabled url
       active="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
       enabled="$(systemctl is-enabled "${SERVICE_NAME}" 2>/dev/null || true)"
@@ -1206,6 +1222,7 @@ show_service_status() {
       log "config: ${CONFIG_FILE}"
       log "data: ${DATA_DIR}"
       log "logs: ${LOG_DIR}"
+      log "log file: ${LOG_FILE}"
       local output state pid last_exit url
       url="$(health_url)"
       if command -v curl >/dev/null 2>&1 && curl -fsS "${url}" >/dev/null 2>&1; then
@@ -1240,8 +1257,8 @@ show_service_status() {
 follow_service_logs() {
   case "${PLATFORM}" in
     linux)
-      require_cmd journalctl
-      journalctl -u "${SERVICE_NAME}" -f --no-pager
+      require_cmd tail
+      tail -f "${LOG_FILE}"
       ;;
     macos)
       require_cmd tail
@@ -1250,6 +1267,11 @@ follow_service_logs() {
       stderr_log="${LOG_DIR}/stderr.log"
       readable_logs=()
 
+      if [[ -r "${LOG_FILE}" ]]; then
+        readable_logs+=("${LOG_FILE}")
+      else
+        warn "log file is not readable: ${LOG_FILE}"
+      fi
       if [[ -r "${stdout_log}" ]]; then
         readable_logs+=("${stdout_log}")
       else
