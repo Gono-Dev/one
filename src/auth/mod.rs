@@ -1,22 +1,27 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use argon2::{
-    password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
+    password_hash::{PasswordHash, PasswordVerifier},
 };
 use axum::{
     body::Body,
     extract::connect_info::ConnectInfo,
     extract::{Request, State},
     http::{
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, HeaderValue, StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
     },
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use tracing::error;
 
@@ -38,14 +43,35 @@ pub struct Principal {
     pub scopes: Vec<AppPasswordScope>,
 }
 
+const DEFAULT_SUCCESS_AUTH_CACHE_TTL: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone)]
 pub struct SqliteUserStore {
     pool: SqlitePool,
+    success_cache: Arc<DashMap<AuthCacheKey, AuthCacheEntry>>,
+    success_cache_ttl: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AuthCacheKey([u8; 32]);
+
+#[derive(Debug, Clone)]
+struct AuthCacheEntry {
+    principal: Principal,
+    cached_at: Instant,
 }
 
 impl SqliteUserStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self::new_with_cache_ttl(pool, DEFAULT_SUCCESS_AUTH_CACHE_TTL)
+    }
+
+    pub fn new_with_cache_ttl(pool: SqlitePool, success_cache_ttl: Duration) -> Self {
+        Self {
+            pool,
+            success_cache: Arc::new(DashMap::new()),
+            success_cache_ttl,
+        }
     }
 
     pub async fn verify(
@@ -101,6 +127,66 @@ impl SqliteUserStore {
 
         Ok(None)
     }
+
+    pub async fn verify_cached(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> anyhow::Result<Option<Principal>> {
+        let key = AuthCacheKey::new(username, password);
+        if let Some(entry) = self.success_cache.get(&key) {
+            if entry.cached_at.elapsed() < self.success_cache_ttl {
+                let principal = entry.principal.clone();
+                if principal
+                    .expires_at
+                    .is_none_or(|expires_at| expires_at > unix_timestamp())
+                {
+                    return Ok(Some(principal));
+                }
+            }
+            drop(entry);
+            self.success_cache.remove(&key);
+        }
+
+        let principal = self.verify(username, password).await?;
+        if let Some(principal) = &principal {
+            self.success_cache.insert(
+                key,
+                AuthCacheEntry {
+                    principal: principal.clone(),
+                    cached_at: Instant::now(),
+                },
+            );
+            self.prune_success_cache();
+        }
+        Ok(principal)
+    }
+
+    pub fn clear_success_cache(&self) {
+        self.success_cache.clear();
+    }
+
+    pub fn clear_success_cache_for_user(&self, username: &str) {
+        self.success_cache
+            .retain(|_, entry| entry.principal.username != username);
+    }
+
+    fn prune_success_cache(&self) {
+        let ttl = self.success_cache_ttl;
+        self.success_cache
+            .retain(|_, entry| entry.cached_at.elapsed() < ttl);
+    }
+}
+
+impl AuthCacheKey {
+    fn new(username: &str, password: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update((username.len() as u64).to_be_bytes());
+        hasher.update(username.as_bytes());
+        hasher.update((password.len() as u64).to_be_bytes());
+        hasher.update(password.as_bytes());
+        Self(hasher.finalize().into())
+    }
 }
 
 async fn load_app_password_scopes(
@@ -153,7 +239,7 @@ pub async fn require_basic_auth(
         return unauthorized(&state.auth_realm);
     };
 
-    match state.user_store.verify(&username, &password).await {
+    match state.user_store.verify_cached(&username, &password).await {
         Ok(Some(principal)) => {
             state.auth_rate_limiter.clear(&client_ip, &username);
             request.extensions_mut().insert(principal);
@@ -174,6 +260,112 @@ pub async fn require_basic_auth(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, time::Duration};
+
+    use sqlx::SqlitePool;
+
+    use crate::{
+        config::DbConfig,
+        db::{self, AppPasswordScopeInput},
+        permissions::PermissionLevel,
+    };
+
+    use super::SqliteUserStore;
+
+    async fn temp_pool(temp: &tempfile::TempDir) -> SqlitePool {
+        let config = DbConfig {
+            path: temp
+                .path()
+                .join("gono-cloud.db")
+                .to_string_lossy()
+                .into_owned(),
+            max_connections: 1,
+        };
+        let pool = db::connect(&config).await.expect("connect sqlite");
+        db::migrate(&pool).await.expect("migrate sqlite");
+        pool
+    }
+
+    #[tokio::test]
+    async fn successful_auth_cache_reuses_principal_until_ttl_expires() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let created = db::create_local_user(&pool, "alice", None)
+            .await
+            .expect("create alice");
+        let store = SqliteUserStore::new_with_cache_ttl(pool.clone(), Duration::from_secs(60));
+
+        let first = store
+            .verify_cached("alice", &created.app_password)
+            .await
+            .expect("verify first")
+            .expect("first principal");
+        assert_eq!(first.username, "alice");
+
+        assert!(
+            db::delete_local_user(&pool, "alice")
+                .await
+                .expect("delete alice")
+        );
+        let cached = store
+            .verify_cached("alice", &created.app_password)
+            .await
+            .expect("verify cached")
+            .expect("cached principal");
+        assert_eq!(cached.username, "alice");
+
+        store.clear_success_cache_for_user("alice");
+        assert!(
+            store
+                .verify_cached("alice", &created.app_password)
+                .await
+                .expect("verify after clear")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_auth_cache_refreshes_after_ttl() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let pool = temp_pool(&temp).await;
+        let created = db::create_local_user(&pool, "alice", None)
+            .await
+            .expect("create alice");
+        let store = SqliteUserStore::new_with_cache_ttl(pool.clone(), Duration::ZERO);
+
+        let first = store
+            .verify_cached("alice", &created.app_password)
+            .await
+            .expect("verify first")
+            .expect("first principal");
+        assert_eq!(first.scopes[0].storage_path, Path::new(""));
+
+        assert!(
+            db::replace_local_app_password_scopes(
+                &pool,
+                "alice",
+                db::DEFAULT_APP_PASSWORD_LABEL,
+                &[AppPasswordScopeInput {
+                    mount_path: "/Docs".to_owned(),
+                    storage_path: "/Projects".to_owned(),
+                    permission: PermissionLevel::View,
+                }],
+            )
+            .await
+            .expect("replace scopes")
+        );
+
+        let refreshed = store
+            .verify_cached("alice", &created.app_password)
+            .await
+            .expect("verify refreshed")
+            .expect("refreshed principal");
+        assert_eq!(refreshed.scopes[0].storage_path, Path::new("Projects"));
     }
 }
 

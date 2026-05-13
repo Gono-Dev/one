@@ -296,6 +296,7 @@ async fn enable_user(
 
     match db::set_local_user_enabled(&state.db, &username, true).await {
         Ok(true) => {
+            state.user_store.clear_success_cache_for_user(&username);
             info!(
                 admin = %principal.username,
                 username = %username,
@@ -335,6 +336,7 @@ async fn disable_user(
 
     match db::set_local_user_enabled(&state.db, &username, false).await {
         Ok(true) => {
+            state.user_store.clear_success_cache_for_user(&username);
             info!(
                 admin = %principal.username,
                 username = %username,
@@ -371,6 +373,7 @@ async fn reset_user_password(
 
     match db::reset_local_user_app_password(&state.db, &username).await {
         Ok(reset) => {
+            state.user_store.clear_success_cache_for_user(&username);
             info!(
                 admin = %principal.username,
                 username = %username,
@@ -403,6 +406,7 @@ async fn reset_app_password(
 
     match db::reset_local_app_password(&state.db, &username, &label).await {
         Ok(reset) => {
+            state.user_store.clear_success_cache_for_user(&username);
             info!(
                 admin = %principal.username,
                 username = %username,
@@ -436,6 +440,7 @@ async fn delete_app_password(
 
     match db::delete_local_app_password(&state.db, &username, &label).await {
         Ok(true) => {
+            state.user_store.clear_success_cache_for_user(&username);
             info!(
                 admin = %principal.username,
                 username = %username,
@@ -478,6 +483,7 @@ async fn update_app_password_expiry(
 
     match db::update_local_app_password_expiry(&state.db, &username, &label, expires_at).await {
         Ok(true) => {
+            state.user_store.clear_success_cache_for_user(&username);
             info!(
                 admin = %principal.username,
                 username = %username,
@@ -526,6 +532,7 @@ async fn delete_user(
 
     match db::delete_local_user(&state.db, &username).await {
         Ok(true) => {
+            state.user_store.clear_success_cache_for_user(&username);
             info!(
                 admin = %principal.username,
                 username = %username,

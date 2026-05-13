@@ -130,7 +130,7 @@ async fn flow(
         return unauthorized(&state.auth_realm);
     };
 
-    match state.user_store.verify(&username, &password).await {
+    match state.user_store.verify_cached(&username, &password).await {
         Ok(Some(_principal)) => {
             if let Some(mut entry) = state.login_flows.flows.get_mut(&poll_token) {
                 entry.credentials = Some(LoginFlowCredentials { username, password });

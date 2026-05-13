@@ -4,19 +4,19 @@ use std::{
 };
 
 use axum::{
-    extract::{connect_info::ConnectInfo, Path, State, WebSocketUpgrade},
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    Router,
+    extract::{Path, State, WebSocketUpgrade, connect_info::ConnectInfo},
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
 };
 
 use crate::{
-    auth::{parse_basic_auth, Principal},
+    auth::{Principal, parse_basic_auth},
     state::AppState,
 };
 
-use super::{websocket, NotifyRuntime};
+use super::{NotifyRuntime, websocket};
 
 pub fn router(path: &str) -> Router<Arc<AppState>> {
     let ws_route = format!("{}/ws", normalize_push_path(path));
@@ -144,7 +144,7 @@ async fn verify_basic(state: &AppState, headers: &HeaderMap) -> Option<Principal
     let (username, password) = parse_basic_auth(headers.get(AUTHORIZATION))?;
     state
         .user_store
-        .verify(&username, &password)
+        .verify_cached(&username, &password)
         .await
         .ok()
         .flatten()

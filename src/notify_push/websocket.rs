@@ -174,7 +174,7 @@ async fn authenticate(
             .take_pre_auth(&password)
             .ok_or("Invalid pre-auth token")
     } else {
-        match state.user_store.verify(&username, &password).await {
+        match state.user_store.verify_cached(&username, &password).await {
             Ok(Some(principal)) => Ok(principal),
             Ok(None) => Err("Invalid credentials"),
             Err(_) => Err("Authentication backend error"),

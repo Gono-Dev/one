@@ -54,6 +54,10 @@ sudo GONO_PERF_CREATE_PASSWORD=1 GONO_PERF_PROFILE=quick scripts/perf-gate.sh ba
 The service keeps WebDAV metadata in xattrs and uses SQLite as an index/read-through cache. Current
 query behavior is:
 
+- Successful Basic Auth checks are cached in memory for a short TTL, keyed by a hash of the
+  username/password material. This avoids running Argon2 on every WebDAV request during large
+  directory uploads while still revalidating after the TTL and clearing affected entries when admin
+  user/password state changes.
 - `OC-FileId` uses the SQLite `file_ids.id` plus the persisted `settings["instance.id"]` suffix.
 - WebDAV `SEARCH` is disabled and returns a friendly `501 Not Implemented` response.
 - `REPORT oc:filter-files` for favorites uses the `file_ids(owner, favorite, rel_path)` runtime

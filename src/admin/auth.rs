@@ -4,8 +4,8 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::{
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
         StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
     },
     middleware::Next,
     response::{IntoResponse, Response},
@@ -23,7 +23,7 @@ pub async fn require_admin(
         return unauthorized(&state.auth_realm);
     };
 
-    match state.user_store.verify(&username, &password).await {
+    match state.user_store.verify_cached(&username, &password).await {
         Ok(Some(principal)) if is_admin(&state, &principal.username) => {
             request.extensions_mut().insert(principal);
             next.run(request).await
