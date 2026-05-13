@@ -247,6 +247,10 @@ max_connections = 5
 
 [auth]
 realm = "Gono Cloud"
+
+[logging]
+loglevel = "notice"
+logfile = ""
 EOF
 
 echo "building gono-cloud"
@@ -255,8 +259,6 @@ cargo build --quiet --manifest-path "${ROOT}/Cargo.toml"
 echo "starting temporary gono-cloud on ${BASE_URL}"
 GONE_CLOUD_CONFIG="${CONFIG_FILE}" \
 GONE_CLOUD_INSECURE_HTTP=1 \
-GONE_CLOUD_LOG_FORMAT=text \
-RUST_LOG="${RUST_LOG:-info}" \
 "${ROOT}/target/debug/gono-cloud" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
 

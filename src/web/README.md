@@ -17,7 +17,9 @@ from `src/admin/html.rs` and may inline `admin.css` or serve it as a small stati
 
 Current implementation note: `/gono-admin/settings` is a read-only view of the effective `config.toml`
 values. Runtime configuration changes are made in `config.toml` and applied by restarting the
-service; SQLite `settings` only stores system-managed state such as `instance.id`.
+service; SQLite `settings` only stores system-managed state such as `instance.id`. Diagnostic
+logging controls, including WebDAV request timing, are displayed there but remain startup
+configuration from `config.toml`.
 
 ## Files
 

@@ -70,6 +70,8 @@ query behavior is:
   small-file uploads do not run the retention query on every file.
 - Notify Push file events are coalesced in a short per-user window before broadcasting to WebSocket
   listeners. Per-file queue/send logs are `debug` level to avoid log I/O becoming a hot path.
+- WebDAV service entry timing logs are `debug` level. Set `[logging] loglevel = "debug"` only while
+  monitoring per-request client latency.
 - WebDAV locks are stored in SQLite and guarded by a process-local gate shared by principal scope.
 - Uploads run a `statvfs`-style free-space preflight before ordinary `PUT`, chunking `MKCOL`, chunk
   writes, and final `MOVE .file`; failures return WebDAV `507 Insufficient Storage`.

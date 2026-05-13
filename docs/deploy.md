@@ -41,8 +41,15 @@ control in front of it.
 
 Runtime configuration is read from `config.toml` at startup. The `/gono-admin/settings` page is a
 read-only view of the effective config; it does not save changes. To change `server.base_url`,
-`auth.realm`, sync retention, notify push options, or admin access, edit `config.toml` and restart
-the service.
+`auth.realm`, sync retention, notify push options, logging diagnostics, or admin access, edit
+`config.toml` and restart the service.
+
+Logging is controlled by `[logging]`, using Redis-style names. `loglevel` defaults to `notice` and
+accepts `debug`, `verbose`, `notice`, and `warning` (`info`, `warn`, and `error` are accepted as
+aliases). `logfile` defaults to the empty string, which writes logs to stdout; set it to a path such
+as `/var/log/gono-cloud/gono-cloud.log` to append logs to a file. WebDAV service entry timing is
+marked as `debug`; it records method, path, status, peer address, depth, user agent, and elapsed
+milliseconds only when `loglevel = "debug"`.
 
 Default Linux layout:
 

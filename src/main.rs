@@ -1,24 +1,23 @@
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{fs::OpenOptions, net::SocketAddr, path::Path, time::Duration};
 
-use anyhow::{bail, Context};
-use axum_server::{tls_rustls::RustlsConfig, Handle};
+use anyhow::{Context, bail};
+use axum_server::{Handle, tls_rustls::RustlsConfig};
 use gono_cloud::{
-    build_router,
+    AppState, Config, build_router,
+    config::LoggingConfig,
     consistency::{self, RepairMode},
     dav_handler::chunked_upload,
     db::{self, AppPasswordScopeInput},
     permissions::PermissionLevel,
-    AppState, Config,
 };
 use sqlx::SqlitePool;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
-
     let command = Command::parse(std::env::args().skip(1))?;
     if command == Command::Help {
         print_help();
@@ -31,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
         Command::ConfigCheck => Config::load(&config_path)?,
         _ => Config::load_or_dev_default(&config_path)?,
     };
+    init_tracing(&config.logging)?;
     match command {
         Command::Serve => run_server(&config_path, config).await,
         Command::ConfigCheck => run_config_check(&config_path, config).await,
@@ -572,48 +572,33 @@ fn parse_cli_timestamp(value: &str) -> anyhow::Result<i64> {
         .with_context(|| format!("parse UNIX timestamp {value:?}"))
 }
 
-fn init_tracing() {
-    let env_filter = EnvFilter::from_default_env();
+fn init_tracing(logging: &LoggingConfig) -> anyhow::Result<()> {
+    let level = logging.tracing_level()?;
+    let env_filter = EnvFilter::new(format!("warn,gono_cloud={level}"));
 
-    match log_format_from_env() {
-        LogFormat::Text => tracing_subscriber::registry()
+    if logging.logfile.trim().is_empty() {
+        tracing_subscriber::registry()
             .with(env_filter)
             .with(tracing_subscriber::fmt::layer())
-            .init(),
-        LogFormat::Compact => tracing_subscriber::registry()
+            .init();
+    } else {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&logging.logfile)
+            .with_context(|| format!("open logging.logfile {}", logging.logfile))?;
+        let (writer, guard) = tracing_appender::non_blocking(file);
+        keep_log_guard(guard);
+        tracing_subscriber::registry()
             .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().compact())
-            .init(),
-        LogFormat::Json => tracing_subscriber::registry()
-            .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().json())
-            .init(),
+            .with(tracing_subscriber::fmt::layer().with_writer(writer))
+            .init();
     }
+    Ok(())
 }
 
-fn log_format_from_env() -> LogFormat {
-    std::env::var("GONE_CLOUD_LOG_FORMAT")
-        .ok()
-        .as_deref()
-        .map(LogFormat::parse)
-        .unwrap_or(LogFormat::Text)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogFormat {
-    Text,
-    Compact,
-    Json,
-}
-
-impl LogFormat {
-    fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "json" => Self::Json,
-            "compact" => Self::Compact,
-            _ => Self::Text,
-        }
-    }
+fn keep_log_guard(guard: WorkerGuard) {
+    Box::leak(Box::new(guard));
 }
 
 fn spawn_axum_server_shutdown(handle: Handle<SocketAddr>) -> tokio::task::JoinHandle<()> {

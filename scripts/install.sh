@@ -39,8 +39,6 @@ AUTH_REALM="Gono Cloud"
 ADMIN_ENABLED="false"
 ADMIN_USERS=""
 MAX_CONNECTIONS="5"
-LOG_FORMAT="text"
-RUST_LOG_VALUE="info"
 INSECURE_HTTP="1"
 LOCAL_BIN=""
 PRESERVE_CONFIG="0"
@@ -849,6 +847,10 @@ max_debounce_secs = 15
 ping_interval_secs = 30
 auth_timeout_secs = 15
 max_connection_secs = 0
+
+[logging]
+loglevel = "notice"
+logfile = ""
 EOF
   chown root:"${RUN_GROUP}" "${CONFIG_FILE}"
   chmod 0640 "${CONFIG_FILE}"
@@ -884,8 +886,6 @@ Group=${RUN_GROUP}
 WorkingDirectory=${STATE_DIR}
 Environment=GONE_CLOUD_CONFIG=${CONFIG_FILE}
 Environment=GONE_CLOUD_INSECURE_HTTP=${INSECURE_HTTP}
-Environment=GONE_CLOUD_LOG_FORMAT=${LOG_FORMAT}
-Environment=RUST_LOG=${RUST_LOG_VALUE}
 ExecStart=${BIN_PATH}
 Restart=on-failure
 RestartSec=5s
@@ -933,10 +933,6 @@ write_launchd_plist() {
         <string>$(xml_escape "${CONFIG_FILE}")</string>
         <key>GONE_CLOUD_INSECURE_HTTP</key>
         <string>$(xml_escape "${INSECURE_HTTP}")</string>
-        <key>GONE_CLOUD_LOG_FORMAT</key>
-        <string>$(xml_escape "${LOG_FORMAT}")</string>
-        <key>RUST_LOG</key>
-        <string>$(xml_escape "${RUST_LOG_VALUE}")</string>
     </dict>
     <key>StandardOutPath</key>
     <string>$(xml_escape "${LOG_DIR}/stdout.log")</string>

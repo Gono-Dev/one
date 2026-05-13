@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     task::{Context, Poll},
+    time::Instant,
 };
 
 use axum::{
@@ -21,7 +22,7 @@ use dav_server::{DavConfig, DavHandler};
 use filetime::FileTime;
 use futures_util::future::BoxFuture;
 use tower::Service;
-use tracing::{error, warn};
+use tracing::{Level, debug, error, warn};
 use xmltree::{Element, Namespace, XMLNode};
 
 use crate::{
@@ -67,6 +68,46 @@ impl NcDavService {
     }
 
     async fn dispatch(self, request: Request<Body>) -> Response<Body> {
+        if !tracing::enabled!(Level::DEBUG) {
+            return self.dispatch_inner(request).await;
+        }
+
+        let started = Instant::now();
+        let method = request.method().clone();
+        let original_uri = original_request_uri(&request);
+        let path = original_uri.path().to_owned();
+        let peer_addr = peer_addr_from_request(&request)
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        let user_agent = request
+            .headers()
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let depth = request
+            .headers()
+            .get("depth")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let response = self.dispatch_inner(request).await;
+        let status = response.status().as_u16();
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        debug!(
+            %peer_addr,
+            method = %method,
+            path,
+            status,
+            elapsed_ms = format_args!("{elapsed_ms:.3}"),
+            depth,
+            user_agent,
+            "webdav request completed"
+        );
+        response
+    }
+
+    async fn dispatch_inner(self, request: Request<Body>) -> Response<Body> {
         let original_uri = original_request_uri(&request);
         if request_target_has_fragment(&original_uri) {
             warn!(uri = %original_uri, "rejecting WebDAV request URI with fragment");

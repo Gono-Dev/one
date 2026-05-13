@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -15,6 +15,8 @@ pub struct Config {
     pub sync: SyncConfig,
     #[serde(default)]
     pub notify_push: NotifyPushConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +113,41 @@ pub struct NotifyPushConfig {
     pub auth_timeout_secs: u64,
     #[serde(default = "NotifyPushConfig::default_max_connection_secs")]
     pub max_connection_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingConfig {
+    #[serde(default = "LoggingConfig::default_loglevel")]
+    pub loglevel: String,
+    #[serde(default)]
+    pub logfile: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            loglevel: Self::default_loglevel(),
+            logfile: String::new(),
+        }
+    }
+}
+
+impl LoggingConfig {
+    fn default_loglevel() -> String {
+        "notice".to_owned()
+    }
+
+    pub fn tracing_level(&self) -> anyhow::Result<&'static str> {
+        match self.loglevel.trim().to_ascii_lowercase().as_str() {
+            "debug" => Ok("debug"),
+            "verbose" | "notice" | "info" => Ok("info"),
+            "warning" | "warn" => Ok("warn"),
+            "error" => Ok("error"),
+            other => bail!(
+                "invalid logging.loglevel {other:?}; expected debug, verbose, notice, warning, info, warn, or error"
+            ),
+        }
+    }
 }
 
 impl Default for NotifyPushConfig {
@@ -226,6 +263,7 @@ impl Config {
             admin: AdminConfig::default(),
             sync: SyncConfig::default(),
             notify_push: NotifyPushConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }

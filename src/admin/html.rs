@@ -268,6 +268,10 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
         config.notify_push.max_connection_secs,
     );
     let admin_enabled = readonly_input_bool("admin_enabled", "Enabled", config.admin.enabled);
+    let logging_loglevel =
+        readonly_input_text("logging_loglevel", "Log level", &config.logging.loglevel);
+    let logging_logfile =
+        readonly_input_text("logging_logfile", "Log file", &config.logging.logfile);
     let storage_data_dir = readonly_text("Data dir", &config.storage.data_dir);
     let storage_xattr_ns = readonly_text("Xattr namespace", &config.storage.xattr_ns);
     let storage_upload_min_free_bytes = readonly_text(
@@ -363,6 +367,13 @@ pub fn render_settings_page(principal_username: &str, config: &Config) -> String
                 <label for="admin_users">Admin users</label>
                 <textarea class="input textarea" id="admin_users" name="admin_users" rows="3" readonly aria-readonly="true">{admin_users}</textarea>
               </div>
+            </div>
+          </section>
+          <section class="card" aria-labelledby="logging-settings-title">
+            <div class="card-header"><h2 id="logging-settings-title">Logging</h2></div>
+            <div class="settings-grid">
+              {logging_loglevel}
+              {logging_logfile}
             </div>
           </section>
           <section class="card" aria-labelledby="storage-settings-title">
