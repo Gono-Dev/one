@@ -2,8 +2,10 @@ use std::{
     future,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{Arc, Mutex},
 };
 
+use dashmap::DashMap;
 use dav_server::{
     davpath::DavPath,
     fs::{
@@ -12,17 +14,21 @@ use dav_server::{
     },
     localfs::LocalFs,
 };
-use futures_util::{stream, FutureExt, StreamExt};
+use futures_util::FutureExt;
 use http::StatusCode;
 use sqlx::SqlitePool;
 use std::time::SystemTime;
-use tracing::debug;
 
 use crate::{db, storage};
 
 const OC_NS: &str = "http://owncloud.org/ns";
 const NC_NS: &str = "http://nextcloud.org/ns";
-const PROPFIND_PREFETCH_CONCURRENCY: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PropfindLiveProps {
+    Include,
+    RequestedOnly,
+}
 
 #[derive(Clone)]
 pub struct NcLocalFs {
@@ -32,6 +38,15 @@ pub struct NcLocalFs {
     owner: String,
     instance_id: String,
     xattr_ns: String,
+    dead_props_may_exist: Arc<Mutex<Option<bool>>>,
+    propfind_live_props: PropfindLiveProps,
+    record_cache: Arc<DashMap<PathBuf, CachedFileRecord>>,
+}
+
+#[derive(Clone)]
+struct CachedFileRecord {
+    record: db::FileRecord,
+    is_collection: bool,
 }
 
 impl NcLocalFs {
@@ -41,6 +56,7 @@ impl NcLocalFs {
         owner: impl Into<String>,
         instance_id: impl Into<String>,
         xattr_ns: impl Into<String>,
+        propfind_live_props: PropfindLiveProps,
     ) -> Self {
         let root = root.as_ref().to_path_buf();
         let inner = *LocalFs::new(&root, false, false, cfg!(target_os = "macos"));
@@ -51,6 +67,9 @@ impl NcLocalFs {
             owner: owner.into(),
             instance_id: instance_id.into(),
             xattr_ns: xattr_ns.into(),
+            dead_props_may_exist: Arc::new(Mutex::new(None)),
+            propfind_live_props,
+            record_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -59,9 +78,13 @@ impl NcLocalFs {
         path: &DavPath,
         do_content: bool,
     ) -> anyhow::Result<Vec<DavProp>> {
-        let record = self.ensure_record(path).await?;
-        let abs_path = storage::safe_existing_path(&self.root, path.as_rel_ospath())?;
-        let is_collection = std::fs::metadata(&abs_path)?.is_dir();
+        if self.propfind_live_props == PropfindLiveProps::RequestedOnly {
+            return Ok(Vec::new());
+        }
+
+        let cached = self.cached_record(path).await?;
+        let record = &cached.record;
+        let is_collection = cached.is_collection;
         let mut props = vec![
             nc_prop("has-preview", "false", do_content),
             oc_prop("fileid", &record.oc_file_id, do_content),
@@ -90,15 +113,132 @@ impl NcLocalFs {
             }
         }
 
-        for dead_prop in db::list_dead_props(&self.db, &self.owner, path.as_rel_ospath()).await? {
-            props.push(dead_prop_to_dav_prop(dead_prop, do_content));
+        if self.dead_props_may_exist().await? {
+            for dead_prop in
+                db::list_dead_props(&self.db, &self.owner, path.as_rel_ospath()).await?
+            {
+                props.push(dead_prop_to_dav_prop(dead_prop, do_content));
+            }
         }
 
         Ok(props)
     }
 
+    async fn prop_for_path(&self, path: &DavPath, prop: &DavProp) -> anyhow::Result<Vec<u8>> {
+        if prop.namespace.as_deref() == Some(NC_NS) && prop.name == "has-preview" {
+            return Ok(nc_prop("has-preview", "false", true)
+                .xml
+                .expect("known prop has xml"));
+        }
+
+        if prop.namespace.as_deref() == Some(OC_NS) {
+            match prop.name.as_str() {
+                "owner-id" => {
+                    return Ok(oc_prop("owner-id", &self.owner, true)
+                        .xml
+                        .expect("known prop has xml"));
+                }
+                "owner-display-name" => {
+                    return Ok(oc_prop("owner-display-name", &self.owner, true)
+                        .xml
+                        .expect("known prop has xml"));
+                }
+                "fileid" | "id" | "permissions" | "favorite" => {
+                    let cached = self.cached_record(path).await?;
+                    let record = &cached.record;
+                    let is_collection = cached.is_collection;
+                    let prop = match prop.name.as_str() {
+                        "fileid" => oc_prop("fileid", &record.oc_file_id, true),
+                        "id" => {
+                            oc_prop("id", &format!("{}:{}", self.owner, record.oc_file_id), true)
+                        }
+                        "permissions" => oc_prop(
+                            "permissions",
+                            permissions_string(record.permissions, is_collection),
+                            true,
+                        ),
+                        "favorite" => {
+                            oc_prop("favorite", if record.favorite { "1" } else { "0" }, true)
+                        }
+                        _ => unreachable!("known prop match"),
+                    };
+                    return Ok(prop.xml.expect("known prop has xml"));
+                }
+                _ => {}
+            }
+        }
+
+        db::get_dead_prop(
+            &self.db,
+            &self.owner,
+            path.as_rel_ospath(),
+            prop.namespace.as_deref(),
+            &prop.name,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("property not found"))
+    }
+
+    async fn dead_props_may_exist(&self) -> anyhow::Result<bool> {
+        if let Some(value) = *self
+            .dead_props_may_exist
+            .lock()
+            .expect("dead props cache poisoned")
+        {
+            return Ok(value);
+        }
+
+        let value = db::owner_has_dead_props(&self.db, &self.owner).await?;
+        *self
+            .dead_props_may_exist
+            .lock()
+            .expect("dead props cache poisoned") = Some(value);
+        Ok(value)
+    }
+
+    fn mark_dead_props_may_exist(&self) {
+        *self
+            .dead_props_may_exist
+            .lock()
+            .expect("dead props cache poisoned") = Some(true);
+    }
+
     async fn ensure_record(&self, path: &DavPath) -> anyhow::Result<db::FileRecord> {
         self.ensure_record_for_rel_path(path.as_rel_ospath()).await
+    }
+
+    async fn cached_record(&self, path: &DavPath) -> anyhow::Result<CachedFileRecord> {
+        self.cached_record_for_rel_path(path.as_rel_ospath()).await
+    }
+
+    async fn cached_record_for_rel_path(
+        &self,
+        rel_path: &Path,
+    ) -> anyhow::Result<CachedFileRecord> {
+        if let Some(record) = self.record_cache.get(rel_path) {
+            return Ok(record.clone());
+        }
+
+        let abs_path = storage::safe_existing_path(&self.root, rel_path)?;
+        let metadata = std::fs::metadata(&abs_path)?;
+        let record = db::ensure_file_record(
+            &self.db,
+            db::FileRecordInput {
+                owner: &self.owner,
+                rel_path,
+                abs_path: &abs_path,
+                instance_id: &self.instance_id,
+                xattr_ns: &self.xattr_ns,
+            },
+        )
+        .await?;
+        let cached = CachedFileRecord {
+            record,
+            is_collection: metadata.is_dir(),
+        };
+        self.record_cache
+            .insert(rel_path.to_path_buf(), cached.clone());
+        Ok(cached)
     }
 
     async fn ensure_record_for_rel_path(&self, rel_path: &Path) -> anyhow::Result<db::FileRecord> {
@@ -164,34 +304,6 @@ impl NcLocalFs {
             .map(|_| ())
             .map_err(map_fs_error)
     }
-
-    async fn prefetch_child_records(&self, path: &DavPath) -> anyhow::Result<()> {
-        let rel_path = path.as_rel_ospath().to_path_buf();
-        let abs_path = storage::safe_existing_path(&self.root, &rel_path)?;
-        let mut entries = tokio::fs::read_dir(&abs_path).await?;
-        let mut children = Vec::new();
-
-        while let Some(entry) = entries.next_entry().await? {
-            children.push(rel_path.join(entry.file_name()));
-        }
-
-        stream::iter(children)
-            .for_each_concurrent(PROPFIND_PREFETCH_CONCURRENCY, |child_rel| {
-                let fs = self.clone();
-                async move {
-                    if let Err(err) = fs.ensure_record_for_rel_path(&child_rel).await {
-                        debug!(
-                            ?err,
-                            rel_path = %child_rel.display(),
-                            "failed to prefetch child file metadata"
-                        );
-                    }
-                }
-            })
-            .await;
-
-        Ok(())
-    }
 }
 
 impl DavFileSystem for NcLocalFs {
@@ -218,11 +330,6 @@ impl DavFileSystem for NcLocalFs {
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         async move {
             self.validate_existing(path)?;
-            if meta != ReadDirMeta::None {
-                if let Err(err) = self.prefetch_child_records(path).await {
-                    debug!(?err, path = %path, "failed to prefetch directory metadata");
-                }
-            }
             DavFileSystem::read_dir(&self.inner, path, meta).await
         }
         .boxed()
@@ -384,7 +491,10 @@ impl DavFileSystem for NcLocalFs {
                         )
                         .await
                         {
-                            Ok(_) => StatusCode::OK,
+                            Ok(_) => {
+                                self.mark_dead_props_may_exist();
+                                StatusCode::OK
+                            }
                             Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
                         },
                         None => StatusCode::BAD_REQUEST,
@@ -431,24 +541,9 @@ impl DavFileSystem for NcLocalFs {
         prop: DavProp,
     ) -> FsFuture<'a, Vec<u8>> {
         async move {
-            self.props_for_path(path, true)
+            self.prop_for_path(path, &prop)
                 .await
-                .map_err(map_fs_error)?
-                .into_iter()
-                .find(|candidate| {
-                    candidate.name == prop.name && candidate.namespace == prop.namespace
-                })
-                .and_then(|prop| prop.xml)
-                .or(db::get_dead_prop(
-                    &self.db,
-                    &self.owner,
-                    path.as_rel_ospath(),
-                    prop.namespace.as_deref(),
-                    &prop.name,
-                )
-                .await
-                .map_err(map_fs_error)?)
-                .ok_or(dav_server::fs::FsError::NotFound)
+                .map_err(|_| dav_server::fs::FsError::NotFound)
         }
         .boxed()
     }
@@ -507,11 +602,7 @@ fn prop_is_truthy(prop: &DavProp) -> bool {
 }
 
 pub(crate) fn permissions_string(_permissions: i64, is_collection: bool) -> &'static str {
-    if is_collection {
-        "RGDNVCK"
-    } else {
-        "RGDNVW"
-    }
+    if is_collection { "RGDNVCK" } else { "RGDNVW" }
 }
 
 fn map_fs_error(err: anyhow::Error) -> FsError {

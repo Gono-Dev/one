@@ -28,7 +28,7 @@ use crate::{
     auth::Principal,
     dav_handler::{
         chunked_upload,
-        fs::{NcLocalFs, permissions_string},
+        fs::{NcLocalFs, PropfindLiveProps, permissions_string},
         pathmap::{
             mount_prefix_for_path, original_request_uri, parse_rel_path_for_owner,
             path_for_rel_path, path_for_request_style, path_part, reject_parent_segments,
@@ -292,15 +292,16 @@ impl NcDavService {
                 return response;
             }
         }
-        let requested_props = if method.as_str() == "PROPFIND" {
-            let (buffered_request, requested_props) = match buffer_propfind_request(request).await {
-                Ok(result) => result,
-                Err(response) => return response,
-            };
+        let (requested_props, propfind_live_props) = if method.as_str() == "PROPFIND" {
+            let (buffered_request, requested_props, live_props) =
+                match buffer_propfind_request(request).await {
+                    Ok(result) => result,
+                    Err(response) => return response,
+                };
             request = buffered_request;
-            requested_props
+            (requested_props, live_props)
         } else {
-            None
+            (None, PropfindLiveProps::Include)
         };
         *request.uri_mut() = request_uri;
         let handler = DavHandler::builder()
@@ -310,6 +311,7 @@ impl NcDavService {
                 owner.clone(),
                 self.state.instance_id.clone(),
                 self.state.xattr_ns.clone(),
+                propfind_live_props,
             )))
             .locksystem(SqliteLs::for_principal(
                 self.state.db.clone(),
@@ -791,34 +793,41 @@ struct RequestedProp {
 
 async fn buffer_propfind_request(
     request: Request<Body>,
-) -> Result<(Request<Body>, Option<Vec<RequestedProp>>), Response<Body>> {
+) -> Result<(Request<Body>, Option<Vec<RequestedProp>>, PropfindLiveProps), Response<Body>> {
     let (parts, body) = request.into_parts();
     let bytes = to_bytes(body, PROPFIND_BODY_LIMIT).await.map_err(|err| {
         warn!(?err, "failed to buffer PROPFIND request body");
         (StatusCode::BAD_REQUEST, "Invalid PROPFIND request body").into_response()
     })?;
-    let requested_props = requested_propfind_props(&bytes);
+    let (live_props, requested_props) = inspect_propfind_request(&bytes);
     Ok((
         Request::from_parts(parts, Body::from(bytes)),
         requested_props,
+        live_props,
     ))
 }
 
-fn requested_propfind_props(body: &[u8]) -> Option<Vec<RequestedProp>> {
+fn inspect_propfind_request(body: &[u8]) -> (PropfindLiveProps, Option<Vec<RequestedProp>>) {
     if body.is_empty() {
-        return None;
+        return (PropfindLiveProps::Include, None);
     }
 
-    let root = Element::parse(Cursor::new(body)).ok()?;
+    let Some(root) = Element::parse(Cursor::new(body)).ok() else {
+        return (PropfindLiveProps::Include, None);
+    };
     if root.name != "propfind" || root.namespace.as_deref() != Some(DAV_NS) {
-        return None;
+        return (PropfindLiveProps::Include, None);
     }
 
-    let prop = root
+    let Some(prop) = root
         .children
         .iter()
         .filter_map(XMLNode::as_element)
-        .find(|element| element.name == "prop")?;
+        .find(|element| element.name == "prop")
+    else {
+        return (PropfindLiveProps::Include, None);
+    };
+
     let mut seen = HashSet::new();
     let mut props = Vec::new();
     for element in prop.children.iter().filter_map(XMLNode::as_element) {
@@ -832,7 +841,10 @@ fn requested_propfind_props(body: &[u8]) -> Option<Vec<RequestedProp>> {
     }
 
     let needs_compat = props.iter().any(needs_missing_propstat_compat);
-    (!props.is_empty() && needs_compat).then_some(props)
+    (
+        PropfindLiveProps::RequestedOnly,
+        (!props.is_empty() && needs_compat).then_some(props),
+    )
 }
 
 fn needs_missing_propstat_compat(prop: &RequestedProp) -> bool {

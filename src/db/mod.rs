@@ -1229,6 +1229,16 @@ pub async fn list_dead_props(
         .collect()
 }
 
+pub async fn owner_has_dead_props(pool: &SqlitePool, owner: &str) -> anyhow::Result<bool> {
+    let has_dead_props: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dead_props WHERE owner = ?1 LIMIT 1)")
+            .bind(owner)
+            .fetch_one(pool)
+            .await
+            .context("check owner dead props")?;
+    Ok(has_dead_props != 0)
+}
+
 pub async fn get_dead_prop(
     pool: &SqlitePool,
     owner: &str,

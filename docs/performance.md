@@ -63,6 +63,9 @@ query behavior is:
 - `REPORT oc:filter-files` for favorites uses the `file_ids(owner, favorite, rel_path)` runtime
   index first, then verifies each candidate through `safe_existing_path`, scope filtering, and a
   metadata refresh.
+- PROPFIND custom property handling distinguishes explicit `prop` requests from `allprop`: explicit
+  requests return only requested live oc:/nc: properties and use a per-request metadata cache, which
+  avoids duplicate Nextcloud properties and repeated SQLite/xattr lookups in very large directories.
 - `change_log` pruning runs per enabled local user at startup and is throttled after writes so large
   small-file uploads do not run the retention query on every file.
 - Notify Push file events are coalesced in a short per-user window before broadcasting to WebSocket
