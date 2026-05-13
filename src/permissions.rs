@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use axum::http::Method;
 
 use crate::auth::Principal;
@@ -116,6 +116,14 @@ pub fn default_scope() -> AppPasswordScope {
         storage_path: PathBuf::new(),
         permission: PermissionLevel::Full,
     }
+}
+
+pub fn has_unrestricted_full_access(principal: &Principal) -> bool {
+    principal.scopes.iter().any(|scope| {
+        scope.mount_path.as_os_str().is_empty()
+            && scope.storage_path.as_os_str().is_empty()
+            && scope.permission == PermissionLevel::Full
+    })
 }
 
 pub fn resolve_scope_for_client_path(
@@ -320,6 +328,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(client, PathBuf::from("Uploads/a.txt"));
+    }
+
+    #[test]
+    fn detects_unrestricted_full_access_scope() {
+        assert!(has_unrestricted_full_access(&principal(vec![
+            default_scope()
+        ])));
+        assert!(!has_unrestricted_full_access(&principal(vec![
+            AppPasswordScope {
+                id: 1,
+                mount_path: PathBuf::new(),
+                storage_path: PathBuf::new(),
+                permission: PermissionLevel::View,
+            }
+        ])));
+        assert!(!has_unrestricted_full_access(&principal(vec![
+            AppPasswordScope {
+                id: 1,
+                mount_path: PathBuf::from("Docs"),
+                storage_path: PathBuf::from("Projects"),
+                permission: PermissionLevel::Full,
+            }
+        ])));
     }
 
     #[test]

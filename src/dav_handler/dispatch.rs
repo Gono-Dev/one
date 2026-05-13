@@ -9,11 +9,11 @@ use std::{
 };
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{Body, to_bytes},
     extract::connect_info::ConnectInfo,
     http::{
-        header::{HeaderName, CONTENT_LENGTH},
         HeaderMap, HeaderValue, Method, Request, Response, StatusCode,
+        header::{CONTENT_LENGTH, HeaderName},
     },
     response::IntoResponse,
 };
@@ -28,7 +28,7 @@ use crate::{
     auth::Principal,
     dav_handler::{
         chunked_upload,
-        fs::{permissions_string, NcLocalFs},
+        fs::{NcLocalFs, permissions_string},
         pathmap::{
             mount_prefix_for_path, original_request_uri, parse_rel_path_for_owner,
             path_for_rel_path, path_for_request_style, path_part, reject_parent_segments,
@@ -871,6 +871,9 @@ async fn rewrite_multistatus_hrefs(
     principal: &Principal,
 ) -> Response<Body> {
     if response.status() != StatusCode::MULTI_STATUS {
+        return response;
+    }
+    if permissions::has_unrestricted_full_access(principal) {
         return response;
     }
 
