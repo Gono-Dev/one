@@ -983,6 +983,7 @@ const STYLE: &str = r#"
   --radius: 8px;
 }
 * { box-sizing: border-box; }
+html { scrollbar-gutter: stable; }
 [hidden] { display: none !important; }
 body {
   margin: 0;
